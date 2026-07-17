@@ -895,6 +895,7 @@ pub fn merge_all_chunks(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::chunk_scan::scan_chunk;
     use smallvec::smallvec;
 
     #[test]
@@ -1334,5 +1335,60 @@ mod tests {
         assert!(merged.contains_key(&10));
         assert!(merged.contains_key(&20));
         assert!(merged.contains_key(&30));
+    }
+
+    #[test]
+    fn test_external_return_x0_definition_propagates_across_chunks() {
+        let first_part = concat!(
+            "[test.so] 0x1000!0x0 mov x0, #0x1\n",
+            "[test.so] 0x1004!0x4 blr x1\n",
+            "call func: external()\n",
+            "ret: 0x2\n",
+        );
+        let trace = concat!(
+            "[test.so] 0x1000!0x0 mov x0, #0x1\n",
+            "[test.so] 0x1004!0x4 blr x1\n",
+            "call func: external()\n",
+            "ret: 0x2\n",
+            "[test.so] 0x1008!0x8 str x0, [sp]; x0=0x2 sp=0x2000 mem_w=0x2000\n",
+        );
+        let split = first_part.len();
+        let data = trace.as_bytes();
+
+        let chunk0 = scan_chunk(
+            data,
+            0,
+            split,
+            0,
+            TraceFormat::Gumtrace,
+            true,
+            false,
+            true,
+            None,
+        );
+        let chunk1 = scan_chunk(
+            data,
+            split,
+            data.len(),
+            4,
+            TraceFormat::Gumtrace,
+            true,
+            false,
+            true,
+            None,
+        );
+        let merged = merge_all_chunks(
+            vec![chunk0, chunk1],
+            TraceFormat::Gumtrace,
+            true,
+            true,
+            None,
+            None,
+        )
+        .unwrap();
+        let deps = &merged.scan_state.deps;
+
+        assert!(deps.patch_row(4).contains(&3));
+        assert!(!deps.row(4).contains(&0));
     }
 }

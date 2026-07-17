@@ -270,6 +270,14 @@ pub fn extract_insn_offset(line: &str) -> u64 {
 
 /// 从 "=> " 之后提取寄存器变更并更新状态
 pub fn update_reg_values(values: &mut [u64; RegId::COUNT], line: &str) {
+    // GumTrace represents an external call's return as a separate special line.
+    // It has no register-change arrow, but semantically defines X0.
+    if let Some(value) = line.trim().strip_prefix("ret: ") {
+        if let Ok(value) = u64::from_str_radix(value.trim_start_matches("0x"), 16) {
+            values[RegId::X0.0 as usize] = value;
+        }
+        return;
+    }
     if let Some(arrow_pos) = line.find(" => ").or_else(|| line.find(" -> ")) {
         update_reg_values_at(values, line, arrow_pos);
     }
@@ -340,5 +348,20 @@ pub fn update_reg_values_at(values: &mut [u64; RegId::COUNT], line: &str, arrow_
                 }
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn gumtrace_external_return_updates_x0_checkpoint_value() {
+        let mut values = [u64::MAX; RegId::COUNT];
+        values[RegId::X0.0 as usize] = 0x2812eaa70;
+
+        update_reg_values(&mut values, "ret: 0x1a19a3a19");
+
+        assert_eq!(values[RegId::X0.0 as usize], 0x1a19a3a19);
     }
 }

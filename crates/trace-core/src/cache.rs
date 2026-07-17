@@ -10,6 +10,7 @@ const MAGIC_V4: &[u8; 8] = b"TCACHE04";
 const HEAD_SIZE: usize = 1024 * 1024; // 1MB
 const HEADER_LEN_V4: usize = 64;
 
+
 static CACHE_DIR_OVERRIDE: RwLock<Option<PathBuf>> = RwLock::new(None);
 
 pub fn set_cache_dir_override(path: Option<PathBuf>) {
@@ -242,7 +243,14 @@ pub fn load_gumtrace_extra(
 /// 删除指定文件的所有缓存
 pub fn delete_cache(file_path: &str) {
     // New section-based cache suffixes
-    for suffix in [".p2.cache", ".scan.cache", ".lidx.cache", ".strings.bin", ".gum-extra.bin", ".crypto.bin"] {
+    for suffix in [
+        ".p2.cache",
+        ".scan.cache",
+        ".lidx.cache",
+        ".strings.bin",
+        ".gum-extra.bin",
+        ".crypto.bin",
+    ] {
         if let Some(p) = cache_path_ext(file_path, suffix) {
             let _ = std::fs::remove_file(p);
         }
