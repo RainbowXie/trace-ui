@@ -193,6 +193,7 @@ pub fn scan_chunk(
                         });
                     }
                     gumtrace_parser::SpecialLine::Ret { value } => {
+                        reg_last_def.insert(RegId::X0, i);
                         gumtrace_annot_events.push(GumtraceAnnotEvent::SpecialLine {
                             seq: i,
                             special: SpecialLineData::Ret {
@@ -1000,6 +1001,36 @@ mod tests {
             row2.iter().any(|&d| d == (1 | CONTROL_DEP_BIT)),
             "mov should have control dep on b.eq"
         );
+    }
+
+    #[test]
+    fn test_scan_chunk_external_return_redefines_x0() {
+        let trace = concat!(
+            "[Snapchat] 0x104a374d0!0x7af4d0 ldr x0, [sp, #0x130]; x0=0x1 sp=0x16d40e810 mem_r=0x16d40e940 -> x0=0x2812eaa70 \n",
+            "[Snapchat] 0x104a374d4!0x7af4d4 blr x8; x8=0x19efbf170 \n",
+            "call func: sel_registerName()\n",
+            "ret: 0x1a19a3a19\n",
+            "[Snapchat] 0x104a374d8!0x7af4d8 adrp x13, #0x110fbf000; x13=0x110fbfeb0 -> x13=0x110fbf000 \n",
+            "[Snapchat] 0x104a374dc!0x7af4dc add x13, x13, #0xeb0; x13=0x110fbf000 x13=0x110fbf000 -> x13=0x110fbfeb0 \n",
+            "[Snapchat] 0x104a374e0!0x7af4e0 str x0, [sp, #0xe0]; x0=0x1a19a3a19 sp=0x16d40e810 mem_w=0x16d40e8f0 \n",
+        );
+        let data = trace.as_bytes();
+
+        let result = scan_chunk(
+            data,
+            0,
+            data.len(),
+            0,
+            TraceFormat::Gumtrace,
+            true,
+            false,
+            true,
+            None,
+        );
+        let deps = result.deps.row(6);
+
+        assert!(deps.contains(&3));
+        assert!(!deps.contains(&0));
     }
 
     #[test]

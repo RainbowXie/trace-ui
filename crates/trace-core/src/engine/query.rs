@@ -909,6 +909,13 @@ impl super::TraceEngine {
                                 def_seq = Some(s);
                                 break;
                             }
+                        } else if format == TraceFormat::Gumtrace
+                            && target_reg == RegId::X0
+                            && matches!(gumtrace_parser::parse_special_line(line_str),
+                                Some(gumtrace_parser::SpecialLine::Ret { .. }))
+                        {
+                            def_seq = Some(s);
+                            break;
                         }
                     }
                 }
@@ -938,6 +945,13 @@ impl super::TraceEngine {
                                 redefined_seq = Some(s);
                                 break;
                             }
+                        } else if format == TraceFormat::Gumtrace
+                            && target_reg == RegId::X0
+                            && matches!(gumtrace_parser::parse_special_line(line_str),
+                                Some(gumtrace_parser::SpecialLine::Ret { .. }))
+                        {
+                            redefined_seq = Some(s);
+                            break;
                         }
                     }
                 }
