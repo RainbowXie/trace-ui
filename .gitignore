@@ -27,6 +27,7 @@ CLAUDE.md
 
 # Superpowers
 .superpowers/
+.worktrees/
 
 # AI workflow artifacts
 task_plan.md
