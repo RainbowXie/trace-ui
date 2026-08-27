@@ -387,13 +387,23 @@ fn find_reg_value_with_alias(bytes: &[u8], reg_name: &str, start_pos: usize) -> 
         })
 }
 
+/// GumTrace 一行内所有 memory marker 的解析结果。
+/// `first` 是第一个 marker（历史行为：单 marker 事件的读写方向与地址）；
+/// `any_write` 记录是否存在任意 mem_w=，atomic RMW 的读/写两个 marker 都指向
+/// 同一次原子操作，写失效必须与它们的出现顺序无关。
+struct GumMemMarkers {
+    first: (bool, u64),
+    any_write: bool,
+}
+
 /// Find mem_w=0xADDR or mem_r=0xADDR in gumtrace format.
 ///
 /// marker 必须解析为完整的十六进制地址：十六进制前缀之外的后缀（如
 /// `0x2000oops`）、缺失数字、或同一行任何其他损坏的 marker 都使整个事件
 /// fail-closed，不能取前缀或静默跳过。
-fn parse_gumtrace_mem_markers(search: &[u8]) -> Option<(bool, u64)> {
+fn parse_gumtrace_mem_markers(search: &[u8]) -> Option<GumMemMarkers> {
     let mut first: Option<(bool, u64)> = None;
+    let mut any_write = false;
     let mut cursor = 0usize;
     loop {
         let w = memmem::find(&search[cursor..], b"mem_w=").map(|p| cursor + p);
@@ -427,9 +437,10 @@ fn parse_gumtrace_mem_markers(search: &[u8]) -> Option<(bool, u64)> {
         if first.is_none() {
             first = Some((is_write, addr));
         }
+        any_write |= is_write;
         cursor = pos + 6;
     }
-    first
+    first.map(|first| GumMemMarkers { first, any_write })
 }
 
 fn find_gumtrace_mem_op(
@@ -442,11 +453,13 @@ fn find_gumtrace_mem_op(
     lane_index: Option<u8>,
     lane_elem_width: Option<u8>,
 ) -> Option<MemOp> {
-    let (raw_is_write, addr) = parse_gumtrace_mem_markers(search)?;
+    let markers = parse_gumtrace_mem_markers(search)?;
+    let (raw_is_write, addr) = markers.first;
     // 根据助记符覆盖 is_write：GumTrace 可能对 ldp 等 LOAD 指令错误标记 mem_w。
-    // atomic RMW 两种标记都可能出现（读旧值/写新值），保留原始标记。
+    // atomic RMW 的读旧值/写新值是同一操作的两次标注，只要出现写 marker 就按
+    // 写处理（使访问范围失效），与 marker 顺序无关。
     let is_write = if is_atomic_rmw(mnemonic) {
-        raw_is_write
+        markers.any_write
     } else if mnemonic.starts_with("ld") {
         false
     } else if mnemonic.starts_with("st") {
@@ -484,7 +497,7 @@ fn find_gumtrace_mem_op(
             let ss = search_start?;
             if is_simd_reg_name(reg_name) {
                 let full = find_simd_reg_u128(full_bytes, reg_name, ss)?;
-                Some(extract_simd_lane_value(full, elem_width, lane_index))
+                extract_simd_lane_value(full, elem_width, lane_index)
             } else {
                 let raw_val = find_reg_value_with_alias(full_bytes, reg_name, ss)?;
                 let mask = if elem_width >= 8 {
@@ -521,7 +534,7 @@ fn find_gumtrace_mem_op(
                 let ss = search_start?;
                 if is_simd_reg_name(reg_name) {
                     let full = find_simd_reg_u128(full_bytes, reg_name, ss)?;
-                    Some(extract_simd_lane_value(full, elem_width, None))
+                    extract_simd_lane_value(full, elem_width, None)
                 } else {
                     let raw_val = find_reg_value_with_alias(full_bytes, reg_name, ss)?;
                     let mask = if elem_width >= 8 { u64::MAX } else { (1u64 << (elem_width as u32 * 8)) - 1 };

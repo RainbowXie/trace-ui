@@ -23,8 +23,14 @@ const MAX_PATTERN_SIZE: usize = 64 * 1024 * 1024;
 const MAX_PUBLIC_RESPONSE_BYTES: usize = 8 * 1024 * 1024;
 const ANCHOR_SIZE: usize = 8;
 const CACHE_MAGIC: &[u8; 8] = b"TMSRCH01";
-const CACHE_COMPAT_VERSION: &[u8] = b"memory-search-v3";
+const CACHE_COMPAT_VERSION: &[u8] = b"memory-search-v4";
+/// header 字段区长度；其后紧跟 32 字节的字段区 SHA-256 摘要。
 const CACHE_HEADER_LEN: usize = 120;
+/// 摘要长度；损坏的 count/格式位/过滤器若未同步重算摘要即被拒绝并重建。
+const CACHE_HEADER_DIGEST_LEN: usize = 32;
+fn cache_header_total_len() -> u64 {
+    (CACHE_HEADER_LEN + CACHE_HEADER_DIGEST_LEN) as u64
+}
 const CACHE_RECORD_LEN: usize = 16;
 /// 每条 record 的完整性 tag 长度；tag 绑定 record 内容与其序号。
 const CACHE_TAG_LEN: usize = 8;
@@ -732,11 +738,15 @@ fn ensure_trace_unchanged(data: &[u8], expected_hash: &[u8; 32]) -> Result<()> {
 
 // ── fd fingerprint：helper 的受验证内容身份复用 ──
 
-/// 同一 fd 的元数据签名。dev/ino/len/mtime/ctime 任一变化都意味着内容可能
-/// 已变，此时持久化 fingerprint 一律失效。
+/// 同一 fd 的文件身份签名（dev/ino/len/mtime/ctime）。任一变化都意味着内容
+/// 可能已变，此时持久化 fingerprint 一律失效。
+///
+/// 调用方（fd helper）必须在 mmap trace **之前**取得基线签名并传入
+/// `search_memory_fd_verified_with_signature`，否则 mmap 与首次 fstat 之间的
+/// 文件增长会把旧内容绑定到新长度的身份上。
 #[cfg(unix)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-struct FdSignature {
+pub struct FdSignature {
     dev: u64,
     ino: u64,
     len: u64,
@@ -747,7 +757,7 @@ struct FdSignature {
 }
 
 #[cfg(unix)]
-fn fd_signature(file: &File) -> Result<FdSignature> {
+pub fn fd_signature(file: &File) -> Result<FdSignature> {
     use std::os::unix::fs::MetadataExt;
     let metadata = file.metadata().map_err(TraceError::Io)?;
     Ok(FdSignature {
@@ -779,11 +789,13 @@ fn fingerprint_path(signature: &FdSignature) -> Option<PathBuf> {
 fn load_fd_fingerprint(signature: &FdSignature) -> Option<[u8; 32]> {
     use std::os::unix::fs::OpenOptionsExt;
     let path = fingerprint_path(signature)?;
-    // no-follow + fstat + 精确长度：FIFO 会阻塞读、符号链接可指向任意目标、
-    // 超大文件会导致不受控分配，全部在读取前拒绝。
+    // no-follow + non-block + fstat + 精确长度：符号链接可指向任意目标，
+    // FIFO/设备文件会在 open() 或 read() 上永久阻塞，超大文件会导致不受控
+    // 分配。O_NONBLOCK 让恶意 FIFO 立即返回打开成功、随后被 fstat 的
+    // regular-file 检查拒绝；对普通文件该标志没有任何副作用。
     let mut file = OpenOptions::new()
         .read(true)
-        .custom_flags(libc::O_NOFOLLOW)
+        .custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK)
         .open(path)
         .ok()?;
     let metadata = file.metadata().ok()?;
@@ -850,8 +862,29 @@ pub fn search_memory_fd_verified(
     options: MemorySearchOptions,
     probe: Option<&mut dyn FnMut(FingerprintSource)>,
 ) -> Result<MemorySearchOccurrenceResult> {
+    let baseline = fd_signature(file)?;
+    search_memory_fd_verified_with_signature(file, data, format, options, &baseline, probe)
+}
+
+/// 同 `search_memory_fd_verified`，但签名基线由调用方在 mmap **之前**取得：
+/// 若 fd 在 mmap 与本调用之间发生变化（如文件增长），立即报错而不是把旧
+/// 内容的 hash 绑定到新长度签名上。
+#[cfg(unix)]
+pub fn search_memory_fd_verified_with_signature(
+    file: &File,
+    data: &[u8],
+    format: TraceFormat,
+    options: MemorySearchOptions,
+    baseline: &FdSignature,
+    probe: Option<&mut dyn FnMut(FingerprintSource)>,
+) -> Result<MemorySearchOccurrenceResult> {
     validate_options(&options)?;
-    let before = fd_signature(file)?;
+    let before = *baseline;
+    if fd_signature(file)? != before {
+        return Err(TraceError::CacheError(
+            "trace fd changed between mmap and the start of the search".to_string(),
+        ));
+    }
     let trace_hash = match load_fd_fingerprint(&before) {
         Some(hash) => {
             // 复用前复验：读取 fingerprint 文件期间 fd 可能已被改写。
@@ -932,14 +965,20 @@ fn load_cache_page(
     content_identity: &str,
 ) -> Option<CachePage> {
     let metadata = fs::metadata(path).ok()?;
-    if !metadata.is_file() || metadata.len() < CACHE_HEADER_LEN as u64 {
+    if !metadata.is_file() || metadata.len() < cache_header_total_len() {
         return None;
     }
     let mut file = File::open(path).ok()?;
-    let mut header = [0u8; CACHE_HEADER_LEN];
-    file.read_exact(&mut header).ok()?;
+    // 字段区 + 摘要一起读入；摘要不一致即整体作废走重建。
+    let mut header_full = vec![0u8; CACHE_HEADER_LEN + CACHE_HEADER_DIGEST_LEN];
+    file.read_exact(&mut header_full).ok()?;
+    let header: &[u8; CACHE_HEADER_LEN] = header_full[..CACHE_HEADER_LEN].try_into().ok()?;
     if &header[0..8] != CACHE_MAGIC
-        || u64::from_le_bytes(header[8..16].try_into().ok()?) != trace_len
+        || cache_header_digest(header) != header_full[CACHE_HEADER_LEN..]
+    {
+        return None;
+    }
+    if u64::from_le_bytes(header[8..16].try_into().ok()?) != trace_len
         || &header[16..48] != trace_hash
         || &header[48..80] != pattern_hash
         || header[80]
@@ -965,7 +1004,7 @@ fn load_cache_page(
     let count = u64::from_le_bytes(header[112..120].try_into().ok()?);
     let records_bytes = count.checked_mul(CACHE_RECORD_LEN as u64)?;
     let tags_bytes = count.checked_mul(CACHE_TAG_LEN as u64)?;
-    let expected_len = (CACHE_HEADER_LEN as u64)
+    let expected_len = cache_header_total_len()
         .checked_add(records_bytes)?
         .checked_add(tags_bytes)?;
     if metadata.len() != expected_len {
@@ -983,7 +1022,7 @@ fn load_cache_page(
             has_more: false,
         });
     }
-    let tags_offset = (CACHE_HEADER_LEN as u64).checked_add(records_bytes)?;
+    let tags_offset = cache_header_total_len().checked_add(records_bytes)?;
     // 除请求页外回读前一条边界 record：跨页的重复/逆序只能靠它发现。
     // 读取量仍是 O(page size + 1)，不会退化成从头扫描。
     let read_start = if page_start > 0 {
@@ -993,7 +1032,7 @@ fn load_cache_page(
     };
     let read_len = page_end - read_start;
     let record_offset = read_start.checked_mul(CACHE_RECORD_LEN as u64)?;
-    let record_offset = (CACHE_HEADER_LEN as u64).checked_add(record_offset)?;
+    let record_offset = cache_header_total_len().checked_add(record_offset)?;
     file.seek(std::io::SeekFrom::Start(record_offset)).ok()?;
     let record_bytes = (read_len as usize).checked_mul(CACHE_RECORD_LEN)?;
     let mut records = vec![0u8; record_bytes];
@@ -1099,7 +1138,7 @@ fn stream_cache(
             .open(&temp_path)
             .map_err(TraceError::Io)?;
         let header = make_cache_header(trace_len, trace_hash, pattern_hash, format, options, 0);
-        file.write_all(&header).map_err(TraceError::Io)?;
+        write_cache_header(&mut file, &header).map_err(TraceError::Io)?;
 
         let mut count = 0u64;
         let mut previous_key: Option<(u32, u64)> = None;
@@ -1134,7 +1173,7 @@ fn stream_cache(
         // 只在构建时付出这次 O(N) 顺序 I/O；后续命中仍是 O(page)。
         let mut index = 0u64;
         let mut record_buf = [0u8; CACHE_RECORD_LEN];
-        file.seek(std::io::SeekFrom::Start(CACHE_HEADER_LEN as u64))
+        file.seek(std::io::SeekFrom::Start(cache_header_total_len()))
             .map_err(TraceError::Io)?;
         let mut tag_buf = Vec::with_capacity(4096 * CACHE_TAG_LEN);
         while index < count {
@@ -1142,7 +1181,7 @@ fn stream_cache(
             tag_buf.extend_from_slice(&record_tag(content_identity, index, &record_buf));
             index += 1;
             if tag_buf.len() == 4096 * CACHE_TAG_LEN {
-                let tag_pos = CACHE_HEADER_LEN as u64
+                let tag_pos = cache_header_total_len()
                     + count * CACHE_RECORD_LEN as u64
                     + (index - 4096) * CACHE_TAG_LEN as u64;
                 write_all_at(&file, &tag_buf, tag_pos).map_err(TraceError::Io)?;
@@ -1151,15 +1190,14 @@ fn stream_cache(
         }
         if !tag_buf.is_empty() {
             let written = index - (tag_buf.len() / CACHE_TAG_LEN) as u64;
-            let tag_pos = CACHE_HEADER_LEN as u64
+            let tag_pos = cache_header_total_len()
                 + count * CACHE_RECORD_LEN as u64
                 + written * CACHE_TAG_LEN as u64;
             write_all_at(&file, &tag_buf, tag_pos).map_err(TraceError::Io)?;
         }
-        file.seek(std::io::SeekFrom::Start(0))
-            .map_err(TraceError::Io)?;
+        // 最终 header（带真实 count）连同摘要一起覆写发布。
         let header = make_cache_header(trace_len, trace_hash, pattern_hash, format, options, count);
-        file.write_all(&header).map_err(TraceError::Io)?;
+        write_cache_header(&mut file, &header).map_err(TraceError::Io)?;
         file.sync_all().map_err(TraceError::Io)?;
         fs::rename(&temp_path, path).map_err(TraceError::Io)?;
         sync_parent_dir(parent)?;
@@ -1209,6 +1247,12 @@ fn staging_file_held_by(pid: u32, path: &Path) -> bool {
 fn staging_file_held_by(_pid: u32, _path: &Path) -> bool {
     // 无 /proc 可查时保守保留活着 PID 的 staging（年龄规则不介入）。
     true
+}
+
+#[cfg(not(unix))]
+fn staging_file_held_by(_pid: u32, _path: &Path) -> bool {
+    // Windows 无 fd 持有检测；按死 PID 处理，交由年龄/PID 规则回收。
+    false
 }
 
 /// Remove abandoned cache staging files left by a process that was killed
@@ -1307,6 +1351,24 @@ fn make_cache_header(
     encode_ranges(&mut header, options);
     header[112..120].copy_from_slice(&count.to_le_bytes());
     header
+}
+
+/// 字段区的完整性摘要：篡改 count、格式位或过滤器而不同步重算摘要即被拒绝。
+/// 这不是安全 MAC（key 是公开的 compat 版本串），只防损坏与静默截断。
+fn cache_header_digest(fields: &[u8; CACHE_HEADER_LEN]) -> [u8; CACHE_HEADER_DIGEST_LEN] {
+    let mut hasher = Sha256::new();
+    hasher.update(CACHE_COMPAT_VERSION);
+    hasher.update(fields);
+    hasher.finalize().into()
+}
+
+/// 完整头部（字段区 + 摘要）一次性写出。
+fn write_cache_header(file: &mut File, fields: &[u8; CACHE_HEADER_LEN]) -> std::io::Result<()> {
+    let mut full = [0u8; CACHE_HEADER_LEN + CACHE_HEADER_DIGEST_LEN];
+    full[..CACHE_HEADER_LEN].copy_from_slice(fields);
+    full[CACHE_HEADER_LEN..].copy_from_slice(&cache_header_digest(fields));
+    file.seek(std::io::SeekFrom::Start(0))?;
+    file.write_all(&full)
 }
 
 fn encode_ranges(header: &mut [u8; CACHE_HEADER_LEN], options: &MemorySearchOptions) {
@@ -1503,16 +1565,19 @@ fn append_simd_reg(output: &mut Vec<ByteValue>, value: Option<u128>, reg_bytes: 
     }));
 }
 
-/// 追加一个 SIMD 寄存器在某个 lane 上的元素字节；缺失的值保持 unknown。
+/// 追加一个 SIMD 寄存器在某个 lane 上的元素字节；缺失的值或越出 16 字节
+/// 寄存器的 lane 偏移都保持 unknown，不得伪造已知字节。
 fn append_simd_lane(output: &mut Vec<ByteValue>, value: Option<u128>, offset: usize, width: usize) {
     let bytes = value.map(u128::to_le_bytes);
-    output.extend((offset..offset + width).map(|i| match bytes {
-        Some(ref bytes) => ByteValue {
-            value: bytes[i],
-            known: true,
-        },
-        None => ByteValue::unknown(),
-    }));
+    for i in offset..offset.saturating_add(width) {
+        output.push(match bytes.as_ref().and_then(|b| b.get(i)).copied() {
+            Some(byte) => ByteValue {
+                value: byte,
+                known: true,
+            },
+            None => ByteValue::unknown(),
+        });
+    }
 }
 
 fn append_scalar(output: &mut Vec<ByteValue>, width: u8, value: Option<u64>) {
@@ -1993,7 +2058,9 @@ mod tests {
         let mut bytes = std::fs::read(&cache_path).expect("read cache");
         // 把第一条 record 的 seq 从 0 改成 1：格式完全合法、顺序仍然递增，
         // 但内容是假的（seq 1 的写入值其实是 0x08070605）。
-        bytes[CACHE_HEADER_LEN..CACHE_HEADER_LEN + 4].copy_from_slice(&1u32.to_le_bytes());
+        // 文件布局是 [字段区|摘要|records|tags]，记录区从总头长之后开始。
+        let rec0 = cache_header_total_len() as usize;
+        bytes[rec0..rec0 + 4].copy_from_slice(&1u32.to_le_bytes());
         std::fs::write(&cache_path, bytes).expect("tamper cache");
         SEARCH_SCAN_COUNT.store(0, Ordering::SeqCst);
         let served = search_memory_cached(path, trace.as_bytes(), TraceFormat::Unidbg, options)
@@ -2030,8 +2097,9 @@ mod tests {
         let mut bytes = std::fs::read(&cache_path).expect("read cache");
         // 第二页只有 record[1]；把它改成 record[0] 的副本。只读当前页时
         // 页内顺序校验发现不了跨页重复，必须回读边界 record 或校验完整性。
-        let first_record = bytes[CACHE_HEADER_LEN..CACHE_HEADER_LEN + CACHE_RECORD_LEN].to_vec();
-        bytes[CACHE_HEADER_LEN + CACHE_RECORD_LEN..CACHE_HEADER_LEN + 2 * CACHE_RECORD_LEN]
+        let rec_base = cache_header_total_len() as usize;
+        let first_record = bytes[rec_base..rec_base + CACHE_RECORD_LEN].to_vec();
+        bytes[rec_base + CACHE_RECORD_LEN..rec_base + 2 * CACHE_RECORD_LEN]
             .copy_from_slice(&first_record);
         std::fs::write(&cache_path, bytes).expect("tamper cache");
         SEARCH_SCAN_COUNT.store(0, Ordering::SeqCst);
@@ -2075,9 +2143,9 @@ mod tests {
         .expect("cache path");
         let mut bytes = std::fs::read(&cache_path).expect("read cache");
         // 篡改第三页（record[2]）的 address，先请求第 0 页再请求第 2 页。
-        bytes[CACHE_HEADER_LEN + 2 * CACHE_RECORD_LEN + 8
-            ..CACHE_HEADER_LEN + 2 * CACHE_RECORD_LEN + 16]
-            .copy_from_slice(&0x9999u64.to_le_bytes());
+        // 文件布局是 [字段区|摘要|records|tags]，记录区从总头长之后开始。
+        let rec2 = cache_header_total_len() as usize + 2 * CACHE_RECORD_LEN;
+        bytes[rec2 + 8..rec2 + 16].copy_from_slice(&0x9999u64.to_le_bytes());
         std::fs::write(&cache_path, bytes).expect("tamper cache");
         let page0 = search_memory_cached(
             path,
@@ -2265,6 +2333,197 @@ mod tests {
         assert_eq!(result.total, 3);
         crate::cache::set_cache_dir_override(None);
         let _ = std::fs::remove_dir_all(cache_dir);
+    }
+
+    #[test]
+    fn consistent_count_truncation_without_digest_is_rejected_and_rebuilt() {
+        // GPT 审查 #5 的完整攻击面：把 3 条结果的缓存改成 count=2 并同步截掉
+        // 一条 record + tag，使长度校验完全自洽。没有摘要保护时这会被静默
+        // 当成合法空页；现在字段区摘要必然不一致 → 重建。
+        let _guard = cache_test_guard();
+        let trace = three_occurrence_trace();
+        let cache_dir = tamper_cache_dir("count-trunc");
+        let path = "/tmp/count-trunc-memory-search.trace";
+        let options = default_options();
+        search_memory_cached(path, trace.as_bytes(), TraceFormat::Unidbg, options.clone())
+            .expect("initial search");
+        let cache_path = memory_cache_path(
+            &sha256(trace.as_bytes()),
+            &sha256(&options.pattern),
+            TraceFormat::Unidbg,
+            &options,
+        )
+        .expect("cache path");
+        let bytes = std::fs::read(&cache_path).expect("cache file");
+        let header_len = cache_header_total_len() as usize;
+        assert_eq!(
+            bytes.len(),
+            header_len + 3 * CACHE_RECORD_LEN + 3 * CACHE_TAG_LEN
+        );
+        // count=2：保留 record[0..2] 与 tag[0..2]，丢弃最后一组。
+        let mut crafted = bytes[..header_len].to_vec();
+        crafted[112..120].copy_from_slice(&2u64.to_le_bytes());
+        crafted.extend_from_slice(&bytes[header_len..header_len + 2 * CACHE_RECORD_LEN]);
+        crafted.extend_from_slice(
+            &bytes[header_len + 3 * CACHE_RECORD_LEN
+                ..header_len + 3 * CACHE_RECORD_LEN + 2 * CACHE_TAG_LEN],
+        );
+        std::fs::write(&cache_path, crafted).expect("write crafted cache");
+        SEARCH_SCAN_COUNT.store(0, Ordering::SeqCst);
+        let served = search_memory_cached(path, trace.as_bytes(), TraceFormat::Unidbg, options)
+            .expect("rebuilt search serves full result");
+        assert_eq!(served.total, 3, "consistent truncation must be detected");
+        assert_eq!(
+            SEARCH_SCAN_COUNT.load(Ordering::SeqCst),
+            1,
+            "digest mismatch must trigger a rebuild"
+        );
+        crate::cache::set_cache_dir_override(None);
+        let _ = std::fs::remove_dir_all(cache_dir);
+    }
+
+    #[test]
+    fn truncated_header_is_rejected_and_rebuilt() {
+        // 截短到旧版 120 字节头部以下任何合法形态都必须整体重建。
+        let _guard = cache_test_guard();
+        let trace = three_occurrence_trace();
+        let cache_dir = tamper_cache_dir("truncated-header");
+        let path = "/tmp/truncated-header-memory-search.trace";
+        let options = default_options();
+        search_memory_cached(path, trace.as_bytes(), TraceFormat::Unidbg, options.clone())
+            .expect("initial search");
+        let cache_path = memory_cache_path(
+            &sha256(trace.as_bytes()),
+            &sha256(&options.pattern),
+            TraceFormat::Unidbg,
+            &options,
+        )
+        .expect("cache path");
+        std::fs::write(
+            &cache_path,
+            &std::fs::read(&cache_path).unwrap()[..CACHE_HEADER_LEN],
+        )
+        .expect("truncate cache");
+        SEARCH_SCAN_COUNT.store(0, Ordering::SeqCst);
+        let served = search_memory_cached(path, trace.as_bytes(), TraceFormat::Unidbg, options)
+            .expect("truncated cache must rebuild, not error or serve stale");
+        assert_eq!(served.total, 3);
+        assert_eq!(SEARCH_SCAN_COUNT.load(Ordering::SeqCst), 1);
+        crate::cache::set_cache_dir_override(None);
+        let _ = std::fs::remove_dir_all(cache_dir);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn stale_baseline_signature_is_rejected_immediately() {
+        // helper 的顺序保证：mmap 前取的签名与搜索开始时的 fd 不一致时必须
+        // 直接报错，而不是把 mmap 内容的 hash 绑定到新身份上。
+        use std::io::Write;
+        let _guard = cache_test_guard();
+        let cache_dir = tamper_cache_dir("stale-baseline");
+        let trace_dir = std::env::temp_dir().join(format!(
+            "trace-ui-stale-sig-{}-{}",
+            std::process::id(),
+            uuid::Uuid::new_v4()
+        ));
+        std::fs::create_dir_all(&trace_dir).expect("trace dir");
+        let trace_path = trace_dir.join("trace.log");
+        std::fs::write(&trace_path, three_occurrence_trace()).expect("trace");
+        let file = File::open(&trace_path).expect("open trace");
+        let data = std::fs::read(&trace_path).expect("read trace");
+        let baseline = fd_signature(&file).expect("baseline signature");
+        // 模拟"取签名之后、mmap/搜索之前文件增长"。
+        let mut append = std::fs::OpenOptions::new()
+            .append(true)
+            .open(&trace_path)
+            .expect("append");
+        append.write_all(b"[extra line]\n").expect("grow file");
+        drop(append);
+        let result = search_memory_fd_verified_with_signature(
+            &file,
+            &data[..data.len() - b"[extra line]\n".len()],
+            TraceFormat::Unidbg,
+            default_options(),
+            &baseline,
+            None,
+        );
+        assert!(
+            matches!(&result, Err(TraceError::CacheError(message)) if message.contains("changed between mmap")),
+            "stale baseline must be rejected with a cache error, got {result:?}"
+        );
+        crate::cache::set_cache_dir_override(None);
+        let _ = std::fs::remove_dir_all(cache_dir);
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn fingerprint_fifo_is_rejected_not_blocked() {
+        use std::sync::mpsc;
+        use std::time::Duration;
+        let _guard = cache_test_guard();
+        let trace = three_occurrence_trace();
+        let cache_dir = tamper_cache_dir("fingerprint-fifo");
+        let trace_dir = std::env::temp_dir().join(format!(
+            "trace-ui-fifo-{}-{}",
+            std::process::id(),
+            uuid::Uuid::new_v4()
+        ));
+        std::fs::create_dir_all(&trace_dir).expect("trace dir");
+        let trace_path = trace_dir.join("trace.log");
+        std::fs::write(&trace_path, trace).expect("trace");
+        let file = File::open(&trace_path).expect("open trace");
+        let data = std::fs::read(&trace_path).expect("read trace");
+        let options = default_options();
+        let mut decisions = Vec::new();
+        search_memory_fd_verified(
+            &file,
+            &data,
+            TraceFormat::Unidbg,
+            options.clone(),
+            Some(&mut |source| decisions.push(source)),
+        )
+        .expect("first pass computes the fingerprint");
+        let signature = fd_signature(&file).expect("signature");
+        let fingerprint = fingerprint_path(&signature).expect("fingerprint path");
+
+        // 用同名 FIFO 替换 fingerprint 文件。
+        std::fs::remove_file(&fingerprint).expect("remove real fingerprint");
+        let status = std::process::Command::new("mkfifo")
+            .arg(&fingerprint)
+            .status()
+            .expect("spawn mkfifo");
+        assert!(status.success(), "mkfifo failed in test environment");
+
+        // 若 open() 阻塞，recv_timeout 会先超时并 panic，而不是挂死测试进程。
+        let (tx, rx) = mpsc::channel();
+        let handle = std::thread::spawn(move || {
+            let mut seen = Vec::new();
+            let outcome = search_memory_fd_verified(
+                &file,
+                &data,
+                TraceFormat::Unidbg,
+                options,
+                Some(&mut |source| seen.push(source)),
+            )
+            .map(|page| page.total);
+            tx.send((outcome, seen)).ok();
+        });
+        let (outcome, seen) = rx
+            .recv_timeout(Duration::from_secs(30))
+            .expect("fingerprint open blocked on FIFO: O_NONBLOCK missing");
+        assert_eq!(
+            seen,
+            vec![FingerprintSource::Computed],
+            "FIFO must be rejected so the hash is recomputed"
+        );
+        assert!(
+            matches!(outcome, Ok(3)),
+            "search still succeeds: {outcome:?}"
+        );
+        handle.join().expect("probe thread");
+        crate::cache::set_cache_dir_override(None);
+        let _ = std::fs::remove_dir_all(cache_dir);
+        let _ = std::fs::remove_dir_all(trace_dir);
     }
 
     #[test]

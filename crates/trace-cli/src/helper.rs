@@ -6,14 +6,19 @@
 
 use std::fs::File;
 use std::io::{self, Read, Seek, Write};
+
+#[cfg(unix)]
 use std::os::fd::{FromRawFd, RawFd};
 
 use serde::Deserialize;
 #[cfg(all(unix, debug_assertions))]
 use trace_core::memory_search::FingerprintSource;
+#[cfg(unix)]
 use trace_core::memory_search::{
-    search_memory_fd_verified, MemorySearchOccurrenceResult, MemorySearchOptions,
+    fd_signature, search_memory_fd_verified_with_signature, FdSignature,
+    MemorySearchOccurrenceResult, MemorySearchOptions,
 };
+#[cfg(unix)]
 use trace_parser::gumtrace;
 
 const MAX_PATTERN_BYTES: usize = 64 * 1024 * 1024;
@@ -51,6 +56,13 @@ pub(crate) fn requested() -> bool {
 }
 
 /// Run the fd-based helper and write one JSON response to stdout.
+#[cfg(not(unix))]
+pub(crate) fn run() -> anyhow::Result<()> {
+    Err(anyhow::anyhow!("fd helper is only supported on Unix"))
+}
+
+/// Run the fd-based helper and write one JSON response to stdout.
+#[cfg(unix)]
 pub(crate) fn run() -> anyhow::Result<()> {
     let args = std::env::args().collect::<Vec<_>>();
     let trace_fd = parse_fd_arg(&args, "--trace-fd")?;
@@ -66,6 +78,10 @@ pub(crate) fn run() -> anyhow::Result<()> {
 
     ensure_regular(&trace, "trace fd")?;
     ensure_regular(&pattern, "pattern fd")?;
+    // 基线签名必须在 mmap 之前取得：mmap 与搜索开始之间文件若发生变化
+    // （如增长），with_signature 入口会立即报错，而不是把旧内容的 hash
+    // 绑定到新长度的身份上。
+    let baseline: FdSignature = fd_signature(&trace)?;
     let pattern_bytes = read_from_start(&mut pattern, Some(MAX_PATTERN_BYTES), "pattern fd")?;
     if pattern_bytes.is_empty() {
         return Err(anyhow::anyhow!("pattern fd contains an empty pattern"));
@@ -98,7 +114,7 @@ pub(crate) fn run() -> anyhow::Result<()> {
     let mut fingerprint_probe = parse_fingerprint_log_arg(&args)?;
     #[cfg(not(all(unix, debug_assertions)))]
     reject_fingerprint_log_arg(&args)?;
-    let result = search_memory_fd_verified(
+    let result = search_memory_fd_verified_with_signature(
         &trace,
         &trace_map,
         format,
@@ -109,6 +125,7 @@ pub(crate) fn run() -> anyhow::Result<()> {
             offset: request.offset,
             limit: request.limit,
         },
+        &baseline,
         #[cfg(all(unix, debug_assertions))]
         fingerprint_probe
             .as_mut()
@@ -160,6 +177,7 @@ fn reject_fingerprint_log_arg(args: &[String]) -> anyhow::Result<()> {
     Ok(())
 }
 
+#[cfg(unix)]
 fn parse_fd_arg(args: &[String], name: &str) -> anyhow::Result<RawFd> {
     let value = args
         .windows(2)
@@ -175,6 +193,7 @@ fn parse_fd_arg(args: &[String], name: &str) -> anyhow::Result<RawFd> {
     Ok(fd)
 }
 
+#[cfg(unix)]
 fn validate_inherited_fds(trace_fd: RawFd, pattern_fd: RawFd) -> anyhow::Result<()> {
     if trace_fd < 3 || pattern_fd < 3 {
         return Err(anyhow::anyhow!(
@@ -189,6 +208,7 @@ fn validate_inherited_fds(trace_fd: RawFd, pattern_fd: RawFd) -> anyhow::Result<
     Ok(())
 }
 
+#[cfg(unix)]
 fn ensure_regular(file: &File, label: &str) -> anyhow::Result<()> {
     let metadata = file
         .metadata()
@@ -199,6 +219,7 @@ fn ensure_regular(file: &File, label: &str) -> anyhow::Result<()> {
     Ok(())
 }
 
+#[cfg(unix)]
 fn read_from_start(file: &mut File, max: Option<usize>, label: &str) -> anyhow::Result<Vec<u8>> {
     file.seek(std::io::SeekFrom::Start(0))
         .map_err(|error| anyhow::anyhow!("{label} seek failed: {error}"))?;
@@ -221,6 +242,7 @@ fn read_from_start(file: &mut File, max: Option<usize>, label: &str) -> anyhow::
     Ok(bytes)
 }
 
+#[cfg(unix)]
 fn read_stdin_bounded() -> anyhow::Result<Vec<u8>> {
     let mut bytes = Vec::new();
     let mut stdin = io::stdin()
@@ -238,10 +260,12 @@ fn read_stdin_bounded() -> anyhow::Result<Vec<u8>> {
     Ok(bytes)
 }
 
+#[cfg(unix)]
 fn encode_response(result: &MemorySearchOccurrenceResult) -> anyhow::Result<Vec<u8>> {
     serde_json::to_vec(result).map_err(|error| anyhow::anyhow!("response encoding failed: {error}"))
 }
 
+#[cfg(unix)]
 fn write_response(result: &MemorySearchOccurrenceResult) -> anyhow::Result<()> {
     let encoded = encode_response(result)?;
     let mut stdout = io::stdout().lock();
@@ -253,7 +277,7 @@ fn write_response(result: &MemorySearchOccurrenceResult) -> anyhow::Result<()> {
     Ok(())
 }
 
-#[cfg(test)]
+#[cfg(all(unix, test))]
 mod tests {
     use super::*;
     use trace_core::memory_search::{

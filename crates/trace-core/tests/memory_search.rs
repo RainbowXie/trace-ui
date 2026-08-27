@@ -922,3 +922,179 @@ fn gumtrace_malformed_memory_marker_fails_closed() {
     );
     assert!(ok.is_ok(), "non-memory gumtrace line must be ignored");
 }
+
+// =========================================================================
+// 第四轮审查修复的回归测试（向量与上文既有用例不同）
+// =========================================================================
+
+#[test]
+fn unidbg_malformed_abs_suffix_fails_closed() {
+    let broken = "[00:00:00 000][lib.so 0x100] [00000000] 0x40000100: \"str w0, [x1]\" ; mem[WRITE] abs=0x3000oops w0=0x2211 x1=0x3000 => w0=0x2211";
+    let result = search_memory(
+        format!("{broken}\n").as_bytes(),
+        TraceFormat::Unidbg,
+        options(&[0x11, 0x22]),
+    );
+    assert!(
+        result.is_err(),
+        "garbage after the hex address must not be a prefix"
+    );
+}
+
+#[test]
+fn unidbg_unknown_memory_tag_fails_closed() {
+    let broken = "[00:00:00 000][lib.so 0x100] [00000000] 0x40000100: \"str w0, [x1]\" ; mem[XRITE] abs=0x3000 w0=0x2211 x1=0x3000 => w0=0x2211";
+    let result = search_memory(
+        format!("{broken}\n").as_bytes(),
+        TraceFormat::Unidbg,
+        options(&[0x11, 0x22]),
+    );
+    assert!(result.is_err(), "unknown mem[...] tag must fail closed");
+}
+
+#[test]
+fn unidbg_corrupted_second_memory_marker_fails_closed() {
+    let broken = "[00:00:00 000][lib.so 0x100] [00000000] 0x40000100: \"ldp w0, w1, [x2]\" ; mem[READ] abs=0x3000 mem[WRITE] abs=0x9000oops w0=0x2211 x2=0x3000 => w0=0x2211";
+    let result = search_memory(
+        format!("{broken}\n").as_bytes(),
+        TraceFormat::Unidbg,
+        options(&[0x11, 0x22]),
+    );
+    assert!(
+        result.is_err(),
+        "a corrupt later marker must poison the event"
+    );
+}
+
+#[test]
+fn register_value_garbage_hex_suffix_is_not_trusted() {
+    // 注解存在但值损坏：不得取十六进制前缀制造虚假匹配，写入按 unknown 失效。
+    let uni = uni_write_insn(0, "str w5, [x9]", "w5=0x22113344oops x9=0x7000", 0x7000);
+    let (uni_total,) = (search_memory(
+        format!("{uni}\n").as_bytes(),
+        TraceFormat::Unidbg,
+        options(&[0x44, 0x33]),
+    )
+    .expect("unidbg scan")
+    .total,);
+    assert_eq!(
+        uni_total, 0,
+        "corrupt register value must not produce bytes"
+    );
+    let gum = gum_write_insn("str w5, [x9]", "w5=0x22113344oops x9=0x7000", 0x7000);
+    let gum_total = search_memory(
+        format!("{gum}\n").as_bytes(),
+        TraceFormat::Gumtrace,
+        options(&[0x44, 0x33]),
+    )
+    .expect("gumtrace scan")
+    .total;
+    assert_eq!(
+        gum_total, 0,
+        "corrupt register value must not produce bytes"
+    );
+}
+
+#[test]
+fn single_register_lane_store_writes_only_lane_element() {
+    // st1 {v0.16b}[2]：真实内存只得到 v0.b[2]=0x02 一个字节；
+    // 完整 16 字节向量或从未写过的首字节都不得匹配。
+    let insn = "st1 {v0.16b}[2], [x0]";
+    let ann = "x0=0x6000 q0=0x0f0e0d0c0b0a09080706050403020100";
+    let uni = uni_write_insn(0, insn, &format!("{ann} => x0=0x6000"), 0x6000);
+    let gum = gum_write_insn(insn, ann, 0x6000);
+    let full16: Vec<u8> = (0u8..16).collect();
+    let (uni_bad, gum_bad) = search_both(&uni, &gum, &full16);
+    assert_eq!(
+        (uni_bad, gum_bad),
+        (0, 0),
+        "single-register lane store must not expose the full vector"
+    );
+    let (uni_head, gum_head) = search_both(&uni, &gum, &[0x0f]);
+    assert_eq!(
+        (uni_head, gum_head),
+        (0, 0),
+        "bytes never stored must stay unknown"
+    );
+    let (uni_ok, gum_ok) = search_both(&uni, &gum, &[0x02]);
+    assert_eq!((uni_ok, gum_ok), (1, 1), "the lane element itself matches");
+}
+
+#[test]
+fn single_register_lane_load_reveals_only_element() {
+    let insn = "ld1 {v0.16b}[2], [x0]";
+    let post = "q0=0x0f0e0d0c0b0a09080706050403020100";
+    let uni = uni_read_insn(0, insn, "x0=0x6100", 0x6100, post);
+    let full16: Vec<u8> = (0u8..16).collect();
+    let (uni_full, _) = search_both(
+        &uni,
+        &gum_read_insn(insn, "x0=0x6100", 0x6100, post),
+        &full16,
+    );
+    assert_eq!(
+        uni_full, 0,
+        "single-register lane load must not reveal the whole vector"
+    );
+    let (uni_one, gum_one) = search_both(
+        &uni,
+        &gum_read_insn(insn, "x0=0x6100", 0x6100, post),
+        &[0x02],
+    );
+    assert_eq!((uni_one, gum_one), (1, 1), "only the element is revealed");
+}
+
+#[test]
+fn out_of_range_lane_is_fail_closed_not_panic() {
+    // lane 下标越出寄存器范围：内容未知、绝不 panic，也不得伪造已知字节。
+    for insn in ["st2 {v0.b, v1.b}[255]", "st1 {v0.4h}[200]"] {
+        let ann =
+            "x0=0x6200 q0=0x0102030405060708090a0b0c0d0e0f10 q1=0x1112131415161718191a1b1c1d1e1f20";
+        let uni = uni_write_insn(0, insn, &format!("{ann} => x0=0x6200"), 0x6200);
+        let result = search_memory(
+            format!("{uni}\n").as_bytes(),
+            TraceFormat::Unidbg,
+            options(&[0x01, 0x02]),
+        );
+        let total = result
+            .expect("out-of-range lane must degrade to unknown, not panic")
+            .total;
+        assert_eq!(
+            total, 0,
+            "{insn}: out-of-range lane fabricates no known byte"
+        );
+    }
+}
+
+#[test]
+fn gumtrace_atomic_multi_marker_is_order_independent() {
+    // seq0 写入 [5,6,7,8]；seq1 原子 RMW；seq2 把尾字节覆盖成 FF。
+    // 正确语义：原子写使旧值失效 → [5,6,7,FF] 不应命中。
+    let prior = gum_write_insn("str x1, [x2]", "x1=0x08070605 x2=0x5000", 0x5000);
+    let tail = gum_write_insn("strb w5, [x6]", "w5=0xff x6=0x5003 mem_w=0x5003", 0x5003);
+    let make = |markers: &str| {
+        let rmw = format!(
+            "[lib.so] 0x7522f46438!0x143438 ldadd w0, w2, [x3]; w2=0x11111111 x3=0x5000 {markers}"
+        );
+        format!("{prior}\n{rmw}\n{tail}\n")
+    };
+    let r_first = search_memory(
+        make("mem_r=0x5000 mem_w=0x5000").as_bytes(),
+        TraceFormat::Gumtrace,
+        options(&[5, 6, 7, 0xff]),
+    )
+    .expect("r-first atomic line");
+    let w_first = search_memory(
+        make("mem_w=0x5000 mem_r=0x5000").as_bytes(),
+        TraceFormat::Gumtrace,
+        options(&[5, 6, 7, 0xff]),
+    )
+    .expect("w-first atomic line");
+    assert_eq!(
+        r_first.total, 0,
+        "read-marker-first must still invalidate via the write half"
+    );
+    assert_eq!(
+        w_first.total, 0,
+        "write-invalidation must be order independent"
+    );
+}

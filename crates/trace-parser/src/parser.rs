@@ -54,20 +54,51 @@ pub(crate) fn parse_hex_u128(bytes: &[u8]) -> Option<u128> {
 
 /// 从 `line[from..]` 中提取 mem[READ/WRITE] abs=0xADDR。
 /// `from` 允许调用者跳过行首已扫描的部分，避免重复搜索。
+/// Find mem_[READ/WRITE] with abs=0xADDR in unidbg format.
+///
+/// 与 gumtrace 相同的 fail-closed 规则：行内所有 mem[...] marker 都必须完整
+/// 合法——标记名只接受 READ/WRITE 并立即闭括号；每个事件必须携带一个完整的
+/// 十六进制地址（0x 前缀、至少一位数字、其后是非字母数字或行尾）。任何一处
+/// 损坏都使整个事件失败，不能取前缀或静默跳过后续 marker。
 fn find_mem_op_raw(line: &[u8], from: usize) -> Option<(bool, u64)> {
     let search = &line[from..];
-    let rel_pos = memmem::find(search, b"mem[")?;
-    let pos = from + rel_pos;
-    let is_write = *line.get(pos + 4)? == b'W';
-    let abs_marker = memmem::find(&line[pos..], b"abs=0x")?;
-    let val_start = pos + abs_marker + 6;
-    let val_end = line[val_start..]
-        .iter()
-        .position(|b| !b.is_ascii_hexdigit())
-        .map(|p| val_start + p)
-        .unwrap_or(line.len());
-    let addr = parse_hex_u64(&line[val_start..val_end])?;
-    Some((is_write, addr))
+    let mut first: Option<(bool, u64)> = None;
+    let mut cursor = 0usize;
+    loop {
+        // 没有更多 mem[ marker：扫描结束，返回已收集的第一个事件。
+        let Some(rel_pos) = memmem::find(&search[cursor..], b"mem[") else {
+            break;
+        };
+        let pos = cursor + rel_pos;
+        let tag = &search[pos + 4..];
+        let tag_close = tag.iter().position(|&b| b == b']')?;
+        let is_write = match &tag[..tag_close] {
+            b"READ" => false,
+            b"WRITE" => true,
+            _ => return None,
+        };
+        let seg_start = pos + 4 + tag_close + 1;
+        let after = search.get(seg_start..)?;
+        let abs_rel = memmem::find(after, b"abs=0x")?;
+        let digits = &after[abs_rel + 6..];
+        let digit_count = digits.iter().take_while(|b| b.is_ascii_hexdigit()).count();
+        if digit_count == 0 {
+            return None;
+        }
+        // 地址必须被非字母数字（或行尾）终止；字母数字后缀不是地址的一部分。
+        if digits
+            .get(digit_count)
+            .is_some_and(|b| b.is_ascii_alphanumeric())
+        {
+            return None;
+        }
+        let addr = parse_hex_u64(&digits[..digit_count])?;
+        if first.is_none() {
+            first = Some((is_write, addr));
+        }
+        cursor = seg_start + abs_rel + 6;
+    }
+    first
 }
 
 /// Parse a trace line (lightweight mode for scan — skips arrow register extraction).
@@ -164,11 +195,7 @@ fn parse_line_inner(raw: &str, extract_regs: bool) -> Option<ParsedLine> {
                 if is_simd_reg_name(reg_name) {
                     // SIMD 寄存器：先尝试 q 前缀再回退原名，解析 u128 后提取位域
                     let full = find_simd_reg_u128(bytes, reg_name, ss)?;
-                    Some(extract_simd_lane_value(
-                        full,
-                        elem_width,
-                        result_line.lane_index,
-                    ))
+                    extract_simd_lane_value(full, elem_width, result_line.lane_index)
                 } else {
                     let raw_val = find_reg_value(bytes, reg_name.as_bytes(), ss)?;
                     let mask = if elem_width >= 8 {
@@ -204,7 +231,7 @@ fn parse_line_inner(raw: &str, extract_regs: bool) -> Option<ParsedLine> {
                     let ss = search_start?;
                     if is_simd_reg_name(reg_name) {
                         let full = find_simd_reg_u128(bytes, reg_name, ss)?;
-                        Some(extract_simd_lane_value(full, elem_width, None))
+                        extract_simd_lane_value(full, elem_width, None)
                     } else {
                         let raw_val = find_reg_value(bytes, reg_name.as_bytes(), ss)?;
                         let mask = if elem_width >= 8 { u64::MAX } else { (1u64 << (elem_width as u32 * 8)) - 1 };
@@ -467,13 +494,16 @@ fn extract_lane_index(token: &str) -> (&str, Option<u8>, Option<u8>) {
             if let Some(bracket_end) = token[abs_bracket..].find(']') {
                 let idx_str = &token[abs_bracket + 1..abs_bracket + bracket_end];
                 if let Ok(idx) = idx_str.parse::<u8>() {
-                    // Extract element width from arrangement specifier between '.' and '['
-                    let arrangement = &token[dot_pos + 1..abs_bracket];
-                    let elem_width = match arrangement.as_bytes().first() {
-                        Some(b'b') => Some(1u8),
-                        Some(b'h') => Some(2u8),
-                        Some(b's') => Some(4u8),
-                        Some(b'd') | Some(b'D') => Some(8u8),
+                    // Extract element width from arrangement specifier between '.' and '['.
+                    // 单 lane 结构形式的说明符仍带着寄存器列表的闭括号（如
+                    // `{v0.16b}[2]` 切出 `16b}`），先剥掉再按完整拼写匹配，
+                    // 否则多字符排列（16b/4h/2s/2d）会解析失败。
+                    let arrangement = token[dot_pos + 1..abs_bracket].trim_end_matches('}');
+                    let elem_width = match arrangement {
+                        "b" | "B" | "8b" | "16b" => Some(1u8),
+                        "h" | "H" | "4h" | "8h" => Some(2u8),
+                        "s" | "S" | "2s" | "4s" => Some(4u8),
+                        "d" | "D" | "1d" | "2d" => Some(8u8),
                         _ => None,
                     };
                     return (&token[..abs_bracket], Some(idx), elem_width);
@@ -609,13 +639,18 @@ pub(crate) fn classify_mem_layout(mnemonic: &str, operand_text: &str) -> MemLayo
     if is_simd_replicate(mnemonic) {
         return MemLayout::SimdLane;
     }
+    // 单 lane 结构形式：lane 后缀紧跟寄存器列表的闭括号（}[n]），与寻址
+    // 方括号区分。单寄存器（st1 {v0.16b}[2]）与多寄存器形式同样只写一个
+    // 元素，不能按完整向量展开。
+    if operand_text.contains("}[")
+        && matches!(
+            mnemonic,
+            "ld1" | "ld2" | "ld3" | "ld4" | "st1" | "st2" | "st3" | "st4"
+        )
+    {
+        return MemLayout::SimdLane;
+    }
     if is_simd_multi_reg(mnemonic, operand_text) {
-        // 带 [lane] 后缀的多寄存器 structure 是单 lane 形式：内存只得到
-        // 每个寄存器的一个元素，不能按完整向量展开。lane 后缀紧跟寄存器
-        // 列表的闭括号（}[n]），与寻址方括号区分。
-        if operand_text.contains("}[") {
-            return MemLayout::SimdLane;
-        }
         // st1/ld1 的多寄存器形式是寄存器级连续；st2-st4/ld2-ld4 按 lane 交错。
         return if matches!(mnemonic, "st2" | "st3" | "st4" | "ld2" | "ld3" | "ld4") {
             MemLayout::SimdInterleaved
@@ -699,12 +734,20 @@ fn find_reg_hex_bytes<'a>(bytes: &'a [u8], reg_name: &[u8], start_pos: usize) ->
             };
             if !char_before.is_ascii_alphanumeric() {
                 let val_start = eq_pos + 3;
-                let val_end = search[val_start..]
+                let digit_count = search[val_start..]
                     .iter()
-                    .position(|b| !b.is_ascii_hexdigit())
-                    .map(|p| val_start + p)
-                    .unwrap_or(search.len());
-                return Some(&search[val_start..val_end]);
+                    .take_while(|b| b.is_ascii_hexdigit())
+                    .count();
+                // 注解存在但值损坏（缺数字、或数字后紧跟字母数字垃圾）时不得
+                // 取前缀猜值：整个寄存器查找按缺失处理，让调用方走 unknown。
+                if digit_count == 0
+                    || search
+                        .get(val_start + digit_count)
+                        .is_some_and(|b| b.is_ascii_alphanumeric())
+                {
+                    return None;
+                }
+                return Some(&search[val_start..val_start + digit_count]);
             }
         }
         pos = abs + 1;
@@ -755,23 +798,26 @@ pub(crate) fn find_simd_reg_u128(bytes: &[u8], reg_name: &str, start_pos: usize)
 }
 
 /// 从 128-bit SIMD 寄存器值中提取标量值。
-/// lane load 时提取指定 lane 的元素，64-bit 排列时返回低 64 位。
+/// lane load 时提取指定 lane 的元素，64-bit 排列时返回低 64 位；
+/// lane 下标越出寄存器范围时返回 None（该值未知，不得伪造）。
 pub(crate) fn extract_simd_lane_value(
     full_u128: u128,
     elem_width: u8,
     lane_index: Option<u8>,
-) -> u64 {
-    if let Some(lane_idx) = lane_index {
-        let shift = lane_idx as u32 * elem_width as u32 * 8;
-        let mask = if elem_width >= 8 {
-            u64::MAX as u128
-        } else {
-            (1u128 << (elem_width as u32 * 8)) - 1
-        };
-        ((full_u128 >> shift) & mask) as u64
-    } else {
-        full_u128 as u64
+) -> Option<u64> {
+    let Some(lane_idx) = lane_index else {
+        return Some(full_u128 as u64);
+    };
+    let width = usize::from(elem_width.max(1));
+    let offset = usize::from(lane_idx) * width;
+    if elem_width == 0 || offset + width > 16 {
+        return None;
     }
+    // 按字节拷贝而非移位：避免 lane 巨大时的位移溢出 panic。
+    let bytes = full_u128.to_le_bytes();
+    let mut out = [0u8; 8];
+    out[..width].copy_from_slice(&bytes[offset..offset + width]);
+    Some(u64::from_le_bytes(out))
 }
 
 /// 从 SIMD 向量指令的排列说明符推导每个寄存器的访问宽度。
@@ -780,8 +826,13 @@ pub(crate) fn extract_simd_lane_value(
 /// - 其他（lane 说明符如 .s、.d 等）→ None
 pub(crate) fn simd_arrangement_total_width(operand_text: &str) -> Option<u8> {
     let first_tok = operand_text.split(',').next()?.trim();
-    let first_tok = first_tok.trim_start_matches('{').trim_end_matches('}').trim();
-    let first_tok = first_tok.split('[').next()?; // strip lane index
+    // 先剥 lane 下标再剥闭括号：单 lane 形式的首 token 形如 `{v0.16b}[2]`。
+    let first_tok = first_tok
+        .trim_start_matches('{')
+        .split('[')
+        .next()?
+        .trim_end_matches('}')
+        .trim();
     let arrangement = first_tok.split('.').nth(1)?;
     match arrangement {
         "16b" | "8h" | "4s" | "2d" => Some(16),
@@ -796,15 +847,16 @@ pub(crate) fn simd_arrangement_element_width(operand_text: &str) -> Option<u8> {
     let first_tok = operand_text.split(',').next()?.trim();
     let first_tok = first_tok
         .trim_start_matches('{')
+        .split('[')
+        .next()?
         .trim_end_matches('}')
         .trim();
-    let first_tok = first_tok.split('[').next()?;
     let arrangement = first_tok.split('.').nth(1)?;
     match arrangement.as_bytes().last()? {
-        b'b' => Some(1),
-        b'h' => Some(2),
-        b's' => Some(4),
-        b'd' => Some(8),
+        b'b' | b'B' => Some(1),
+        b'h' | b'H' => Some(2),
+        b's' | b'S' => Some(4),
+        b'd' | b'D' => Some(8),
         _ => None,
     }
 }
