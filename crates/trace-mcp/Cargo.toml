@@ -5,6 +5,7 @@ edition = "2021"
 
 [dependencies]
 trace-core = { path = "../trace-core" }
+trace-parser = { path = "../trace-parser" }
 rmcp = { version = "1.2", features = [
     "server",
     "macros",

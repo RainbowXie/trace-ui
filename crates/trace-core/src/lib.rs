@@ -7,6 +7,7 @@ pub mod error;
 pub mod flat;
 pub mod line_index;
 pub mod merge;
+pub mod memory_search;
 pub mod parallel;
 pub mod parallel_types;
 pub mod phase2;

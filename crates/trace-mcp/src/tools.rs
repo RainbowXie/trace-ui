@@ -1,14 +1,19 @@
 use std::sync::Arc;
 
 use rmcp::{
-    ServerHandler,
     handler::server::{router::tool::ToolRouter, wrapper::Parameters},
     model::{ServerCapabilities, ServerInfo},
-    tool, tool_handler, tool_router,
+    tool, tool_handler, tool_router, ServerHandler,
 };
 
-use trace_core::{TraceEngine, BuildOptions, SearchOptions, SliceOptions, StringQueryOptions, parse_hex_addr, api_types::TraceLine};
 use crate::types::*;
+use trace_core::memory_search::{
+    parse_pattern_hex, MemorySearchOptions, MemorySearchResult, MemorySearchRw,
+};
+use trace_core::{
+    api_types::TraceLine, parse_hex_addr, BuildOptions, SearchOptions, SliceOptions,
+    StringQueryOptions, TraceEngine,
+};
 
 // ── 截断常量 ──
 // NOTE: 修改这些值时，需同步更新对应 #[tool] 描述中的硬编码数字。
@@ -67,12 +72,79 @@ fn compact_line(line: &TraceLine) -> serde_json::Value {
 
 fn format_lines(lines: &[TraceLine], full: bool) -> Vec<serde_json::Value> {
     if full {
-        lines.iter().map(|l| serde_json::to_value(l)
-            .unwrap_or_else(|e| serde_json::json!({"error": e.to_string()}))
-        ).collect()
+        lines
+            .iter()
+            .map(|l| {
+                serde_json::to_value(l)
+                    .unwrap_or_else(|e| serde_json::json!({"error": e.to_string()}))
+            })
+            .collect()
     } else {
         lines.iter().map(|l| compact_line(l)).collect()
     }
+}
+
+fn parse_memory_search_options(req: &SearchMemoryRequest) -> Result<MemorySearchOptions, String> {
+    let pattern = parse_pattern_hex(&req.pattern).map_err(|e| e.to_string())?;
+    let seq_range = req
+        .seq_range
+        .as_ref()
+        .map(|range| {
+            if range.start > range.end {
+                Err("seq_range.start must not exceed seq_range.end".to_string())
+            } else {
+                Ok((range.start, range.end))
+            }
+        })
+        .transpose()?;
+    let memory_range = req
+        .memory_range
+        .as_ref()
+        .map(|range| {
+            if range.size == 0 {
+                return Err("memory_range.size must be positive".to_string());
+            }
+            let start = parse_hex_addr(&range.address)?;
+            let end = start
+                .checked_add(range.size)
+                .ok_or_else(|| "memory_range address + size overflows u64".to_string())?;
+            Ok((start, end))
+        })
+        .transpose()?;
+    Ok(MemorySearchOptions {
+        pattern,
+        seq_range,
+        memory_range,
+        offset: req.offset,
+        limit: req.limit,
+    })
+}
+
+fn format_memory_search_result(result: MemorySearchResult) -> String {
+    let matches: Vec<serde_json::Value> = result
+        .matches
+        .into_iter()
+        .map(|item| {
+            let rw = match item.rw {
+                MemorySearchRw::Read => "read",
+                MemorySearchRw::Write => "write",
+            };
+            serde_json::json!({
+                "address": format!("0x{:x}", item.address),
+                "seq": item.seq,
+                "size": item.size,
+                "bytes": item.bytes.iter().map(|byte| format!("{byte:02x}")).collect::<String>(),
+                "rw": rw,
+            })
+        })
+        .collect();
+    json(&serde_json::json!({
+        "matches": matches,
+        "total": result.total,
+        "offset": result.offset,
+        "limit": result.limit,
+        "has_more": result.has_more,
+    }))
 }
 
 /// 检查 changes 字段是否仅包含栈/帧指针寄存器变化
@@ -181,7 +253,10 @@ impl TraceToolHandler {
             function_count, and other metadata needed for all subsequent operations. \
             Building the index may take a few seconds for large files."
     )]
-    async fn open_trace(&self, Parameters(req): Parameters<OpenTraceRequest>) -> Result<String, String> {
+    async fn open_trace(
+        &self,
+        Parameters(req): Parameters<OpenTraceRequest>,
+    ) -> Result<String, String> {
         let engine = self.engine.clone();
         blocking(move || {
             let session = engine.create_session(&req.file_path)
@@ -222,7 +297,7 @@ impl TraceToolHandler {
                         "trace_format": trace_format,
                         "function_count": function_count,
                     })))
-                },
+                }
                 Err(e) => {
                     let _ = engine.close_session(&session_id);
                     Err(format!("Failed to build index: {}", e))
@@ -240,7 +315,10 @@ impl TraceToolHandler {
             Lines are identified by 0-based sequence numbers. \
             Returns up to 100 lines per call."
     )]
-    fn get_trace_lines(&self, Parameters(req): Parameters<GetTraceLinesRequest>) -> Result<String, String> {
+    fn get_trace_lines(
+        &self,
+        Parameters(req): Parameters<GetTraceLinesRequest>,
+    ) -> Result<String, String> {
         let sid = self.resolve_session(req.session_id)?;
         let count = req.count.min(MAX_LINES);
         let end = req.start_seq.saturating_add(count);
@@ -277,6 +355,30 @@ impl TraceToolHandler {
             .map_err(|e| e.to_string())
     }
 
+    #[tool(
+        name = "search_memory",
+        description = "Search the replayed temporal memory state for a hexadecimal byte pattern. \
+            A match is returned only when the complete pattern becomes known; repeated accesses while \
+            it remains unchanged do not create duplicates. Results are ordered by sequence then address. \
+            seq_range is inclusive and memory_range is a half-open address range. Returns up to 200 matches per page. \
+            The public response is bounded to 8 MiB; large patterns must use the internal occurrence-only adapter."
+    )]
+    async fn search_memory(
+        &self,
+        Parameters(req): Parameters<SearchMemoryRequest>,
+    ) -> Result<String, String> {
+        let sid = self.resolve_session(req.session_id.clone())?;
+        let options = parse_memory_search_options(&req)?;
+        let engine = self.engine.clone();
+        blocking(move || {
+            let result = engine
+                .search_memory(&sid, options)
+                .map_err(|e| e.to_string())?;
+            Ok(format_memory_search_result(result))
+        })
+        .await
+    }
+
     // ━━━━━━━━━━━━━━━━━━━━━━ 搜索与分析 ━━━━━━━━━━━━━━━━━━━━━━
 
     #[tool(
@@ -288,7 +390,10 @@ impl TraceToolHandler {
             Supports optional seq_range ('3000-6000') and addr_range ('0x246F00-0x249800') filters \
             to narrow results to a specific execution window or code region."
     )]
-    async fn search_instructions(&self, Parameters(req): Parameters<SearchInstructionsRequest>) -> Result<String, String> {
+    async fn search_instructions(
+        &self,
+        Parameters(req): Parameters<SearchInstructionsRequest>,
+    ) -> Result<String, String> {
         let sid = self.resolve_session(req.session_id)?;
         let engine = self.engine.clone();
         blocking(move || {
@@ -333,9 +438,13 @@ impl TraceToolHandler {
             };
 
             let matches: Vec<serde_json::Value> = if req.full {
-                final_lines.iter().map(|l| serde_json::to_value(l)
-                    .unwrap_or_else(|e| serde_json::json!({"error": e.to_string()}))
-                ).collect()
+                final_lines
+                    .iter()
+                    .map(|l| {
+                        serde_json::to_value(l)
+                            .unwrap_or_else(|e| serde_json::json!({"error": e.to_string()}))
+                    })
+                    .collect()
             } else {
                 final_lines.iter().map(|l| compact_line(l)).collect()
             };
@@ -363,7 +472,10 @@ impl TraceToolHandler {
             By default, filters out lines that only modify stack/frame pointer registers. \
             Supports addr_range filter and context_lines to show surrounding non-tainted lines."
     )]
-    fn get_tainted_lines(&self, Parameters(req): Parameters<GetTaintedLinesRequest>) -> Result<String, String> {
+    fn get_tainted_lines(
+        &self,
+        Parameters(req): Parameters<GetTaintedLinesRequest>,
+    ) -> Result<String, String> {
         let sid = self.resolve_session(req.session_id)?;
         let limit = req.limit.min(200);
         let ctx_lines = req.context_lines.min(5);
@@ -528,7 +640,10 @@ impl TraceToolHandler {
             Returns nodes array, count, total_node_count (full tree size), and depth used. \
             Each node contains: function address, name, entry/exit line numbers, and child node IDs."
     )]
-    fn get_call_tree(&self, Parameters(req): Parameters<GetCallTreeRequest>) -> Result<String, String> {
+    fn get_call_tree(
+        &self,
+        Parameters(req): Parameters<GetCallTreeRequest>,
+    ) -> Result<String, String> {
         let sid = self.resolve_session(req.session_id)?;
         let depth = req.depth.min(3).max(1);
         let max_nodes: u32 = 500;
@@ -550,7 +665,10 @@ impl TraceToolHandler {
             Supports filtering by minimum length and search query. \
             Each string includes its memory address, content, encoding, and access type."
     )]
-    fn get_strings(&self, Parameters(req): Parameters<GetStringsRequest>) -> Result<String, String> {
+    fn get_strings(
+        &self,
+        Parameters(req): Parameters<GetStringsRequest>,
+    ) -> Result<String, String> {
         let sid = self.resolve_session(req.session_id)?;
         let limit = req.limit.min(200);
         let options = StringQueryOptions {
@@ -583,7 +701,10 @@ impl TraceToolHandler {
             Returns analysis stats plus the first page of tainted instructions. \
             Use get_tainted_lines to paginate if has_more is true."
     )]
-    async fn taint_analysis(&self, Parameters(req): Parameters<TaintAnalysisRequest>) -> Result<String, String> {
+    async fn taint_analysis(
+        &self,
+        Parameters(req): Parameters<TaintAnalysisRequest>,
+    ) -> Result<String, String> {
         let sid = self.resolve_session(req.session_id)?;
         let engine = self.engine.clone();
         blocking(move || {
@@ -686,7 +807,10 @@ impl TraceToolHandler {
             (2) func_name: find all calls matching a name (partial, case-insensitive). \
             (3) No arguments: list all functions with pagination (use offset/limit)."
     )]
-    fn analyze_function(&self, Parameters(req): Parameters<AnalyzeFunctionRequest>) -> Result<String, String> {
+    fn analyze_function(
+        &self,
+        Parameters(req): Parameters<AnalyzeFunctionRequest>,
+    ) -> Result<String, String> {
         let sid = self.resolve_session(req.session_id)?;
 
         if let Some(node_id) = req.node_id {
@@ -718,16 +842,19 @@ impl TraceToolHandler {
 
             // 子调用
             let children = nodes.iter().skip(1).collect::<Vec<_>>();
-            let sub_calls: Vec<serde_json::Value> = children.iter().map(|c| {
-                serde_json::json!({
-                    "node_id": c.id,
-                    "func_name": c.func_name,
-                    "func_addr": c.func_addr,
-                    "entry_seq": c.entry_seq,
-                    "exit_seq": c.exit_seq,
-                    "line_count": c.line_count,
+            let sub_calls: Vec<serde_json::Value> = children
+                .iter()
+                .map(|c| {
+                    serde_json::json!({
+                        "node_id": c.id,
+                        "func_name": c.func_name,
+                        "func_addr": c.func_addr,
+                        "entry_seq": c.entry_seq,
+                        "exit_seq": c.exit_seq,
+                        "line_count": c.line_count,
+                    })
                 })
-            }).collect();
+                .collect();
 
             Ok(json(&serde_json::json!({
                 "node_id": node.id,
@@ -740,8 +867,8 @@ impl TraceToolHandler {
                 "return_value": return_value,
                 "sub_calls": sub_calls,
                 "sub_call_count": sub_calls.len(),
-            })))
 
+            })))
         } else if let Some(ref func_name) = req.func_name {
             // Mode 2: 按名称搜索函数
             let result = self.engine.get_function_calls(&sid)
@@ -753,10 +880,12 @@ impl TraceToolHandler {
                 .map(|f| {
                     let occs: Vec<serde_json::Value> = f.occurrences.iter()
                         .take(50)
-                        .map(|o| serde_json::json!({
-                            "seq": o.seq,
-                            "summary": o.summary,
-                        }))
+                        .map(|o| {
+                            serde_json::json!({
+                                "seq": o.seq,
+                                "summary": o.summary,
+                            })
+                        })
                         .collect();
                     let total_occs = f.occurrences.len();
                     serde_json::json!({
@@ -778,8 +907,8 @@ impl TraceToolHandler {
                 } else {
                     "Use analyze_function with node_id from get_call_tree to inspect a specific call's arguments and return value."
                 },
-            })))
 
+            })))
         } else {
             // Mode 3: list all functions with pagination
             let result = self.engine.get_function_calls(&sid)
@@ -790,11 +919,13 @@ impl TraceToolHandler {
             let page: Vec<serde_json::Value> = result.functions.iter()
                 .skip(req.offset as usize)
                 .take(limit)
-                .map(|f| serde_json::json!({
-                    "func_name": f.func_name,
-                    "call_count": f.occurrences.len(),
-                    "is_jni": f.is_jni,
-                }))
+                .map(|f| {
+                    serde_json::json!({
+                        "func_name": f.func_name,
+                        "call_count": f.occurrences.len(),
+                        "is_jni": f.is_jni,
+                    })
+                })
                 .collect();
 
             Ok(json(&serde_json::json!({
@@ -815,7 +946,10 @@ impl TraceToolHandler {
             Returns each detection with context instructions. \
             Use taint_analysis on detection points to trace key/data sources."
     )]
-    async fn analyze_crypto(&self, Parameters(req): Parameters<AnalyzeCryptoRequest>) -> Result<String, String> {
+    async fn analyze_crypto(
+        &self,
+        Parameters(req): Parameters<AnalyzeCryptoRequest>,
+    ) -> Result<String, String> {
         let sid = self.resolve_session(req.session_id)?;
         let engine = self.engine.clone();
         blocking(move || {
@@ -890,5 +1024,101 @@ impl ServerHandler for TraceToolHandler {
              - analyze_function with node_id shows entry args (X0-X7) and return value\n\
              - Use addr_range to focus search/taint on a specific address range".to_string(),
         )
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// 预算预检必须是已证明的保守上界：找到恰好通过预检的最大 pattern，
+    /// 用真实 serializer 验证响应（含 JSON 字符串转义后的外层尺寸）不超预算。
+    #[test]
+    fn memory_search_response_budget_covers_actual_serialization() {
+        let trace = "[00:00:00 000][lib.so 0x100] [00000000] 0x40000100: \"nop\"\n";
+        let probe = |len: usize| MemorySearchOptions {
+            pattern: vec![0xab; len],
+            seq_range: None,
+            memory_range: None,
+            offset: 0,
+            limit: 1,
+        };
+        let mut max_ok = 0usize;
+        let mut lo = 1usize;
+        let mut hi = 8 * 1024 * 1024;
+        while lo <= hi {
+            let mid = lo + (hi - lo) / 2;
+            if trace_core::memory_search::search_memory(
+                trace.as_bytes(),
+                trace_parser::types::TraceFormat::Unidbg,
+                probe(mid),
+            )
+            .is_ok()
+            {
+                max_ok = mid;
+                lo = mid + 1;
+            } else {
+                hi = mid - 1;
+            }
+        }
+        assert!(max_ok > 0, "some pattern size must be accepted");
+        assert!(
+            trace_core::memory_search::search_memory(
+                trace.as_bytes(),
+                trace_parser::types::TraceFormat::Unidbg,
+                probe(max_ok + 1),
+            )
+            .is_err(),
+            "pattern size {} must exceed the budget",
+            max_ok + 1
+        );
+
+        let result = MemorySearchResult {
+            matches: vec![trace_core::memory_search::MemorySearchMatch {
+                address: u64::MAX,
+                seq: u32::MAX,
+                size: max_ok as u32,
+                bytes: vec![0xab; max_ok],
+                rw: MemorySearchRw::Write,
+            }],
+            total: u32::MAX,
+            offset: u32::MAX,
+            limit: 1,
+            has_more: true,
+        };
+        let body = format_memory_search_result(result);
+        const BUDGET: usize = 8 * 1024 * 1024;
+        assert!(
+            body.len() <= BUDGET,
+            "inner JSON {} bytes exceeds budget at accepted pattern size {}",
+            body.len(),
+            max_ok
+        );
+        // MCP 外层把工具结果作为 JSON 字符串嵌入：引号/反斜杠会转义膨胀，
+        // 预检必须连这个上界也覆盖。
+        let escaped = body.len() + body.bytes().filter(|b| matches!(b, b'"' | b'\\')).count();
+        assert!(
+            escaped <= BUDGET,
+            "escaped outer size {} exceeds budget at accepted pattern size {}",
+            escaped,
+            max_ok
+        );
+        // 验收证据必须覆盖真实序列化：构造完整的 JSON-RPC 成功封套，
+        // 让 serde_json 实际执行转义，而不是只手工估算一层。
+        let envelope = serde_json::json!({
+            "jsonrpc": "2.0",
+            "id": 1,
+            "result": {
+                "content": [{"type": "text", "text": body}],
+                "isError": false,
+            }
+        });
+        let wire = serde_json::to_string(&envelope).expect("serialize envelope");
+        assert!(
+            wire.len() <= BUDGET,
+            "full JSON-RPC envelope {} bytes exceeds budget at accepted pattern size {}",
+            wire.len(),
+            max_ok
+        );
     }
 }

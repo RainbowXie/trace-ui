@@ -1,5 +1,5 @@
 pub mod tools;
-mod types;
+pub mod types;
 
 use std::sync::Arc;
 use trace_core::TraceEngine;

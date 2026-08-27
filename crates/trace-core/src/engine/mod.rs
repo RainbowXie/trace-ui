@@ -3,6 +3,7 @@ mod browse;
 mod search;
 mod slice;
 mod query;
+mod memory;
 
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, RwLock};
@@ -43,6 +44,7 @@ impl TraceEngine {
         let file_size = metadata.len();
         let mmap = unsafe { Mmap::map(&file) }
             .map_err(|e| TraceError::Io(e))?;
+        let trace_hash = crate::memory_search::compute_trace_content_hash(&mmap);
 
         #[cfg(unix)]
         let _ = mmap.advise(memmap2::Advice::WillNeed);
@@ -55,6 +57,8 @@ impl TraceEngine {
             file_path: path.to_string(),
             total_lines: total_lines_estimate,
             file_size,
+            trace_hash,
+            trace_metadata: metadata.clone(),
             trace_format: TraceFormat::Unidbg,
             call_tree: None,
             phase2_store: None,

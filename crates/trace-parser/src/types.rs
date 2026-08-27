@@ -258,6 +258,34 @@ impl Operand {
     }
 }
 
+/// 内存访问的字节布局分类。
+///
+/// 不同指令族把寄存器值映射到内存字节的规则不同：pair 连续摆放，SIMD
+/// structure 指令（st2-st4）按 lane 交错，exclusive store 的第一个操作数是
+/// 状态寄存器而不是内存值，atomic RMW 的最终字节无法从寄存器注解精确恢复。
+/// replay 只能按此分类展开，不能统一按寄存器顺序拼接。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum MemLayout {
+    /// 单寄存器连续访问（str/ldr 及其变体、单寄存器 st1/ld1）。
+    #[default]
+    Scalar,
+    /// pair 指令（ldp/stp 及变体）：两个寄存器连续摆放。
+    Pair,
+    /// exclusive 标量 store（stxr/stlxr/stxrb/stxrh 等）：跳过状态寄存器。
+    ExclusiveScalar,
+    /// exclusive pair store（stxp/stlxp）：跳过状态寄存器，两个数据寄存器连续。
+    ExclusivePair,
+    /// 多寄存器 st1/ld1：每个寄存器的内容连续摆放。
+    SimdContiguous,
+    /// st2-st4/ld2-ld4：同一 lane 的各寄存器元素相邻，按 lane 交错。
+    SimdInterleaved,
+    /// 单 lane structure（st2 {v0.b, v1.b}[3]）与 replicate load（ld1r-ld4r）：
+    /// 内存只覆盖每个寄存器的一个元素；replicate 等价于 lane 0。
+    SimdLane,
+    /// atomic/RMW：trace 注解无法精确恢复最终内存字节，replay 必须保守失效。
+    Atomic,
+}
+
 /// 内存操作信息。
 ///
 /// 从 trace 行中 `; mem[READ/WRITE] abs=0x...` 注解提取。
@@ -282,6 +310,25 @@ pub struct MemOp {
     pub value2_lo: Option<u64>,
     /// 128-bit pair 第二个寄存器 high 64 位（elem_width == 16 时有效）。
     pub value2_hi: Option<u64>,
+    /// Number of register-sized memory values covered by this operation.  It
+    /// remains accurate when one or more register values were not printed, so
+    /// replay can invalidate the complete access range instead of shortening
+    /// it to the observed prefix.
+    pub value_count: u8,
+    /// 内存字节布局分类，决定 replay 如何把寄存器值映射到内存字节。
+    pub layout: MemLayout,
+    /// SIMD structure 指令（多寄存器 st1-st4/ld1-ld4）每个数据寄存器的完整
+    /// 128-bit 值；注解缺失的寄存器保持 None，replay 不得补零。
+    pub simd_values: [Option<u128>; 4],
+    /// SIMD structure 指令每个寄存器覆盖的字节数（排列总宽度 8 或 16）。
+    pub simd_reg_bytes: u8,
+    /// SIMD structure 指令单个元素的字节宽度（lane 交错时的交错粒度）。
+    pub simd_elem_bytes: u8,
+    /// SimdLane 布局的 lane 索引；replicate load 固定为 0（lane 0 即内存字节）。
+    pub simd_lane: u8,
+    /// exclusive store 的状态寄存器值（post-arrow）：Some(0) 成功，
+    /// Some(非 0) 失败（无内存效果），None 状态未知（replay 保守失效）。
+    pub exclusive_status: Option<u64>,
 }
 
 /// ARM64 助记符的栈上存储（最长 ~7 字节）。

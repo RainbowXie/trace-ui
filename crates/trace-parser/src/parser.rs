@@ -103,7 +103,13 @@ fn parse_line_inner(raw: &str, extract_regs: bool) -> Option<ParsedLine> {
 
     // 3. Parse operand list (searches only within operand_text — no full-line scan)
     let mut result_line = ParsedLine::default();
-    let raw_first_reg_prefix = parse_operands_into(operand_text, &mut result_line);
+    let parsed_first_reg_prefix = parse_operands_into(operand_text, &mut result_line);
+    let raw_first_reg_prefix = if is_exclusive_store(mnemonic) {
+        first_memory_data_reg_name(mnemonic, operand_text)
+            .and_then(|name| name.as_bytes().first().copied())
+    } else {
+        parsed_first_reg_prefix
+    };
 
     // 4. Find arrow — search only from quote2 onward (not from line start)
     let tail = &bytes[q2..];
@@ -127,7 +133,12 @@ fn parse_line_inner(raw: &str, extract_regs: bool) -> Option<ParsedLine> {
 
     // 5. Parse mem[READ/WRITE] — search from quote2 onward (mem always appears after disasm)
     let mem_op = find_mem_op_raw(bytes, q2).map(|(is_write, abs)| {
-        let mut elem_width = determine_elem_width(mnemonic, raw_first_reg_prefix);
+        let layout = classify_mem_layout(mnemonic, operand_text);
+        let mut elem_width = if layout == MemLayout::Atomic {
+            atomic_elem_width(mnemonic, raw_first_reg_prefix)
+        } else {
+            determine_elem_width(mnemonic, raw_first_reg_prefix)
+        };
         // 5a. 修正 elem_width：lane load 用 lane 元素宽度，SIMD 向量用排列说明符宽度
         if let (Some(_), Some(lew)) = (result_line.lane_index, result_line.lane_elem_width) {
             elem_width = lew;
@@ -144,12 +155,20 @@ fn parse_line_inner(raw: &str, extract_regs: bool) -> Option<ParsedLine> {
         };
         // 5b. Extract first register value
         let (value, value_lo, value_hi) = if elem_width <= 8 {
-            let v = first_data_reg_name(operand_text).and_then(|reg_name| {
+            let v = first_memory_data_reg_name(mnemonic, operand_text).and_then(|reg_name| {
+                // store 侧零寄存器是已知零；load 侧目标被丢弃，证明不了内存为零。
+                if reg_name == "xzr" || reg_name == "wzr" {
+                    return if is_write { Some(0) } else { None };
+                }
                 let ss = search_start?;
                 if is_simd_reg_name(reg_name) {
                     // SIMD 寄存器：先尝试 q 前缀再回退原名，解析 u128 后提取位域
                     let full = find_simd_reg_u128(bytes, reg_name, ss)?;
-                    Some(extract_simd_lane_value(full, elem_width, result_line.lane_index))
+                    Some(extract_simd_lane_value(
+                        full,
+                        elem_width,
+                        result_line.lane_index,
+                    ))
                 } else {
                     let raw_val = find_reg_value(bytes, reg_name.as_bytes(), ss)?;
                     let mask = if elem_width >= 8 {
@@ -163,9 +182,8 @@ fn parse_line_inner(raw: &str, extract_regs: bool) -> Option<ParsedLine> {
             (v, None, None)
         } else if elem_width == 16 {
             // 128-bit SIMD: 用 u128 解析后拆为 low/high 两个 u64
-            let v128 = first_data_reg_name(operand_text).and_then(|reg_name| {
-                find_simd_reg_u128(bytes, reg_name, search_start?)
-            });
+            let v128 = first_memory_data_reg_name(mnemonic, operand_text)
+                .and_then(|reg_name| find_simd_reg_u128(bytes, reg_name, search_start?));
             match v128 {
                 Some(val) => (None, Some(val as u64), Some((val >> 64) as u64)),
                 None => (None, None, None),
@@ -178,7 +196,11 @@ fn parse_line_inner(raw: &str, extract_regs: bool) -> Option<ParsedLine> {
             || is_simd_multi_reg(mnemonic, operand_text)
         {
             if elem_width <= 8 {
-                let v2 = second_data_reg_name(operand_text).and_then(|reg_name| {
+                let v2 = second_memory_data_reg_name(mnemonic, operand_text).and_then(|reg_name| {
+                    // store 侧零寄存器是已知零；load 侧目标被丢弃，证明不了内存为零。
+                    if reg_name == "xzr" || reg_name == "wzr" {
+                        return if is_write { Some(0) } else { None };
+                    }
                     let ss = search_start?;
                     if is_simd_reg_name(reg_name) {
                         let full = find_simd_reg_u128(bytes, reg_name, ss)?;
@@ -191,9 +213,8 @@ fn parse_line_inner(raw: &str, extract_regs: bool) -> Option<ParsedLine> {
                 });
                 (v2, None, None)
             } else if elem_width == 16 {
-                let v128 = second_data_reg_name(operand_text).and_then(|reg_name| {
-                    find_simd_reg_u128(bytes, reg_name, search_start?)
-                });
+                let v128 = second_memory_data_reg_name(mnemonic, operand_text)
+                    .and_then(|reg_name| find_simd_reg_u128(bytes, reg_name, search_start?));
                 match v128 {
                     Some(val) => (None, Some(val as u64), Some((val >> 64) as u64)),
                     None => (None, None, None),
@@ -203,6 +224,46 @@ fn parse_line_inner(raw: &str, extract_regs: bool) -> Option<ParsedLine> {
             }
         } else {
             (None, None, None)
+        };
+        let value_count = memory_value_count(mnemonic, operand_text);
+        // SIMD structure 指令的 replay 需要每个寄存器的完整 128-bit 值；
+        // 既有 value/value2 字段的 lane 截取语义保持不变，供依赖分析使用。
+        let (simd_values, simd_reg_bytes, simd_elem_bytes) = if matches!(
+            layout,
+            MemLayout::SimdContiguous | MemLayout::SimdInterleaved | MemLayout::SimdLane
+        ) {
+            let mut values = [None; 4];
+            if let Some(ss) = search_start {
+                for (index, slot) in values.iter_mut().enumerate().take(usize::from(value_count)) {
+                    if let Some(name) = memory_data_reg_name_at(mnemonic, operand_text, index) {
+                        *slot = find_simd_reg_u128(bytes, name, ss);
+                    }
+                }
+            }
+            (
+                values,
+                simd_arrangement_total_width(operand_text).unwrap_or(0),
+                simd_arrangement_element_width(operand_text).unwrap_or(0),
+            )
+        } else {
+            ([None; 4], 0, 0)
+        };
+        let exclusive_status = if matches!(
+            layout,
+            MemLayout::ExclusiveScalar | MemLayout::ExclusivePair
+        ) {
+            // exclusive store 是否真正写入由状态寄存器的 post-arrow 值决定：
+            // 0 成功，非 0 失败（无内存效果），缺失则状态未知。
+            // pre-arrow 的陈旧值和 wzr（写入被丢弃）都不能当状态。
+            let post_start = arrow_rel.map(|rel| q2 + rel + 4);
+            data_reg_name_at(operand_text, 0).and_then(|name| {
+                if name == "xzr" || name == "wzr" {
+                    return None;
+                }
+                find_reg_value(bytes, name.as_bytes(), post_start?)
+            })
+        } else {
+            None
         };
         MemOp {
             is_write,
@@ -214,6 +275,13 @@ fn parse_line_inner(raw: &str, extract_regs: bool) -> Option<ParsedLine> {
             value_hi,
             value2_lo,
             value2_hi,
+            value_count,
+            layout,
+            simd_values,
+            simd_reg_bytes,
+            simd_elem_bytes,
+            simd_lane: result_line.lane_index.unwrap_or(0),
+            exclusive_status,
         }
     });
 
@@ -428,17 +496,44 @@ fn parse_imm(s: &str) -> Option<i64> {
     }
 }
 
-/// Extract the first data register's raw name from operand text (e.g., "w8" from "w8, [sp, #0x10]").
-///
-/// Used for value extraction: we need the original (pre-normalization) register name
-/// to search for `regname=0xHEX` patterns in the trace line text.
-pub(crate) fn first_data_reg_name(operand_text: &str) -> Option<&str> {
-    let first_tok = operand_text.split(',').next()?.trim();
+/// 取内存操作的第 0 个数据寄存器原始名（未规范化），用于在 trace 文本中
+/// 查找 `regname=0xHEX` 注解；exclusive store 会跳过状态寄存器。
+pub(crate) fn first_memory_data_reg_name<'a>(
+    mnemonic: &str,
+    operand_text: &'a str,
+) -> Option<&'a str> {
+    memory_data_reg_name_at(mnemonic, operand_text, 0)
+}
+
+pub(crate) fn second_memory_data_reg_name<'a>(
+    mnemonic: &str,
+    operand_text: &'a str,
+) -> Option<&'a str> {
+    memory_data_reg_name_at(mnemonic, operand_text, 1)
+}
+
+/// 取第 index 个内存数据寄存器；exclusive store 的第一个操作数是状态寄存器，
+/// 不参与内存字节，必须统一跳过。
+pub(crate) fn memory_data_reg_name_at<'a>(
+    mnemonic: &str,
+    operand_text: &'a str,
+    index: usize,
+) -> Option<&'a str> {
+    let status = usize::from(is_exclusive_store(mnemonic));
+    data_reg_name_at(operand_text, index + status)
+}
+
+pub(crate) fn data_reg_name_at(operand_text: &str, index: usize) -> Option<&str> {
+    let first_tok = operand_text.split(',').nth(index)?.trim();
     let first_tok = first_tok
         .trim_start_matches('{')
         .trim_end_matches('}')
         .trim();
     let first_tok = first_tok.split('.').next()?; // strip arrangement specifier
+                                                  // 零寄存器没有数字后缀，但它是一个合法的内存数据源（已知零值）。
+    if first_tok == "xzr" || first_tok == "wzr" {
+        return Some(first_tok);
+    }
     let b = first_tok.as_bytes();
     if b.len() >= 2
         && matches!(
@@ -455,20 +550,89 @@ pub(crate) fn first_data_reg_name(operand_text: &str) -> Option<&str> {
 
 /// 提取操作数中第二个数据寄存器名（用于 pair 指令如 ldp/stp）。
 pub(crate) fn second_data_reg_name(operand_text: &str) -> Option<&str> {
-    let mut iter = operand_text.split(',');
-    iter.next()?; // 跳过第一个
-    let second_tok = iter.next()?.trim();
-    let second_tok = second_tok.trim_start_matches('{').trim_end_matches('}').trim();
-    let second_tok = second_tok.split('.').next()?;
-    let b = second_tok.as_bytes();
-    if b.len() >= 2
-        && matches!(b[0], b'w' | b'x' | b'q' | b'd' | b's' | b'b' | b'h' | b'v')
-        && b[1..].iter().all(|c| c.is_ascii_digit())
-    {
-        Some(second_tok)
+    data_reg_name_at(operand_text, 1)
+}
+
+pub(crate) fn is_exclusive_pair_store(mn: &str) -> bool {
+    matches!(mn, "stxp" | "stlxp")
+}
+
+/// 所有 exclusive store：第一个操作数是状态寄存器，不是写入内存的值。
+pub(crate) fn is_exclusive_store(mn: &str) -> bool {
+    is_exclusive_pair_store(mn)
+        || matches!(
+            mn,
+            "stxr" | "stlxr" | "stxrb" | "stlxrb" | "stxrh" | "stlxrh"
+        )
+}
+
+/// atomic/RMW 指令：内存最终字节是旧值与寄存器的运算结果，trace 的寄存器
+/// 注解不足以精确恢复，replay 必须保守处理。
+pub(crate) fn is_atomic_rmw(mn: &str) -> bool {
+    const PREFIXES: &[&str] = &[
+        "swp", "cas", "ldadd", "ldclr", "ldeor", "ldset", "ldsmax", "ldsmin", "ldumax", "ldumin",
+        "stadd", "stclr", "steor", "stset", "stsmax", "stsmin", "stumax", "stumin",
+    ];
+    PREFIXES.iter().any(|prefix| mn.starts_with(prefix))
+}
+
+/// atomic 指令的访问宽度：b/h 后缀优先，否则按数据寄存器位宽；casp 是双元素。
+pub(crate) fn atomic_elem_width(mnemonic: &str, first_reg_prefix: Option<u8>) -> u8 {
+    let base: u8 = if mnemonic.ends_with('b') {
+        1
+    } else if mnemonic.ends_with('h') {
+        2
     } else {
-        None
+        match first_reg_prefix {
+            Some(b'x') => 8,
+            _ => 4,
+        }
+    };
+    if mnemonic.starts_with("casp") {
+        base.saturating_mul(2)
+    } else {
+        base
     }
+}
+
+/// replicate load（ld1r-ld4r）：每个结构元素复制到目标寄存器的所有 lane，
+/// 内存只读取每个寄存器的一个元素。
+pub(crate) fn is_simd_replicate(mn: &str) -> bool {
+    matches!(mn, "ld1r" | "ld2r" | "ld3r" | "ld4r")
+}
+
+/// 按 ARM64 内存语义对内存访问的字节布局分类。
+pub(crate) fn classify_mem_layout(mnemonic: &str, operand_text: &str) -> MemLayout {
+    if is_atomic_rmw(mnemonic) {
+        return MemLayout::Atomic;
+    }
+    if is_simd_replicate(mnemonic) {
+        return MemLayout::SimdLane;
+    }
+    if is_simd_multi_reg(mnemonic, operand_text) {
+        // 带 [lane] 后缀的多寄存器 structure 是单 lane 形式：内存只得到
+        // 每个寄存器的一个元素，不能按完整向量展开。lane 后缀紧跟寄存器
+        // 列表的闭括号（}[n]），与寻址方括号区分。
+        if operand_text.contains("}[") {
+            return MemLayout::SimdLane;
+        }
+        // st1/ld1 的多寄存器形式是寄存器级连续；st2-st4/ld2-ld4 按 lane 交错。
+        return if matches!(mnemonic, "st2" | "st3" | "st4" | "ld2" | "ld3" | "ld4") {
+            MemLayout::SimdInterleaved
+        } else {
+            MemLayout::SimdContiguous
+        };
+    }
+    if is_exclusive_pair_store(mnemonic) {
+        return MemLayout::ExclusivePair;
+    }
+    if is_exclusive_store(mnemonic) {
+        return MemLayout::ExclusiveScalar;
+    }
+    if is_pair_mnemonic(mnemonic) {
+        return MemLayout::Pair;
+    }
+    MemLayout::Scalar
 }
 
 /// 判断助记符是否为 pair 类指令（ldp/stp 及其变体）。
@@ -481,8 +645,33 @@ pub(crate) fn is_pair_mnemonic(mn: &str) -> bool {
 
 /// 判断是否为 SIMD 多寄存器指令（ld1-ld4/st1-st4 且操作数中有两个以上数据寄存器）。
 pub(crate) fn is_simd_multi_reg(mnemonic: &str, operand_text: &str) -> bool {
-    matches!(mnemonic, "ld1" | "ld2" | "ld3" | "ld4" | "st1" | "st2" | "st3" | "st4")
-        && second_data_reg_name(operand_text).is_some()
+    matches!(
+        mnemonic,
+        "ld1" | "ld2" | "ld3" | "ld4" | "st1" | "st2" | "st3" | "st4"
+    ) && second_data_reg_name(operand_text).is_some()
+}
+
+/// Count register-sized values covered by a pair or multi-register memory
+/// operation.  The trace may omit one or more register values, but the address
+/// range is still real and must be represented as unknown during replay.
+pub(crate) fn memory_value_count(mnemonic: &str, operand_text: &str) -> u8 {
+    if !is_pair_mnemonic(mnemonic)
+        && !is_simd_multi_reg(mnemonic, operand_text)
+        && !is_simd_replicate(mnemonic)
+    {
+        return 1;
+    }
+    let count = split_operands(operand_text)
+        .into_iter()
+        .take_while(|token| !token.trim_start().starts_with('['))
+        .filter(|token| {
+            let token = token.trim().trim_matches(['{', '}']);
+            let token = token.split('.').next().unwrap_or(token);
+            parse_reg(token).is_some()
+        })
+        .count();
+    let status = usize::from(is_exclusive_pair_store(mnemonic));
+    count.saturating_sub(status).clamp(1, 4) as u8
 }
 
 /// 从 `bytes[start_pos..]` 中查找 `reg_name=0xHEX` 模式，返回 HEX 部分的原始字节切片。
@@ -567,7 +756,11 @@ pub(crate) fn find_simd_reg_u128(bytes: &[u8], reg_name: &str, start_pos: usize)
 
 /// 从 128-bit SIMD 寄存器值中提取标量值。
 /// lane load 时提取指定 lane 的元素，64-bit 排列时返回低 64 位。
-pub(crate) fn extract_simd_lane_value(full_u128: u128, elem_width: u8, lane_index: Option<u8>) -> u64 {
+pub(crate) fn extract_simd_lane_value(
+    full_u128: u128,
+    elem_width: u8,
+    lane_index: Option<u8>,
+) -> u64 {
     if let Some(lane_idx) = lane_index {
         let shift = lane_idx as u32 * elem_width as u32 * 8;
         let mask = if elem_width >= 8 {
@@ -597,6 +790,25 @@ pub(crate) fn simd_arrangement_total_width(operand_text: &str) -> Option<u8> {
     }
 }
 
+/// 从排列说明符推导单个元素的字节宽度（b=1, h=2, s=4, d=8），
+/// 即 st2-st4/ld2-ld4 lane 交错的粒度。
+pub(crate) fn simd_arrangement_element_width(operand_text: &str) -> Option<u8> {
+    let first_tok = operand_text.split(',').next()?.trim();
+    let first_tok = first_tok
+        .trim_start_matches('{')
+        .trim_end_matches('}')
+        .trim();
+    let first_tok = first_tok.split('[').next()?;
+    let arrangement = first_tok.split('.').nth(1)?;
+    match arrangement.as_bytes().last()? {
+        b'b' => Some(1),
+        b'h' => Some(2),
+        b's' => Some(4),
+        b'd' => Some(8),
+        _ => None,
+    }
+}
+
 /// Infer memory access width from mnemonic and the first operand's raw register prefix.
 ///
 /// The prefix must be captured BEFORE register normalization (w→x, d→v, etc.)
@@ -610,9 +822,9 @@ pub(crate) fn simd_arrangement_total_width(operand_text: &str) -> Option<u8> {
 pub(crate) fn determine_elem_width(mnemonic: &str, first_reg_prefix: Option<u8>) -> u8 {
     match mnemonic {
         "ldrb" | "strb" | "ldrsb" | "ldarb" | "stlrb" | "ldurb" | "sturb" | "ldtrb" | "sttrb"
-        | "ldaprb" => 1,
+        | "ldaprb" | "stxrb" | "stlxrb" => 1,
         "ldrh" | "strh" | "ldrsh" | "ldarh" | "stlrh" | "ldurh" | "sturh" | "ldtrh" | "sttrh"
-        | "ldaprh" => 2,
+        | "ldaprh" | "stxrh" | "stlxrh" => 2,
         "ldrsw" | "ldursw" | "ldtrsw" | "ldpsw" => 4,
         _ => match first_reg_prefix {
             Some(b'w') => 4,
@@ -1065,12 +1277,12 @@ mod tests {
 
     #[test]
     fn test_first_data_reg_name() {
-        assert_eq!(first_data_reg_name("x8, [sp, #0x10]"), Some("x8"));
-        assert_eq!(first_data_reg_name("w0, [x1]"), Some("w0"));
-        assert_eq!(first_data_reg_name("q0, [x0]"), Some("q0"));
-        assert_eq!(first_data_reg_name("{v0.16b}, [x0]"), Some("v0"));
-        assert_eq!(first_data_reg_name("[sp, #0x10]"), None);
-        assert_eq!(first_data_reg_name(""), None);
+        assert_eq!(data_reg_name_at("x8, [sp, #0x10]", 0), Some("x8"));
+        assert_eq!(data_reg_name_at("w0, [x1]", 0), Some("w0"));
+        assert_eq!(data_reg_name_at("q0, [x0]", 0), Some("q0"));
+        assert_eq!(data_reg_name_at("{v0.16b}, [x0]", 0), Some("v0"));
+        assert_eq!(data_reg_name_at("[sp, #0x10]", 0), None);
+        assert_eq!(data_reg_name_at("", 0), None);
     }
 
     #[test]

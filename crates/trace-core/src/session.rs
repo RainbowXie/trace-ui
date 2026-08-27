@@ -33,6 +33,11 @@ pub struct SessionState {
     pub file_path: String,
     pub total_lines: u32,
     pub file_size: u64,
+    /// Fingerprint established when the session opens the trace.  Memory
+    /// pagination reuses it; the engine checks file metadata around each
+    /// operation so an in-place rewrite cannot silently serve stale pages.
+    pub trace_hash: [u8; 32],
+    pub trace_metadata: std::fs::Metadata,
     pub trace_format: TraceFormat,
 
     // Phase2

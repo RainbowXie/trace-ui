@@ -48,6 +48,39 @@ pub struct GetMemoryRequest {
 
 fn default_mem_length() -> u32 { 64 }
 
+#[derive(Debug, Deserialize, JsonSchema, Clone, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct SeqRangeRequest {
+    pub start: u32,
+    pub end: u32,
+}
+
+#[derive(Debug, Deserialize, JsonSchema, Clone, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct MemoryRangeRequest {
+    #[schemars(description = "Half-open range start address, e.g. 0x1000")]
+    pub address: String,
+    #[schemars(description = "Positive range size in bytes")]
+    pub size: u64,
+}
+
+fn default_memory_search_limit() -> u32 { 50 }
+
+#[derive(Debug, Deserialize, JsonSchema, Clone, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct SearchMemoryRequest {
+    #[schemars(description = "Session ID (optional when exactly one trace is open)")]
+    pub session_id: Option<String>,
+    #[schemars(description = "Compact or whitespace-separated hexadecimal bytes")]
+    pub pattern: String,
+    pub seq_range: Option<SeqRangeRequest>,
+    pub memory_range: Option<MemoryRangeRequest>,
+    #[serde(default)]
+    pub offset: u32,
+    #[serde(default = "default_memory_search_limit")]
+    pub limit: u32,
+}
+
 // ── 搜索与分析 ──
 
 #[derive(Debug, Deserialize, JsonSchema)]
