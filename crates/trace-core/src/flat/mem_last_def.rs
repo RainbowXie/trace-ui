@@ -1,5 +1,5 @@
 pub struct FlatMemLastDef {
-    pub addrs: Vec<u64>,  // sorted
+    pub addrs: Vec<u64>, // sorted
     pub lines: Vec<u32>,
     pub values: Vec<u64>,
 }
@@ -22,7 +22,11 @@ pub struct MemLastDefView<'a> {
 
 impl<'a> MemLastDefView<'a> {
     pub fn from_raw(addrs: &'a [u64], lines: &'a [u32], values: &'a [u64]) -> Self {
-        Self { addrs, lines, values }
+        Self {
+            addrs,
+            lines,
+            values,
+        }
     }
 
     /// Binary search by address; returns (line, value) if found.

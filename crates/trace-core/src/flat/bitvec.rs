@@ -19,7 +19,10 @@ pub struct BitView<'a> {
 
 impl<'a> BitView<'a> {
     pub fn from_raw(data: &'a [u8], len: u32) -> Self {
-        Self { data, len: len as usize }
+        Self {
+            data,
+            len: len as usize,
+        }
     }
 
     /// Return the bit at position `idx` (little-endian bit order within each byte).
@@ -66,7 +69,9 @@ mod tests {
     #[test]
     fn test_basic_get() {
         // bits: [1, 0, 1, 1, 0, 0, 0, 1, 0, 1]
-        let bits = [true, false, true, true, false, false, false, true, false, true];
+        let bits = [
+            true, false, true, true, false, false, false, true, false, true,
+        ];
         let flat = make_bitvec(&bits);
         let view = flat.view();
         assert_eq!(view.len(), 10);
@@ -87,7 +92,10 @@ mod tests {
 
     #[test]
     fn test_empty() {
-        let flat = FlatBitVec { data: vec![], len: 0 };
+        let flat = FlatBitVec {
+            data: vec![],
+            len: 0,
+        };
         let view = flat.view();
         assert!(view.is_empty());
         assert_eq!(view.len(), 0);

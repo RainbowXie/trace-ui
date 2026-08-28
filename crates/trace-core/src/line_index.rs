@@ -326,7 +326,11 @@ mod tests {
                 .map(|p| pos + p)
                 .unwrap_or(data.len());
             builder.add_line(pos as u64);
-            pos = if line_end < data.len() { line_end + 1 } else { data.len() };
+            pos = if line_end < data.len() {
+                line_end + 1
+            } else {
+                data.len()
+            };
         }
         let built = builder.finish();
 

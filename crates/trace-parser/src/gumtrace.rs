@@ -543,25 +543,26 @@ fn find_gumtrace_mem_op(cx: GumtraceMemOpContext<'_>) -> Option<MemOp> {
         || parser::is_simd_multi_reg(cx.mnemonic, cx.operand_text)
     {
         if elem_width <= 8 {
-            let v2 = second_memory_data_reg_name(cx.mnemonic, cx.operand_text).and_then(|reg_name| {
-                // store 侧零寄存器是已知零；load 侧目标被丢弃，证明不了内存为零。
-                if reg_name == "xzr" || reg_name == "wzr" {
-                    return if is_write { Some(0) } else { None };
-                }
-                let ss = search_start?;
-                if is_simd_reg_name(reg_name) {
-                    let full = find_simd_reg_u128(cx.full_bytes, reg_name, ss)?;
-                    extract_simd_lane_value(full, elem_width, None)
-                } else {
-                    let raw_val = find_reg_value_with_alias(cx.full_bytes, reg_name, ss)?;
-                    let mask = if elem_width >= 8 {
-                        u64::MAX
+            let v2 =
+                second_memory_data_reg_name(cx.mnemonic, cx.operand_text).and_then(|reg_name| {
+                    // store 侧零寄存器是已知零；load 侧目标被丢弃，证明不了内存为零。
+                    if reg_name == "xzr" || reg_name == "wzr" {
+                        return if is_write { Some(0) } else { None };
+                    }
+                    let ss = search_start?;
+                    if is_simd_reg_name(reg_name) {
+                        let full = find_simd_reg_u128(cx.full_bytes, reg_name, ss)?;
+                        extract_simd_lane_value(full, elem_width, None)
                     } else {
-                        (1u64 << (elem_width as u32 * 8)) - 1
-                    };
-                    Some(raw_val & mask)
-                }
-            });
+                        let raw_val = find_reg_value_with_alias(cx.full_bytes, reg_name, ss)?;
+                        let mask = if elem_width >= 8 {
+                            u64::MAX
+                        } else {
+                            (1u64 << (elem_width as u32 * 8)) - 1
+                        };
+                        Some(raw_val & mask)
+                    }
+                });
             (v2, None, None)
         } else if elem_width == 16 {
             let v128 = second_memory_data_reg_name(cx.mnemonic, cx.operand_text)

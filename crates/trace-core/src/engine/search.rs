@@ -57,11 +57,15 @@ fn parse_search_mode(
         if tokens.len() > 1 {
             Ok(SearchMode::FuzzyText(tokens))
         } else {
-            Ok(SearchMode::TextInsensitive(query.to_lowercase().into_bytes()))
+            Ok(SearchMode::TextInsensitive(
+                query.to_lowercase().into_bytes(),
+            ))
         }
     } else {
         // 默认：整体子串匹配（含空格）
-        Ok(SearchMode::TextInsensitive(query.to_lowercase().into_bytes()))
+        Ok(SearchMode::TextInsensitive(
+            query.to_lowercase().into_bytes(),
+        ))
     }
 }
 
@@ -81,7 +85,9 @@ fn ascii_contains_sensitive(haystack: &[u8], needle: &[u8]) -> bool {
     if needle.len() > haystack.len() {
         return false;
     }
-    haystack.windows(needle.len()).any(|window| window == needle)
+    haystack
+        .windows(needle.len())
+        .any(|window| window == needle)
 }
 
 /// 对一行执行匹配（支持原始行 + call_search_text 双重匹配）
@@ -198,7 +204,9 @@ impl TraceEngine {
         let handle = self.get_handle(session_id)?;
 
         if query.is_empty() {
-            *handle.search_cache.lock()
+            *handle
+                .search_cache
+                .lock()
                 .map_err(|e| TraceError::Internal(e.to_string()))? = (0, Vec::new());
             return Ok(SearchResultLite {
                 match_seqs: Vec::new(),
@@ -208,9 +216,18 @@ impl TraceEngine {
             });
         }
 
-        let mode = parse_search_mode(query, options.case_sensitive, options.use_regex, options.fuzzy)?;
+        let mode = parse_search_mode(
+            query,
+            options.case_sensitive,
+            options.use_regex,
+            options.fuzzy,
+        )?;
         let paginated = options.max_results.is_none();
-        let max_results = if paginated { usize::MAX } else { options.max_results.unwrap() as usize };
+        let max_results = if paginated {
+            usize::MAX
+        } else {
+            options.max_results.unwrap() as usize
+        };
 
         let num_cpus = std::thread::available_parallelism()
             .map(|n| n.get())
@@ -229,30 +246,27 @@ impl TraceEngine {
                 .map(|s| s.total_lines())
                 .unwrap_or(0);
 
-            let chunks: Option<Vec<(u32, u32, usize)>> =
-                if num_cpus > 1 && total_lines > 10000 {
-                    state.line_index_view().map(|li| {
-                        let data: &[u8] = &state.mmap;
-                        let num_chunks = num_cpus.min(16);
-                        let lines_per_chunk =
-                            (total_lines as usize + num_chunks - 1) / num_chunks;
-                        let mut result = Vec::with_capacity(num_chunks);
-                        for i in 0..num_chunks {
-                            let start_seq = (i * lines_per_chunk) as u32;
-                            if start_seq >= total_lines {
-                                break;
-                            }
-                            let end_seq =
-                                ((i + 1) * lines_per_chunk).min(total_lines as usize) as u32;
-                            let start_offset =
-                                li.line_byte_offset(data, start_seq).unwrap_or(0) as usize;
-                            result.push((start_seq, end_seq, start_offset));
+            let chunks: Option<Vec<(u32, u32, usize)>> = if num_cpus > 1 && total_lines > 10000 {
+                state.line_index_view().map(|li| {
+                    let data: &[u8] = &state.mmap;
+                    let num_chunks = num_cpus.min(16);
+                    let lines_per_chunk = (total_lines as usize + num_chunks - 1) / num_chunks;
+                    let mut result = Vec::with_capacity(num_chunks);
+                    for i in 0..num_chunks {
+                        let start_seq = (i * lines_per_chunk) as u32;
+                        if start_seq >= total_lines {
+                            break;
                         }
-                        result
-                    })
-                } else {
-                    None
-                };
+                        let end_seq = ((i + 1) * lines_per_chunk).min(total_lines as usize) as u32;
+                        let start_offset =
+                            li.line_byte_offset(data, start_seq).unwrap_or(0) as usize;
+                        result.push((start_seq, end_seq, start_offset));
+                    }
+                    result
+                })
+            } else {
+                None
+            };
 
             let consumed: HashSet<u32> = state.consumed_seqs.iter().copied().collect();
 
@@ -314,7 +328,9 @@ impl TraceEngine {
             // 全量模式：缓存结果，只返回首页
             let first_page_end = SEARCH_FIRST_PAGE_SIZE.min(all_seqs.len());
             let first_page = all_seqs[..first_page_end].to_vec();
-            let mut cache = handle.search_cache.lock()
+            let mut cache = handle
+                .search_cache
+                .lock()
                 .map_err(|e| TraceError::Internal(e.to_string()))?;
             let gen = cache.0 + 1;
             *cache = (gen, all_seqs); // move, not clone
@@ -343,7 +359,9 @@ impl TraceEngine {
         count: u32,
     ) -> Result<(u64, Vec<u32>)> {
         let handle = self.get_handle(session_id)?;
-        let cache = handle.search_cache.lock()
+        let cache = handle
+            .search_cache
+            .lock()
             .map_err(|e| TraceError::Internal(e.to_string()))?;
         let (gen, ref all_seqs) = *cache;
         let start = (offset as usize).min(all_seqs.len());
@@ -385,7 +403,8 @@ impl TraceEngine {
                 .iter()
                 .filter(|&&seq| !consumed.contains(&seq))
                 .filter_map(|&seq| {
-                    li.line_byte_offset(data, seq).map(|off| (seq, off as usize))
+                    li.line_byte_offset(data, seq)
+                        .map(|off| (seq, off as usize))
                 })
                 .collect();
 

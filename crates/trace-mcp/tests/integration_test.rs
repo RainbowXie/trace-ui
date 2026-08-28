@@ -25,11 +25,16 @@ fn setup_session(path: &str) -> (Arc<TraceEngine>, String) {
     let engine = Arc::new(TraceEngine::new());
     let info = engine.create_session(path).expect("create_session failed");
     let sid = info.session_id.clone();
-    let build = engine.build_index(
-        &sid,
-        trace_core::BuildOptions { force_rebuild: false, skip_strings: false },
-        None,
-    ).expect("build_index failed");
+    let build = engine
+        .build_index(
+            &sid,
+            trace_core::BuildOptions {
+                force_rebuild: false,
+                skip_strings: false,
+            },
+            None,
+        )
+        .expect("build_index failed");
     assert!(build.total_lines > 0, "trace should have lines");
     (engine, sid)
 }
@@ -39,16 +44,23 @@ fn setup_session(path: &str) -> (Arc<TraceEngine>, String) {
 #[test]
 fn test_open_and_close_trace() {
     let engine = Arc::new(TraceEngine::new());
-    let info = engine.create_session(&get_trace_path()).expect("create_session");
+    let info = engine
+        .create_session(&get_trace_path())
+        .expect("create_session");
     let sid = info.session_id.clone();
     assert!(!sid.is_empty());
     assert!(info.file_size > 0);
 
-    let build = engine.build_index(
-        &sid,
-        trace_core::BuildOptions { force_rebuild: false, skip_strings: false },
-        None,
-    ).expect("build_index");
+    let build = engine
+        .build_index(
+            &sid,
+            trace_core::BuildOptions {
+                force_rebuild: false,
+                skip_strings: false,
+            },
+            None,
+        )
+        .expect("build_index");
     assert!(build.total_lines > 0);
 
     // close
@@ -114,7 +126,9 @@ fn test_get_trace_lines_overflow_safe() {
     let seqs: Vec<u32> = (start_seq..end).collect();
     // These seqs are way beyond the trace — get_lines should not panic (the key property).
     // It may return empty lines with default fields since the engine handles out-of-range gracefully.
-    let lines = engine.get_lines(&sid, &seqs).expect("get_lines should not panic on out-of-range seqs");
+    let lines = engine
+        .get_lines(&sid, &seqs)
+        .expect("get_lines should not panic on out-of-range seqs");
 
     engine.close_session(&sid).unwrap();
 }
@@ -136,7 +150,9 @@ fn test_get_memory() {
     if let Some(addr_str) = &lines[0].mem_addr {
         let addr_hex = addr_str.strip_prefix("0x").unwrap_or(addr_str);
         let addr = u64::from_str_radix(addr_hex, 16).unwrap();
-        let snap = engine.get_memory_at(&sid, addr, 0, 64).expect("get_memory_at");
+        let snap = engine
+            .get_memory_at(&sid, addr, 0, 64)
+            .expect("get_memory_at");
         assert_eq!(snap.bytes.len(), snap.known.len());
         assert_eq!(snap.length, 64);
     }
@@ -157,7 +173,9 @@ fn test_get_memory_history() {
         let meta = engine.get_mem_history_meta(&sid, addr, 2).expect("meta");
         assert!(meta.total > 0, "should have access history");
 
-        let records = engine.get_mem_history_range(&sid, addr, 0, 50).expect("range");
+        let records = engine
+            .get_mem_history_range(&sid, addr, 0, 50)
+            .expect("range");
         assert!(!records.is_empty());
     }
 
@@ -170,21 +188,25 @@ fn test_get_memory_history() {
 fn test_search_instructions() {
     let (engine, sid) = setup_session(&get_trace_path());
 
-    let result = engine.search(
-        &sid,
-        "str",
-        trace_core::SearchOptions {
-            case_sensitive: false,
-            use_regex: false,
-            fuzzy: false,
-            max_results: Some(50),
-        },
-    ).expect("search");
+    let result = engine
+        .search(
+            &sid,
+            "str",
+            trace_core::SearchOptions {
+                case_sensitive: false,
+                use_regex: false,
+                fuzzy: false,
+                max_results: Some(50),
+            },
+        )
+        .expect("search");
     assert!(result.total_matches > 0, "should find 'str' instructions");
 
     // Verify get_lines works on search results (the fix for error swallowing)
     let preview: Vec<u32> = result.match_seqs.iter().copied().take(10).collect();
-    let lines = engine.get_lines(&sid, &preview).expect("get_lines on search results should not fail");
+    let lines = engine
+        .get_lines(&sid, &preview)
+        .expect("get_lines on search results should not fail");
     assert!(!lines.is_empty());
 
     engine.close_session(&sid).unwrap();
@@ -194,16 +216,18 @@ fn test_search_instructions() {
 fn test_search_regex() {
     let (engine, sid) = setup_session(&get_trace_path());
 
-    let result = engine.search(
-        &sid,
-        "bl.*0x",
-        trace_core::SearchOptions {
-            case_sensitive: false,
-            use_regex: true,
-            fuzzy: false,
-            max_results: Some(50),
-        },
-    ).expect("regex search");
+    let result = engine
+        .search(
+            &sid,
+            "bl.*0x",
+            trace_core::SearchOptions {
+                case_sensitive: false,
+                use_regex: true,
+                fuzzy: false,
+                max_results: Some(50),
+            },
+        )
+        .expect("regex search");
     // bl instructions exist in the trace
     assert!(result.total_scanned > 0);
 
@@ -217,15 +241,17 @@ fn test_taint_analysis_full_workflow() {
     let (engine, sid) = setup_session(&get_trace_path());
 
     // Run taint analysis on a register
-    let result = engine.run_slice(
-        &sid,
-        &["reg:X0@last".to_string()],
-        trace_core::SliceOptions {
-            start_seq: None,
-            end_seq: None,
-            data_only: false,
-        },
-    ).expect("run_slice");
+    let result = engine
+        .run_slice(
+            &sid,
+            &["reg:X0@last".to_string()],
+            trace_core::SliceOptions {
+                start_seq: None,
+                end_seq: None,
+                data_only: false,
+            },
+        )
+        .expect("run_slice");
     assert!(result.marked_count > 0, "should mark some lines as tainted");
     assert!(result.total_lines > 0);
 
@@ -234,14 +260,20 @@ fn test_taint_analysis_full_workflow() {
     assert_eq!(tainted.len(), result.marked_count as usize);
 
     // Get tainted lines (the error propagation fix)
-    let lines = engine.get_lines(&sid, &tainted[..tainted.len().min(10)])
+    let lines = engine
+        .get_lines(&sid, &tainted[..tainted.len().min(10)])
         .expect("get_lines on tainted seqs should not fail");
     assert!(!lines.is_empty());
 
     // Clear taint
     engine.clear_slice(&sid).expect("clear_slice");
-    let after_clear = engine.get_tainted_seqs(&sid).expect("get_tainted_seqs after clear");
-    assert!(after_clear.is_empty(), "tainted seqs should be empty after clear");
+    let after_clear = engine
+        .get_tainted_seqs(&sid)
+        .expect("get_tainted_seqs after clear");
+    assert!(
+        after_clear.is_empty(),
+        "tainted seqs should be empty after clear"
+    );
 
     engine.close_session(&sid).unwrap();
 }
@@ -250,15 +282,17 @@ fn test_taint_analysis_full_workflow() {
 fn test_taint_analysis_data_only() {
     let (engine, sid) = setup_session(&get_trace_path());
 
-    let result = engine.run_slice(
-        &sid,
-        &["reg:x0@last".to_string()], // lowercase, testing case-insensitivity
-        trace_core::SliceOptions {
-            start_seq: None,
-            end_seq: None,
-            data_only: true,
-        },
-    ).expect("run_slice data_only");
+    let result = engine
+        .run_slice(
+            &sid,
+            &["reg:x0@last".to_string()], // lowercase, testing case-insensitivity
+            trace_core::SliceOptions {
+                start_seq: None,
+                end_seq: None,
+                data_only: true,
+            },
+        )
+        .expect("run_slice data_only");
     assert!(result.marked_count > 0);
 
     engine.close_session(&sid).unwrap();
@@ -270,15 +304,17 @@ fn test_taint_analysis_with_range() {
     let info = engine.get_session_info(&sid).unwrap();
     let mid = info.total_lines / 2;
 
-    let result = engine.run_slice(
-        &sid,
-        &["reg:X0@last".to_string()],
-        trace_core::SliceOptions {
-            start_seq: Some(0),
-            end_seq: Some(mid),
-            data_only: false,
-        },
-    ).expect("run_slice with range");
+    let result = engine
+        .run_slice(
+            &sid,
+            &["reg:X0@last".to_string()],
+            trace_core::SliceOptions {
+                start_seq: Some(0),
+                end_seq: Some(mid),
+                data_only: false,
+            },
+        )
+        .expect("run_slice with range");
     // With end_seq restriction, marked_count should be <= total
     assert!(result.marked_count <= mid + 1);
 
@@ -289,17 +325,27 @@ fn test_taint_analysis_with_range() {
 fn test_get_slice_status() {
     let (engine, sid) = setup_session(&get_trace_path());
 
-    engine.run_slice(
-        &sid,
-        &["reg:X0@last".to_string()],
-        trace_core::SliceOptions { start_seq: None, end_seq: None, data_only: false },
-    ).expect("run_slice");
+    engine
+        .run_slice(
+            &sid,
+            &["reg:X0@last".to_string()],
+            trace_core::SliceOptions {
+                start_seq: None,
+                end_seq: None,
+                data_only: false,
+            },
+        )
+        .expect("run_slice");
 
-    let status = engine.get_slice_status(&sid, 0, 20).expect("get_slice_status");
+    let status = engine
+        .get_slice_status(&sid, 0, 20)
+        .expect("get_slice_status");
     assert_eq!(status.len(), 20);
     // At least some should be tainted
-    assert!(status.iter().any(|&b| b) || !status.iter().any(|&b| b),
-        "status should be valid booleans");
+    assert!(
+        status.iter().any(|&b| b) || !status.iter().any(|&b| b),
+        "status should be valid booleans"
+    );
 
     engine.close_session(&sid).unwrap();
 }
@@ -310,12 +356,17 @@ fn test_get_slice_status() {
 fn test_dependency_tree() {
     let (engine, sid) = setup_session(&get_trace_path());
 
-    let graph = engine.build_dep_tree(
-        &sid,
-        5,
-        "reg:X0",
-        trace_core::DepTreeOptions { data_only: false, max_nodes: Some(50) },
-    ).expect("build_dep_tree");
+    let graph = engine
+        .build_dep_tree(
+            &sid,
+            5,
+            "reg:X0",
+            trace_core::DepTreeOptions {
+                data_only: false,
+                max_nodes: Some(50),
+            },
+        )
+        .expect("build_dep_tree");
     // Graph should have at least 1 node (the root)
     assert!(!graph.nodes.is_empty(), "dep tree should have nodes");
 
@@ -327,16 +378,27 @@ fn test_dependency_tree_from_slice() {
     let (engine, sid) = setup_session(&get_trace_path());
 
     // First run taint analysis
-    engine.run_slice(
-        &sid,
-        &["reg:X0@last".to_string()],
-        trace_core::SliceOptions { start_seq: None, end_seq: None, data_only: true },
-    ).expect("run_slice");
+    engine
+        .run_slice(
+            &sid,
+            &["reg:X0@last".to_string()],
+            trace_core::SliceOptions {
+                start_seq: None,
+                end_seq: None,
+                data_only: true,
+            },
+        )
+        .expect("run_slice");
 
-    let graph = engine.build_dep_tree_from_slice(
-        &sid,
-        trace_core::DepTreeOptions { data_only: true, max_nodes: Some(50) },
-    ).expect("build_dep_tree_from_slice");
+    let graph = engine
+        .build_dep_tree_from_slice(
+            &sid,
+            trace_core::DepTreeOptions {
+                data_only: true,
+                max_nodes: Some(50),
+            },
+        )
+        .expect("build_dep_tree_from_slice");
     assert!(!graph.nodes.is_empty());
 
     engine.close_session(&sid).unwrap();
@@ -350,12 +412,15 @@ fn test_def_use_chain() {
 
     // Line 0 should define x0 based on the trace content
     // parse_reg requires lowercase, but MCP tool now does .to_lowercase()
-    let chain = engine.get_def_use_chain(&sid, 0, "x0").expect("get_def_use_chain");
+    let chain = engine
+        .get_def_use_chain(&sid, 0, "x0")
+        .expect("get_def_use_chain");
     // Chain should be valid (def_seq or use_seqs populated depending on line role)
     let _ = chain;
 
     // Also verify uppercase works when passed through to_lowercase() (as MCP tool does)
-    let chain_upper = engine.get_def_use_chain(&sid, 0, &"X0".to_lowercase())
+    let chain_upper = engine
+        .get_def_use_chain(&sid, 0, &"X0".to_lowercase())
         .expect("get_def_use_chain with lowercased X0");
     let _ = chain_upper;
 
@@ -366,9 +431,14 @@ fn test_def_use_chain() {
 fn test_get_line_def_registers() {
     let (engine, sid) = setup_session(&get_trace_path());
 
-    let regs = engine.get_line_def_registers(&sid, 0).expect("get_line_def_registers");
+    let regs = engine
+        .get_line_def_registers(&sid, 0)
+        .expect("get_line_def_registers");
     // Line 0: "sub x0, x29, #0x80" should define X0
-    assert!(!regs.is_empty(), "line 0 should define at least one register");
+    assert!(
+        !regs.is_empty(),
+        "line 0 should define at least one register"
+    );
 
     engine.close_session(&sid).unwrap();
 }
@@ -380,8 +450,13 @@ fn test_call_tree() {
     let (engine, sid) = setup_session(&get_trace_path());
 
     // Get root
-    let nodes = engine.get_call_tree_children(&sid, 0, true).expect("get_call_tree_children");
-    assert!(!nodes.is_empty(), "call tree should have at least root node");
+    let nodes = engine
+        .get_call_tree_children(&sid, 0, true)
+        .expect("get_call_tree_children");
+    assert!(
+        !nodes.is_empty(),
+        "call tree should have at least root node"
+    );
     assert_eq!(nodes[0].id, 0);
 
     engine.close_session(&sid).unwrap();
@@ -391,7 +466,9 @@ fn test_call_tree() {
 fn test_get_call_tree_node_count() {
     let (engine, sid) = setup_session(&get_trace_path());
 
-    let count = engine.get_call_tree_node_count(&sid).expect("get_call_tree_node_count");
+    let count = engine
+        .get_call_tree_node_count(&sid)
+        .expect("get_call_tree_node_count");
     assert!(count > 0, "call tree should have nodes");
 
     engine.close_session(&sid).unwrap();
@@ -428,15 +505,17 @@ fn test_get_function_list() {
 fn test_get_strings() {
     let (engine, sid) = setup_session(&get_trace_path());
 
-    let result = engine.get_strings(
-        &sid,
-        trace_core::StringQueryOptions {
-            min_len: 4,
-            offset: 0,
-            limit: 100,
-            search: None,
-        },
-    ).expect("get_strings");
+    let result = engine
+        .get_strings(
+            &sid,
+            trace_core::StringQueryOptions {
+                min_len: 4,
+                offset: 0,
+                limit: 100,
+                search: None,
+            },
+        )
+        .expect("get_strings");
     // May or may not have strings depending on trace content
     // Just verify it doesn't error
     // get_strings should succeed (may have 0 strings in small trace)
@@ -447,29 +526,38 @@ fn test_get_strings() {
 #[test]
 fn test_scan_strings_after_skip() {
     let engine = Arc::new(TraceEngine::new());
-    let info = engine.create_session(&get_trace_path()).expect("create_session");
+    let info = engine
+        .create_session(&get_trace_path())
+        .expect("create_session");
     let sid = info.session_id.clone();
 
     // Build with skip_strings = true
-    engine.build_index(
-        &sid,
-        trace_core::BuildOptions { force_rebuild: false, skip_strings: true },
-        None,
-    ).expect("build_index skip_strings");
+    engine
+        .build_index(
+            &sid,
+            trace_core::BuildOptions {
+                force_rebuild: false,
+                skip_strings: true,
+            },
+            None,
+        )
+        .expect("build_index skip_strings");
 
     // Now scan strings manually
     engine.scan_strings(&sid).expect("scan_strings");
 
     // Should be able to query strings now
-    let result = engine.get_strings(
-        &sid,
-        trace_core::StringQueryOptions {
-            min_len: 4,
-            offset: 0,
-            limit: 100,
-            search: None,
-        },
-    ).expect("get_strings after scan");
+    let result = engine
+        .get_strings(
+            &sid,
+            trace_core::StringQueryOptions {
+                min_len: 4,
+                offset: 0,
+                limit: 100,
+                search: None,
+            },
+        )
+        .expect("get_strings after scan");
     // Verify it works without error
 
     engine.close_session(&sid).unwrap();
@@ -479,21 +567,25 @@ fn test_scan_strings_after_skip() {
 fn test_get_string_xrefs() {
     let (engine, sid) = setup_session(&get_trace_path());
 
-    let strings = engine.get_strings(
-        &sid,
-        trace_core::StringQueryOptions {
-            min_len: 4,
-            offset: 0,
-            limit: 10,
-            search: None,
-        },
-    ).expect("get_strings");
+    let strings = engine
+        .get_strings(
+            &sid,
+            trace_core::StringQueryOptions {
+                min_len: 4,
+                offset: 0,
+                limit: 10,
+                search: None,
+            },
+        )
+        .expect("get_strings");
 
     if !strings.strings.is_empty() {
         let s = &strings.strings[0];
         let addr_hex = s.addr.strip_prefix("0x").unwrap_or(&s.addr);
         let addr = u64::from_str_radix(addr_hex, 16).unwrap();
-        let xrefs = engine.get_string_xrefs(&sid, addr, s.byte_len).expect("get_string_xrefs");
+        let xrefs = engine
+            .get_string_xrefs(&sid, addr, s.byte_len)
+            .expect("get_string_xrefs");
         // xrefs may be empty if no cross-references, but should not error
         let _ = xrefs;
     }
@@ -524,25 +616,33 @@ fn test_export_taint_results_json() {
     let (engine, sid) = setup_session(&get_trace_path());
 
     // Run taint first
-    engine.run_slice(
-        &sid,
-        &["reg:X0@last".to_string()],
-        trace_core::SliceOptions { start_seq: None, end_seq: None, data_only: false },
-    ).expect("run_slice");
+    engine
+        .run_slice(
+            &sid,
+            &["reg:X0@last".to_string()],
+            trace_core::SliceOptions {
+                start_seq: None,
+                end_seq: None,
+                data_only: false,
+            },
+        )
+        .expect("run_slice");
 
     let tmp = std::env::temp_dir().join("trace_mcp_test_export.json");
     let tmp_path = tmp.to_str().unwrap().to_string();
 
-    engine.export_taint_results(
-        &sid,
-        &tmp_path,
-        "json",
-        trace_core::ExportConfig {
-            from_specs: vec![],
-            start_seq: None,
-            end_seq: None,
-        },
-    ).expect("export_taint_results json");
+    engine
+        .export_taint_results(
+            &sid,
+            &tmp_path,
+            "json",
+            trace_core::ExportConfig {
+                from_specs: vec![],
+                start_seq: None,
+                end_seq: None,
+            },
+        )
+        .expect("export_taint_results json");
 
     // Verify file was created and contains valid JSON
     let content = std::fs::read_to_string(&tmp_path).expect("read export file");
@@ -558,25 +658,33 @@ fn test_export_taint_results_json() {
 fn test_export_taint_results_txt() {
     let (engine, sid) = setup_session(&get_trace_path());
 
-    engine.run_slice(
-        &sid,
-        &["reg:X0@last".to_string()],
-        trace_core::SliceOptions { start_seq: None, end_seq: None, data_only: false },
-    ).expect("run_slice");
+    engine
+        .run_slice(
+            &sid,
+            &["reg:X0@last".to_string()],
+            trace_core::SliceOptions {
+                start_seq: None,
+                end_seq: None,
+                data_only: false,
+            },
+        )
+        .expect("run_slice");
 
     let tmp = std::env::temp_dir().join("trace_mcp_test_export.txt");
     let tmp_path = tmp.to_str().unwrap().to_string();
 
-    engine.export_taint_results(
-        &sid,
-        &tmp_path,
-        "txt",
-        trace_core::ExportConfig {
-            from_specs: vec![],
-            start_seq: None,
-            end_seq: None,
-        },
-    ).expect("export_taint_results txt");
+    engine
+        .export_taint_results(
+            &sid,
+            &tmp_path,
+            "txt",
+            trace_core::ExportConfig {
+                from_specs: vec![],
+                start_seq: None,
+                end_seq: None,
+            },
+        )
+        .expect("export_taint_results txt");
 
     let content = std::fs::read_to_string(&tmp_path).expect("read export file");
     assert!(!content.is_empty(), "TXT export should have content");
@@ -612,7 +720,10 @@ fn test_unidbg_format_basic() {
     let (engine, sid) = setup_session(&get_unidbg_trace_path());
 
     let info = engine.get_session_info(&sid).expect("get_session_info");
-    assert!(info.total_lines > 1000, "unidbg trace should have many lines");
+    assert!(
+        info.total_lines > 1000,
+        "unidbg trace should have many lines"
+    );
 
     let lines = engine.get_lines(&sid, &[0, 1, 2]).expect("get_lines");
     assert_eq!(lines.len(), 3);
@@ -630,16 +741,23 @@ async fn test_spawn_blocking_helper() {
 
     let engine_clone = engine.clone();
     let result: Result<String, String> = tokio::task::spawn_blocking(move || {
-        let info = engine_clone.create_session(&path).map_err(|e| e.to_string())?;
+        let info = engine_clone
+            .create_session(&path)
+            .map_err(|e| e.to_string())?;
         let sid = info.session_id.clone();
-        let build = engine_clone.build_index(
-            &sid,
-            trace_core::BuildOptions { force_rebuild: false, skip_strings: false },
-            None,
-        ).map_err(|e| {
-            let _ = engine_clone.close_session(&sid);
-            e.to_string()
-        })?;
+        let build = engine_clone
+            .build_index(
+                &sid,
+                trace_core::BuildOptions {
+                    force_rebuild: false,
+                    skip_strings: false,
+                },
+                None,
+            )
+            .map_err(|e| {
+                let _ = engine_clone.close_session(&sid);
+                e.to_string()
+            })?;
         let _ = engine_clone.close_session(&sid);
         Ok(format!("lines: {}", build.total_lines))
     })
@@ -661,12 +779,29 @@ fn test_invalid_session_id() {
 
     assert!(engine.get_lines(bad_sid, &[0]).is_err());
     assert!(engine.get_registers_at(bad_sid, 0).is_err());
-    assert!(engine.search(bad_sid, "test", trace_core::SearchOptions {
-        case_sensitive: false, use_regex: false, fuzzy: false, max_results: Some(10),
-    }).is_err());
-    assert!(engine.run_slice(bad_sid, &["reg:X0@last".to_string()], trace_core::SliceOptions {
-        start_seq: None, end_seq: None, data_only: false,
-    }).is_err());
+    assert!(engine
+        .search(
+            bad_sid,
+            "test",
+            trace_core::SearchOptions {
+                case_sensitive: false,
+                use_regex: false,
+                fuzzy: false,
+                max_results: Some(10),
+            }
+        )
+        .is_err());
+    assert!(engine
+        .run_slice(
+            bad_sid,
+            &["reg:X0@last".to_string()],
+            trace_core::SliceOptions {
+                start_seq: None,
+                end_seq: None,
+                data_only: false,
+            }
+        )
+        .is_err());
     assert!(engine.get_call_tree_children(bad_sid, 0, true).is_err());
     assert!(engine.get_function_calls(bad_sid).is_err());
     assert!(engine.get_def_use_chain(bad_sid, 0, "X0").is_err());
@@ -693,8 +828,14 @@ fn test_compact_vs_full_output() {
     // Full mode: serde serialization includes all fields
     let full = serde_json::to_value(line).unwrap();
     assert!(full.get("raw").is_some(), "full should have 'raw'");
-    assert!(full.get("reg_before").is_some(), "full should have 'reg_before'");
-    assert!(full.get("so_offset").is_some(), "full should have 'so_offset'");
+    assert!(
+        full.get("reg_before").is_some(),
+        "full should have 'reg_before'"
+    );
+    assert!(
+        full.get("so_offset").is_some(),
+        "full should have 'so_offset'"
+    );
 
     // Compact mode: simulate compact_line trimming
     let mut compact = serde_json::json!({
@@ -721,22 +862,43 @@ fn test_compact_vs_full_output() {
     }
 
     // Compact should NOT have trimmed fields
-    assert!(compact.get("raw").is_none(), "compact should NOT have 'raw'");
-    assert!(compact.get("reg_before").is_none(), "compact should NOT have 'reg_before'");
-    assert!(compact.get("so_offset").is_none(), "compact should NOT have 'so_offset'");
-    assert!(compact.get("mem_size").is_none(), "compact should NOT have 'mem_size'");
+    assert!(
+        compact.get("raw").is_none(),
+        "compact should NOT have 'raw'"
+    );
+    assert!(
+        compact.get("reg_before").is_none(),
+        "compact should NOT have 'reg_before'"
+    );
+    assert!(
+        compact.get("so_offset").is_none(),
+        "compact should NOT have 'so_offset'"
+    );
+    assert!(
+        compact.get("mem_size").is_none(),
+        "compact should NOT have 'mem_size'"
+    );
 
     // Compact should have core fields
     assert!(compact.get("seq").is_some(), "compact should have 'seq'");
-    assert!(compact.get("address").is_some(), "compact should have 'address'");
-    assert!(compact.get("disasm").is_some(), "compact should have 'disasm'");
+    assert!(
+        compact.get("address").is_some(),
+        "compact should have 'address'"
+    );
+    assert!(
+        compact.get("disasm").is_some(),
+        "compact should have 'disasm'"
+    );
 
     // Compact should have fewer fields than full
     let compact_keys = compact.as_object().unwrap().len();
     let full_keys = full.as_object().unwrap().len();
-    assert!(compact_keys < full_keys,
+    assert!(
+        compact_keys < full_keys,
         "compact ({} keys) should have fewer fields than full ({} keys)",
-        compact_keys, full_keys);
+        compact_keys,
+        full_keys
+    );
 
     engine.close_session(&sid).unwrap();
 }
@@ -745,7 +907,10 @@ fn test_compact_vs_full_output() {
 fn test_hex_addr_parsing() {
     // Test the parse_hex_addr logic used in MCP tools
     fn parse_hex_addr(s: &str) -> Result<u64, String> {
-        let hex = s.strip_prefix("0x").or_else(|| s.strip_prefix("0X")).unwrap_or(s);
+        let hex = s
+            .strip_prefix("0x")
+            .or_else(|| s.strip_prefix("0X"))
+            .unwrap_or(s);
         u64::from_str_radix(hex, 16).map_err(|_| format!("Invalid hex address: {}", s))
     }
 
@@ -769,15 +934,17 @@ fn test_get_slice_origin() {
     assert!(origin.is_none());
 
     // Run taint with range
-    engine.run_slice(
-        &sid,
-        &["reg:X0@last".to_string()],
-        trace_core::SliceOptions {
-            start_seq: Some(0),
-            end_seq: Some(mid),
-            data_only: true,
-        },
-    ).expect("run_slice");
+    engine
+        .run_slice(
+            &sid,
+            &["reg:X0@last".to_string()],
+            trace_core::SliceOptions {
+                start_seq: Some(0),
+                end_seq: Some(mid),
+                data_only: true,
+            },
+        )
+        .expect("run_slice");
 
     // After taint: should have origin with all fields
     let origin = engine.get_slice_origin(&sid).expect("get_slice_origin");
@@ -801,17 +968,21 @@ fn test_taint_context_preserved() {
     let info = engine.get_session_info(&sid).unwrap();
     let mid = info.total_lines / 2;
 
-    engine.run_slice(
-        &sid,
-        &["reg:X0@last".to_string()],
-        trace_core::SliceOptions {
-            start_seq: Some(0),
-            end_seq: Some(mid),
-            data_only: true,
-        },
-    ).expect("run_slice");
+    engine
+        .run_slice(
+            &sid,
+            &["reg:X0@last".to_string()],
+            trace_core::SliceOptions {
+                start_seq: Some(0),
+                end_seq: Some(mid),
+                data_only: true,
+            },
+        )
+        .expect("run_slice");
 
-    let origin = engine.get_slice_origin(&sid).expect("get_slice_origin")
+    let origin = engine
+        .get_slice_origin(&sid)
+        .expect("get_slice_origin")
         .expect("should have origin");
     assert_eq!(origin.from_specs, vec!["reg:X0@last"]);
     assert!(origin.data_only);
@@ -841,13 +1012,19 @@ fn test_stack_only_change_detection() {
         "",
     ];
     for case in &non_stack_cases {
-        assert!(!check_stack_only(case), "should NOT be stack-only: {}", case);
+        assert!(
+            !check_stack_only(case),
+            "should NOT be stack-only: {}",
+            case
+        );
     }
 }
 
 /// Mirror of is_stack_only_change logic for testing (since the original is private in tools.rs)
 fn check_stack_only(changes: &str) -> bool {
-    if changes.is_empty() { return false; }
+    if changes.is_empty() {
+        return false;
+    }
     let mut has_any = false;
     for token in changes.split_whitespace() {
         if let Some(eq_pos) = token.find('=') {

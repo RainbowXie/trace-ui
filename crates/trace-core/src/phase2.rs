@@ -1,8 +1,8 @@
 use crate::query::call_tree::CallTreeBuilder;
-use trace_parser::insn_class::{self, InsnClass};
 use crate::query::mem_access::{MemAccessIndex, MemAccessRecord, MemRw};
-use trace_parser::parser;
 use crate::query::registers::RegCheckpoints;
+use trace_parser::insn_class::{self, InsnClass};
+use trace_parser::parser;
 use trace_parser::types::{parse_reg, Operand, RegId};
 
 use crate::scan_unified::Phase2State;
@@ -11,7 +11,10 @@ const CHECKPOINT_INTERVAL: u32 = 1000;
 
 /// 执行 Phase 2 扫描：构建 CallTree, MemAccessIndex, RegCheckpoints
 #[allow(dead_code)]
-pub fn build_phase2(data: &[u8], progress_fn: Option<Box<dyn Fn(usize, usize) + Send>>) -> Phase2State {
+pub fn build_phase2(
+    data: &[u8],
+    progress_fn: Option<Box<dyn Fn(usize, usize) + Send>>,
+) -> Phase2State {
     let mut ct_builder = CallTreeBuilder::new();
     let mut mem_idx = MemAccessIndex::new();
     let mut reg_ckpts = RegCheckpoints::new(CHECKPOINT_INTERVAL);
@@ -131,25 +134,53 @@ pub fn build_phase2(data: &[u8], progress_fn: Option<Box<dyn Fn(usize, usize) + 
                     } else if mem_op.elem_width == 16 {
                         // 128-bit: 拆为两条 size=8 的记录
                         if let Some(lo) = mem_op.value_lo {
-                            mem_idx.add(mem_op.abs, MemAccessRecord {
-                                seq, insn_addr, rw, data: lo, size: 8,
-                            });
+                            mem_idx.add(
+                                mem_op.abs,
+                                MemAccessRecord {
+                                    seq,
+                                    insn_addr,
+                                    rw,
+                                    data: lo,
+                                    size: 8,
+                                },
+                            );
                         }
                         if let Some(hi) = mem_op.value_hi {
-                            mem_idx.add(mem_op.abs + 8, MemAccessRecord {
-                                seq, insn_addr, rw, data: hi, size: 8,
-                            });
+                            mem_idx.add(
+                                mem_op.abs + 8,
+                                MemAccessRecord {
+                                    seq,
+                                    insn_addr,
+                                    rw,
+                                    data: hi,
+                                    size: 8,
+                                },
+                            );
                         }
                         // Pair 128-bit: 第二个寄存器
                         if let Some(lo2) = mem_op.value2_lo {
-                            mem_idx.add(mem_op.abs + 16, MemAccessRecord {
-                                seq, insn_addr, rw, data: lo2, size: 8,
-                            });
+                            mem_idx.add(
+                                mem_op.abs + 16,
+                                MemAccessRecord {
+                                    seq,
+                                    insn_addr,
+                                    rw,
+                                    data: lo2,
+                                    size: 8,
+                                },
+                            );
                         }
                         if let Some(hi2) = mem_op.value2_hi {
-                            mem_idx.add(mem_op.abs + 24, MemAccessRecord {
-                                seq, insn_addr, rw, data: hi2, size: 8,
-                            });
+                            mem_idx.add(
+                                mem_op.abs + 24,
+                                MemAccessRecord {
+                                    seq,
+                                    insn_addr,
+                                    rw,
+                                    data: hi2,
+                                    size: 8,
+                                },
+                            );
                         }
                     }
                 }
@@ -191,11 +222,12 @@ pub fn extract_blr_target(parsed: &trace_parser::types::ParsedLine, line_str: &s
     if let Some(Operand::Reg(reg)) = parsed.operands.first() {
         // 在 "=>" 之前的部分查找 "xN=0x..." 格式
         let reg_name = format!("{:?}", reg); // "x6", "x30" 等
-        let search_area = if let Some(arrow_pos) = line_str.find(" => ").or_else(|| line_str.find(" -> ")) {
-            &line_str[..arrow_pos]
-        } else {
-            line_str
-        };
+        let search_area =
+            if let Some(arrow_pos) = line_str.find(" => ").or_else(|| line_str.find(" -> ")) {
+                &line_str[..arrow_pos]
+            } else {
+                line_str
+            };
         // 查找 "x6=0x" 模式
         let pattern = format!("{}=0x", reg_name);
         if let Some(eq_pos) = search_area.find(&pattern) {
@@ -218,7 +250,7 @@ pub fn extract_insn_addr(line: &str) -> u64 {
     //   或: ... ] 0xADDR!0xOFFSET ... (gumtrace)
     if let Some(pos) = line.find("] 0x") {
         let rest = &line[pos + 4..]; // 跳过 "] 0x"
-        // gumtrace: 0xADDR!0xOFFSET
+                                     // gumtrace: 0xADDR!0xOFFSET
         if let Some(bang) = rest.find('!') {
             if let Ok(addr) = u64::from_str_radix(&rest[..bang], 16) {
                 return addr;
@@ -243,7 +275,9 @@ pub fn extract_insn_offset(line: &str) -> u64 {
         let rest = &line[bracket_end + 4..];
         if let Some(bang) = rest.find('!') {
             let after = &rest[bang + 3..]; // skip "!0x"
-            let end = after.find(|c: char| !c.is_ascii_hexdigit()).unwrap_or(after.len());
+            let end = after
+                .find(|c: char| !c.is_ascii_hexdigit())
+                .unwrap_or(after.len());
             if end > 0 {
                 if let Ok(v) = u64::from_str_radix(&after[..end], 16) {
                     return v;
@@ -294,7 +328,8 @@ fn infer_nzcv_from_msr(values: &mut [u64; RegId::COUNT], line: &str) {
     };
     // 提取源寄存器名：msr nzcv, xN
     let after_comma = &line[msr_pos + 10..]; // skip "msr nzcv, "
-    let reg_end = after_comma.find(|c: char| !c.is_ascii_alphanumeric())
+    let reg_end = after_comma
+        .find(|c: char| !c.is_ascii_alphanumeric())
         .unwrap_or(after_comma.len());
     let src_reg_name = &after_comma[..reg_end];
     if let Some(src_reg) = parse_reg(src_reg_name) {
@@ -304,7 +339,8 @@ fn infer_nzcv_from_msr(values: &mut [u64; RegId::COUNT], line: &str) {
             let pattern = format!("{}=0x", src_reg_name);
             if let Some(val_pos) = annot.find(&pattern) {
                 let hex_start = val_pos + pattern.len();
-                let hex_end = annot[hex_start..].find(|c: char| !c.is_ascii_hexdigit())
+                let hex_end = annot[hex_start..]
+                    .find(|c: char| !c.is_ascii_hexdigit())
                     .map(|p| hex_start + p)
                     .unwrap_or(annot.len());
                 if let Ok(val) = u64::from_str_radix(&annot[hex_start..hex_end], 16) {

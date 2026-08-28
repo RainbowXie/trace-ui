@@ -4,8 +4,8 @@ mod commands;
 mod mcp;
 
 use std::sync::Arc;
-use trace_core::TraceEngine;
 use tauri::Manager;
+use trace_core::TraceEngine;
 
 #[tauri::command]
 fn toggle_devtools(window: tauri::WebviewWindow) {

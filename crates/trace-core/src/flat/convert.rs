@@ -1,24 +1,26 @@
 use rustc_hash::FxHashMap;
 
+use crate::line_index::LineIndex;
 use crate::query::mem_access::{MemAccessIndex, MemRw};
 use crate::query::registers::RegCheckpoints;
 use crate::scanner::{DepsStorage, MemLastDef, PairSplitDeps};
-use crate::line_index::LineIndex;
 
-use super::mem_access::{FlatMemAccess, FlatMemAccessRecord, MEM_RW_READ, MEM_RW_WRITE};
-use super::reg_checkpoints::{FlatRegCheckpoints, REG_COUNT};
+use super::bitvec::FlatBitVec;
 use super::deps::FlatDeps;
+use super::line_index::LineIndexArchive;
+use super::mem_access::{FlatMemAccess, FlatMemAccessRecord, MEM_RW_READ, MEM_RW_WRITE};
 use super::mem_last_def::FlatMemLastDef;
 use super::pair_split::FlatPairSplit;
-use super::bitvec::FlatBitVec;
-use super::line_index::LineIndexArchive;
+use super::reg_checkpoints::{FlatRegCheckpoints, REG_COUNT};
 
 /// Convert a `MemAccessIndex` (HashMap-backed) to `FlatMemAccess` (sorted CSR format).
 pub fn mem_access_to_flat(idx: &MemAccessIndex) -> FlatMemAccess {
     // Collect all (addr, record) pairs from iter_all, group by addr
     let mut grouped: Vec<(u64, Vec<&crate::query::mem_access::MemAccessRecord>)> = {
-        let mut map: std::collections::BTreeMap<u64, Vec<&crate::query::mem_access::MemAccessRecord>> =
-            std::collections::BTreeMap::new();
+        let mut map: std::collections::BTreeMap<
+            u64,
+            Vec<&crate::query::mem_access::MemAccessRecord>,
+        > = std::collections::BTreeMap::new();
         for (addr, rec) in idx.iter_all() {
             map.entry(addr).or_default().push(rec);
         }
@@ -57,7 +59,11 @@ pub fn mem_access_to_flat(idx: &MemAccessIndex) -> FlatMemAccess {
         offsets.push(records.len() as u32);
     }
 
-    FlatMemAccess { addrs, offsets, records }
+    FlatMemAccess {
+        addrs,
+        offsets,
+        records,
+    }
 }
 
 /// Convert `RegCheckpoints` to `FlatRegCheckpoints` (flattened u64 array).
@@ -95,7 +101,11 @@ pub fn deps_to_flat(deps: &DepsStorage) -> FlatDeps {
                 patch_data: vec![],
             }
         }
-        DepsStorage::Chunked { chunks, chunk_start_lines, patch_groups } => {
+        DepsStorage::Chunked {
+            chunks,
+            chunk_start_lines,
+            patch_groups,
+        } => {
             let num_chunks = chunks.len();
             let mut chunk_offsets_start = Vec::with_capacity(num_chunks);
             let mut chunk_data_start = Vec::with_capacity(num_chunks);
@@ -151,7 +161,11 @@ pub fn mem_last_def_to_flat(mld: &MemLastDef) -> FlatMemLastDef {
                 lines.push(*line);
                 values.push(*val);
             }
-            FlatMemLastDef { addrs, lines, values }
+            FlatMemLastDef {
+                addrs,
+                lines,
+                values,
+            }
         }
         MemLastDef::Map(_) => {
             panic!("mem_last_def_to_flat: MemLastDef must be compacted (Sorted) before caching. Call compact() first.");
@@ -183,17 +197,21 @@ pub fn pair_split_to_flat(ps: &FxHashMap<u32, PairSplitDeps>) -> FlatPairSplit {
         //   half2    = data[seg_offsets[base+2]  .. seg_offsets[base+3]]
         // So we push 3 offsets per entry (start of shared, start of half1, start of half2)
         // and a final sentinel at the end.
-        seg_offsets.push(data.len() as u32);          // shared start
+        seg_offsets.push(data.len() as u32); // shared start
         data.extend_from_slice(entry.shared.as_slice());
-        seg_offsets.push(data.len() as u32);          // half1 start
+        seg_offsets.push(data.len() as u32); // half1 start
         data.extend_from_slice(entry.half1_deps.as_slice());
-        seg_offsets.push(data.len() as u32);          // half2 start
+        seg_offsets.push(data.len() as u32); // half2 start
         data.extend_from_slice(entry.half2_deps.as_slice());
     }
     // Final sentinel = total data length (the "end" of the last entry's half2)
     seg_offsets.push(data.len() as u32);
 
-    FlatPairSplit { keys, seg_offsets, data }
+    FlatPairSplit {
+        keys,
+        seg_offsets,
+        data,
+    }
 }
 
 /// Convert a `bitvec::BitVec` (Lsb0 order) to `FlatBitVec`.
@@ -247,9 +265,36 @@ mod tests {
     #[test]
     fn test_mem_access_round_trip() {
         let mut idx = MemAccessIndex::new();
-        idx.add(0x1000, MemAccessRecord { seq: 0, insn_addr: 0x100, rw: MemRw::Write, data: 0x42, size: 4 });
-        idx.add(0x1000, MemAccessRecord { seq: 5, insn_addr: 0x104, rw: MemRw::Read,  data: 0x43, size: 4 });
-        idx.add(0x2000, MemAccessRecord { seq: 10, insn_addr: 0x200, rw: MemRw::Write, data: 0xFF, size: 1 });
+        idx.add(
+            0x1000,
+            MemAccessRecord {
+                seq: 0,
+                insn_addr: 0x100,
+                rw: MemRw::Write,
+                data: 0x42,
+                size: 4,
+            },
+        );
+        idx.add(
+            0x1000,
+            MemAccessRecord {
+                seq: 5,
+                insn_addr: 0x104,
+                rw: MemRw::Read,
+                data: 0x43,
+                size: 4,
+            },
+        );
+        idx.add(
+            0x2000,
+            MemAccessRecord {
+                seq: 10,
+                insn_addr: 0x200,
+                rw: MemRw::Write,
+                data: 0xFF,
+                size: 1,
+            },
+        );
 
         let flat = mem_access_to_flat(&idx);
         let view = flat.view();
@@ -279,9 +324,36 @@ mod tests {
     fn test_mem_access_sorted_addrs() {
         let mut idx = MemAccessIndex::new();
         // Insert in non-sorted order
-        idx.add(0x3000, MemAccessRecord { seq: 1, insn_addr: 0x300, rw: MemRw::Read, data: 1, size: 1 });
-        idx.add(0x1000, MemAccessRecord { seq: 2, insn_addr: 0x100, rw: MemRw::Read, data: 2, size: 1 });
-        idx.add(0x2000, MemAccessRecord { seq: 3, insn_addr: 0x200, rw: MemRw::Read, data: 3, size: 1 });
+        idx.add(
+            0x3000,
+            MemAccessRecord {
+                seq: 1,
+                insn_addr: 0x300,
+                rw: MemRw::Read,
+                data: 1,
+                size: 1,
+            },
+        );
+        idx.add(
+            0x1000,
+            MemAccessRecord {
+                seq: 2,
+                insn_addr: 0x100,
+                rw: MemRw::Read,
+                data: 2,
+                size: 1,
+            },
+        );
+        idx.add(
+            0x2000,
+            MemAccessRecord {
+                seq: 3,
+                insn_addr: 0x200,
+                rw: MemRw::Read,
+                data: 3,
+                size: 1,
+            },
+        );
 
         let flat = mem_access_to_flat(&idx);
         // addrs must be sorted for binary search
@@ -309,11 +381,15 @@ mod tests {
         let mut ckpts = RegCheckpoints::new(100);
 
         let mut vals0 = [0u64; RegId::COUNT];
-        for i in 0..RegId::COUNT { vals0[i] = i as u64 * 10; }
+        for i in 0..RegId::COUNT {
+            vals0[i] = i as u64 * 10;
+        }
         ckpts.save_checkpoint(&vals0);
 
         let mut vals1 = [0u64; RegId::COUNT];
-        for i in 0..RegId::COUNT { vals1[i] = i as u64 * 20; }
+        for i in 0..RegId::COUNT {
+            vals1[i] = i as u64 * 20;
+        }
         ckpts.save_checkpoint(&vals1);
 
         let flat = reg_checkpoints_to_flat(&ckpts);
@@ -340,8 +416,11 @@ mod tests {
         // Build a Single DepsStorage with 3 lines
         // Line 0 → [10, 20], Line 1 → [30], Line 2 → []
         let mut cd = CompactDeps::with_capacity(3, 3);
-        cd.start_row(); cd.push_unique(10); cd.push_unique(20);
-        cd.start_row(); cd.push_unique(30);
+        cd.start_row();
+        cd.push_unique(10);
+        cd.push_unique(20);
+        cd.start_row();
+        cd.push_unique(30);
         cd.start_row();
         // finalize sentinel
         // CompactDeps doesn't auto-add sentinel; offsets has 3 entries, data is addressed via row()
@@ -438,16 +517,22 @@ mod tests {
     fn test_pair_split_round_trip() {
         use smallvec::smallvec;
         let mut ps: FxHashMap<u32, PairSplitDeps> = FxHashMap::default();
-        ps.insert(10, PairSplitDeps {
-            shared: smallvec![1, 2],
-            half1_deps: smallvec![3],
-            half2_deps: smallvec![4, 5],
-        });
-        ps.insert(20, PairSplitDeps {
-            shared: smallvec![],
-            half1_deps: smallvec![6],
-            half2_deps: smallvec![],
-        });
+        ps.insert(
+            10,
+            PairSplitDeps {
+                shared: smallvec![1, 2],
+                half1_deps: smallvec![3],
+                half2_deps: smallvec![4, 5],
+            },
+        );
+        ps.insert(
+            20,
+            PairSplitDeps {
+                shared: smallvec![],
+                half1_deps: smallvec![6],
+                half2_deps: smallvec![],
+            },
+        );
 
         let flat = pair_split_to_flat(&ps);
         let view = flat.view();
@@ -480,7 +565,9 @@ mod tests {
 
     #[test]
     fn test_bitvec_round_trip() {
-        let bits = [true, false, true, true, false, false, false, true, false, true];
+        let bits = [
+            true, false, true, true, false, false, false, true, false, true,
+        ];
         let mut bv: BitVec = BitVec::new();
         for &b in &bits {
             bv.push(b);

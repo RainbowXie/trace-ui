@@ -173,7 +173,10 @@ fn parse_line_inner(raw: &str, extract_regs: bool) -> Option<ParsedLine> {
         // 5a. 修正 elem_width：lane load 用 lane 元素宽度，SIMD 向量用排列说明符宽度
         if let (Some(_), Some(lew)) = (result_line.lane_index, result_line.lane_elem_width) {
             elem_width = lew;
-        } else if matches!(mnemonic, "ld1" | "ld2" | "ld3" | "ld4" | "st1" | "st2" | "st3" | "st4") {
+        } else if matches!(
+            mnemonic,
+            "ld1" | "ld2" | "ld3" | "ld4" | "st1" | "st2" | "st3" | "st4"
+        ) {
             if let Some(arr_width) = simd_arrangement_total_width(operand_text) {
                 elem_width = arr_width;
             }
@@ -234,7 +237,11 @@ fn parse_line_inner(raw: &str, extract_regs: bool) -> Option<ParsedLine> {
                         extract_simd_lane_value(full, elem_width, None)
                     } else {
                         let raw_val = find_reg_value(bytes, reg_name.as_bytes(), ss)?;
-                        let mask = if elem_width >= 8 { u64::MAX } else { (1u64 << (elem_width as u32 * 8)) - 1 };
+                        let mask = if elem_width >= 8 {
+                            u64::MAX
+                        } else {
+                            (1u64 << (elem_width as u32 * 8)) - 1
+                        };
                         Some(raw_val & mask)
                     }
                 });
@@ -566,10 +573,7 @@ pub(crate) fn data_reg_name_at(operand_text: &str, index: usize) -> Option<&str>
     }
     let b = first_tok.as_bytes();
     if b.len() >= 2
-        && matches!(
-            b[0],
-            b'w' | b'x' | b'q' | b'd' | b's' | b'b' | b'h' | b'v'
-        )
+        && matches!(b[0], b'w' | b'x' | b'q' | b'd' | b's' | b'b' | b'h' | b'v')
         && b[1..].iter().all(|c| c.is_ascii_digit())
     {
         Some(first_tok)
@@ -672,10 +676,14 @@ pub(crate) fn classify_mem_layout(mnemonic: &str, operand_text: &str) -> MemLayo
 
 /// 判断助记符是否为 pair 类指令（ldp/stp 及其变体）。
 pub(crate) fn is_pair_mnemonic(mn: &str) -> bool {
-    mn.starts_with("ldp") || mn.starts_with("stp")
-        || mn.starts_with("ldnp") || mn.starts_with("stnp")
-        || mn.starts_with("ldxp") || mn.starts_with("ldaxp")
-        || mn.starts_with("stxp") || mn.starts_with("stlxp")
+    mn.starts_with("ldp")
+        || mn.starts_with("stp")
+        || mn.starts_with("ldnp")
+        || mn.starts_with("stnp")
+        || mn.starts_with("ldxp")
+        || mn.starts_with("ldaxp")
+        || mn.starts_with("stxp")
+        || mn.starts_with("stlxp")
 }
 
 /// 判断是否为 SIMD 多寄存器指令（ld1-ld4/st1-st4 且操作数中有两个以上数据寄存器）。
@@ -727,11 +735,7 @@ fn find_reg_hex_bytes<'a>(bytes: &'a [u8], reg_name: &[u8], start_pos: usize) ->
             && search[eq_pos + 2] == b'x'
         {
             // Verify the character before reg_name is not alphanumeric
-            let char_before = if abs == 0 {
-                b' '
-            } else {
-                search[abs - 1]
-            };
+            let char_before = if abs == 0 { b' ' } else { search[abs - 1] };
             if !char_before.is_ascii_alphanumeric() {
                 let val_start = eq_pos + 3;
                 let digit_count = search[val_start..]
@@ -784,7 +788,10 @@ pub(crate) fn simd_reg_to_q_prefix(reg_name: &str) -> Option<String> {
 
 /// 判断寄存器名是否为 SIMD 寄存器（v/d/s/b/h 前缀）。
 pub(crate) fn is_simd_reg_name(name: &str) -> bool {
-    matches!(name.as_bytes().first(), Some(b'v' | b'd' | b's' | b'b' | b'h'))
+    matches!(
+        name.as_bytes().first(),
+        Some(b'v' | b'd' | b's' | b'b' | b'h')
+    )
 }
 
 /// 查找 SIMD 寄存器的 u128 值，先尝试 q 前缀（unidbg 格式），
@@ -1162,7 +1169,6 @@ mod tests {
         assert_eq!(mem.value_hi, Some(0x0000000000000003));
     }
 
-
     #[test]
     fn test_parse_simd_multi_reg() {
         let raw = r#"[00:00:00 001][lib.so 0x100] [4c402000] 0x40000100: "ld1 {v0.16b, v1.16b}, [x0]" ; mem[READ] abs=0x40500000 q0=0x0 q1=0x0 x0=0x40500000 => q0=0x1 q1=0x2"#;
@@ -1177,8 +1183,16 @@ mod tests {
         assert_eq!(mem.elem_width, 16);
         assert_eq!(mem.value_lo, Some(0x1));
         assert_eq!(mem.value_hi, Some(0x0));
-        assert_eq!(mem.value2_lo, Some(0x2), "multi-reg ld1 second register value_lo");
-        assert_eq!(mem.value2_hi, Some(0x0), "multi-reg ld1 second register value_hi");
+        assert_eq!(
+            mem.value2_lo,
+            Some(0x2),
+            "multi-reg ld1 second register value_lo"
+        );
+        assert_eq!(
+            mem.value2_hi,
+            Some(0x0),
+            "multi-reg ld1 second register value_hi"
+        );
     }
 
     #[test]
@@ -1214,7 +1228,11 @@ mod tests {
         let mem = line.mem_op.as_ref().expect("should have mem_op");
         assert_eq!(mem.elem_width, 8);
         assert_eq!(mem.value, Some(0x0807060504030201));
-        assert_eq!(mem.value2, Some(0x100f0e0d0c0b0a09), "second reg value for 8b multi-reg");
+        assert_eq!(
+            mem.value2,
+            Some(0x100f0e0d0c0b0a09),
+            "second reg value for 8b multi-reg"
+        );
     }
 
     #[test]
@@ -1225,7 +1243,11 @@ mod tests {
         let mem = line.mem_op.as_ref().expect("should have mem_op");
         assert_eq!(mem.elem_width, 4, "lane load elem_width should be 4");
         // s[1] = bits[63:32] of 0x5b168dc987df82dd = 0x5b168dc9
-        assert_eq!(mem.value, Some(0x5b168dc9), "should extract lane 1 value from v-prefix trace");
+        assert_eq!(
+            mem.value,
+            Some(0x5b168dc9),
+            "should extract lane 1 value from v-prefix trace"
+        );
     }
 
     #[test]

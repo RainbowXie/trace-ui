@@ -24,7 +24,11 @@ pub struct RegCheckpointsView<'a> {
 
 impl<'a> RegCheckpointsView<'a> {
     pub fn from_raw(interval: u32, count: u32, data: &'a [u64]) -> Self {
-        Self { interval, count, data }
+        Self {
+            interval,
+            count,
+            data,
+        }
     }
 
     /// Returns (snapshot_seq, &[u64; REG_COUNT]) for the checkpoint at or before `seq`.

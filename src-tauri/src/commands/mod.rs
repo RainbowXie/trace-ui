@@ -2,8 +2,10 @@ use std::sync::Arc;
 
 use serde::{Deserialize, Serialize};
 use tauri::{AppHandle, Emitter, State};
-use trace_core::{TraceEngine, BuildOptions, Progress, SearchOptions, SliceOptions,
-    StringQueryOptions, DepTreeOptions, ExportConfig, parse_hex_addr};
+use trace_core::{
+    parse_hex_addr, BuildOptions, DepTreeOptions, ExportConfig, Progress, SearchOptions,
+    SliceOptions, StringQueryOptions, TraceEngine,
+};
 
 // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 //  Session Management
@@ -24,12 +26,10 @@ pub async fn create_session(
     engine: State<'_, Arc<TraceEngine>>,
 ) -> Result<CreateSessionResult, String> {
     let engine = engine.inner().clone();
-    let info = tauri::async_runtime::spawn_blocking(move || {
-        engine.create_session(&path)
-    })
-    .await
-    .map_err(|e| format!("Task execution failed: {}", e))?
-    .map_err(|e| e.to_string())?;
+    let info = tauri::async_runtime::spawn_blocking(move || engine.create_session(&path))
+        .await
+        .map_err(|e| format!("Task execution failed: {}", e))?
+        .map_err(|e| e.to_string())?;
 
     Ok(CreateSessionResult {
         session_id: info.session_id,
@@ -47,10 +47,7 @@ pub fn close_session(
 }
 
 #[tauri::command]
-pub fn delete_file_cache(
-    path: String,
-    engine: State<'_, Arc<TraceEngine>>,
-) -> Result<(), String> {
+pub fn delete_file_cache(path: String, engine: State<'_, Arc<TraceEngine>>) -> Result<(), String> {
     engine.delete_file_cache(&path);
     Ok(())
 }
@@ -74,11 +71,14 @@ pub async fn build_index(
     let app_clone = app.clone();
     let sid_clone = sid.clone();
     let on_progress: Box<dyn Fn(Progress) + Send + Sync> = Box::new(move |p: Progress| {
-        let _ = app_clone.emit("index-progress", serde_json::json!({
-            "sessionId": sid_clone,
-            "progress": p.fraction,
-            "done": false,
-        }));
+        let _ = app_clone.emit(
+            "index-progress",
+            serde_json::json!({
+                "sessionId": sid_clone,
+                "progress": p.fraction,
+                "done": false,
+            }),
+        );
     });
 
     let result = tauri::async_runtime::spawn_blocking(move || {
@@ -97,21 +97,27 @@ pub async fn build_index(
     // 完成事件（成功或失败都发送，防止前端永远卡在 loading）
     match &result {
         Ok(r) => {
-            let _ = app.emit("index-progress", serde_json::json!({
-                "sessionId": session_id,
-                "progress": 1.0,
-                "done": true,
-                "totalLines": r.total_lines,
-                "hasStringIndex": r.has_string_index,
-            }));
+            let _ = app.emit(
+                "index-progress",
+                serde_json::json!({
+                    "sessionId": session_id,
+                    "progress": 1.0,
+                    "done": true,
+                    "totalLines": r.total_lines,
+                    "hasStringIndex": r.has_string_index,
+                }),
+            );
         }
         Err(e) => {
-            let _ = app.emit("index-progress", serde_json::json!({
-                "sessionId": session_id,
-                "progress": 1.0,
-                "done": true,
-                "error": e.to_string(),
-            }));
+            let _ = app.emit(
+                "index-progress",
+                serde_json::json!({
+                    "sessionId": session_id,
+                    "progress": 1.0,
+                    "done": true,
+                    "error": e.to_string(),
+                }),
+            );
         }
     }
 
@@ -128,7 +134,9 @@ pub fn get_lines(
     seqs: Vec<u32>,
     engine: State<'_, Arc<TraceEngine>>,
 ) -> Result<Vec<trace_core::TraceLine>, String> {
-    engine.get_lines(&session_id, &seqs).map_err(|e| e.to_string())
+    engine
+        .get_lines(&session_id, &seqs)
+        .map_err(|e| e.to_string())
 }
 
 #[tauri::command]
@@ -136,7 +144,9 @@ pub fn get_consumed_seqs(
     session_id: String,
     engine: State<'_, Arc<TraceEngine>>,
 ) -> Result<Vec<u32>, String> {
-    engine.get_consumed_seqs(&session_id).map_err(|e| e.to_string())
+    engine
+        .get_consumed_seqs(&session_id)
+        .map_err(|e| e.to_string())
 }
 
 // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
@@ -164,16 +174,18 @@ pub async fn search_trace(
 ) -> Result<trace_core::SearchResultLite, String> {
     let engine = engine.inner().clone();
     tauri::async_runtime::spawn_blocking(move || {
-        engine.search(
-            &session_id,
-            &request.query,
-            SearchOptions {
-                case_sensitive: request.case_sensitive,
-                use_regex: request.use_regex,
-                fuzzy: request.fuzzy,
-                max_results: request.max_results,
-            },
-        ).map_err(|e| e.to_string())
+        engine
+            .search(
+                &session_id,
+                &request.query,
+                SearchOptions {
+                    case_sensitive: request.case_sensitive,
+                    use_regex: request.use_regex,
+                    fuzzy: request.fuzzy,
+                    max_results: request.max_results,
+                },
+            )
+            .map_err(|e| e.to_string())
     })
     .await
     .map_err(|e| format!("Task execution failed: {}", e))?
@@ -192,9 +204,13 @@ pub fn fetch_search_page(
     count: u32,
     engine: State<'_, Arc<TraceEngine>>,
 ) -> Result<SearchPageResult, String> {
-    let (gen, seqs) = engine.fetch_search_page(&session_id, offset, count)
+    let (gen, seqs) = engine
+        .fetch_search_page(&session_id, offset, count)
         .map_err(|e| e.to_string())?;
-    Ok(SearchPageResult { generation: gen, seqs })
+    Ok(SearchPageResult {
+        generation: gen,
+        seqs,
+    })
 }
 
 #[derive(Deserialize)]
@@ -217,14 +233,16 @@ pub async fn get_search_matches(
 ) -> Result<Vec<trace_core::SearchMatch>, String> {
     let engine = engine.inner().clone();
     tauri::async_runtime::spawn_blocking(move || {
-        engine.get_search_matches(
-            &session_id,
-            &request.query,
-            &request.seqs,
-            request.case_sensitive,
-            request.use_regex,
-            request.fuzzy,
-        ).map_err(|e| e.to_string())
+        engine
+            .get_search_matches(
+                &session_id,
+                &request.query,
+                &request.seqs,
+                request.case_sensitive,
+                request.use_regex,
+                request.fuzzy,
+            )
+            .map_err(|e| e.to_string())
     })
     .await
     .map_err(|e| format!("Task execution failed: {}", e))?
@@ -245,15 +263,17 @@ pub async fn run_slice(
 ) -> Result<trace_core::SliceResult, String> {
     let engine = engine.inner().clone();
     tauri::async_runtime::spawn_blocking(move || {
-        engine.run_slice(
-            &session_id,
-            &from_specs,
-            SliceOptions {
-                start_seq,
-                end_seq,
-                data_only: data_only.unwrap_or(false),
-            },
-        ).map_err(|e| e.to_string())
+        engine
+            .run_slice(
+                &session_id,
+                &from_specs,
+                SliceOptions {
+                    start_seq,
+                    end_seq,
+                    data_only: data_only.unwrap_or(false),
+                },
+            )
+            .map_err(|e| e.to_string())
     })
     .await
     .map_err(|e| format!("Task execution failed: {}", e))?
@@ -266,14 +286,13 @@ pub fn get_slice_status(
     count: u32,
     engine: State<'_, Arc<TraceEngine>>,
 ) -> Result<Vec<bool>, String> {
-    engine.get_slice_status(&session_id, start_seq, count).map_err(|e| e.to_string())
+    engine
+        .get_slice_status(&session_id, start_seq, count)
+        .map_err(|e| e.to_string())
 }
 
 #[tauri::command]
-pub fn clear_slice(
-    session_id: String,
-    engine: State<'_, Arc<TraceEngine>>,
-) -> Result<(), String> {
+pub fn clear_slice(session_id: String, engine: State<'_, Arc<TraceEngine>>) -> Result<(), String> {
     engine.clear_slice(&session_id).map_err(|e| e.to_string())
 }
 
@@ -282,7 +301,9 @@ pub fn get_tainted_seqs(
     session_id: String,
     engine: State<'_, Arc<TraceEngine>>,
 ) -> Result<Vec<u32>, String> {
-    engine.get_tainted_seqs(&session_id).map_err(|e| e.to_string())
+    engine
+        .get_tainted_seqs(&session_id)
+        .map_err(|e| e.to_string())
 }
 
 #[tauri::command]
@@ -295,7 +316,8 @@ pub async fn export_taint_results(
 ) -> Result<(), String> {
     let engine = engine.inner().clone();
     tauri::async_runtime::spawn_blocking(move || {
-        engine.export_taint_results(&session_id, &output_path, &format, config)
+        engine
+            .export_taint_results(&session_id, &output_path, &format, config)
             .map_err(|e| e.to_string())
     })
     .await
@@ -315,7 +337,9 @@ pub fn get_memory_at(
     engine: State<'_, Arc<TraceEngine>>,
 ) -> Result<trace_core::MemorySnapshot, String> {
     let addr_u64 = parse_hex_addr(&addr)?;
-    engine.get_memory_at(&session_id, addr_u64, seq, length).map_err(|e| e.to_string())
+    engine
+        .get_memory_at(&session_id, addr_u64, seq, length)
+        .map_err(|e| e.to_string())
 }
 
 #[tauri::command]
@@ -326,7 +350,9 @@ pub fn get_mem_history_meta(
     engine: State<'_, Arc<TraceEngine>>,
 ) -> Result<trace_core::MemHistoryMeta, String> {
     let addr_u64 = parse_hex_addr(&addr)?;
-    engine.get_mem_history_meta(&session_id, addr_u64, center_seq).map_err(|e| e.to_string())
+    engine
+        .get_mem_history_meta(&session_id, addr_u64, center_seq)
+        .map_err(|e| e.to_string())
 }
 
 #[tauri::command]
@@ -338,7 +364,9 @@ pub fn get_mem_history_range(
     engine: State<'_, Arc<TraceEngine>>,
 ) -> Result<Vec<trace_core::MemHistoryRecord>, String> {
     let addr_u64 = parse_hex_addr(&addr)?;
-    engine.get_mem_history_range(&session_id, addr_u64, start_index, limit).map_err(|e| e.to_string())
+    engine
+        .get_mem_history_range(&session_id, addr_u64, start_index, limit)
+        .map_err(|e| e.to_string())
 }
 
 // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
@@ -351,7 +379,9 @@ pub fn get_registers_at(
     seq: u32,
     engine: State<'_, Arc<TraceEngine>>,
 ) -> Result<std::collections::HashMap<String, String>, String> {
-    engine.get_registers_at(&session_id, seq).map_err(|e| e.to_string())
+    engine
+        .get_registers_at(&session_id, seq)
+        .map_err(|e| e.to_string())
 }
 
 // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
@@ -371,7 +401,9 @@ pub fn get_call_tree_node_count(
     session_id: String,
     engine: State<'_, Arc<TraceEngine>>,
 ) -> Result<u32, String> {
-    engine.get_call_tree_node_count(&session_id).map_err(|e| e.to_string())
+    engine
+        .get_call_tree_node_count(&session_id)
+        .map_err(|e| e.to_string())
 }
 
 #[tauri::command]
@@ -381,7 +413,9 @@ pub fn get_call_tree_children(
     include_self: bool,
     engine: State<'_, Arc<TraceEngine>>,
 ) -> Result<Vec<trace_core::CallTreeNodeDto>, String> {
-    engine.get_call_tree_children(&session_id, node_id, include_self).map_err(|e| e.to_string())
+    engine
+        .get_call_tree_children(&session_id, node_id, include_self)
+        .map_err(|e| e.to_string())
 }
 
 // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
@@ -397,10 +431,17 @@ pub fn get_strings(
     search: Option<String>,
     engine: State<'_, Arc<TraceEngine>>,
 ) -> Result<trace_core::StringsResult, String> {
-    engine.get_strings(
-        &session_id,
-        StringQueryOptions { min_len, offset, limit, search },
-    ).map_err(|e| e.to_string())
+    engine
+        .get_strings(
+            &session_id,
+            StringQueryOptions {
+                min_len,
+                offset,
+                limit,
+                search,
+            },
+        )
+        .map_err(|e| e.to_string())
 }
 
 #[tauri::command]
@@ -411,7 +452,9 @@ pub fn get_string_xrefs(
     engine: State<'_, Arc<TraceEngine>>,
 ) -> Result<Vec<trace_core::StringXRef>, String> {
     let addr_u64 = parse_hex_addr(&addr)?;
-    engine.get_string_xrefs(&session_id, addr_u64, byte_len).map_err(|e| e.to_string())
+    engine
+        .get_string_xrefs(&session_id, addr_u64, byte_len)
+        .map_err(|e| e.to_string())
 }
 
 #[tauri::command]
@@ -445,7 +488,9 @@ pub fn get_function_calls(
     session_id: String,
     engine: State<'_, Arc<TraceEngine>>,
 ) -> Result<trace_core::FunctionCallsResult, String> {
-    engine.get_function_calls(&session_id).map_err(|e| e.to_string())
+    engine
+        .get_function_calls(&session_id)
+        .map_err(|e| e.to_string())
 }
 
 // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
@@ -463,15 +508,17 @@ pub async fn build_dependency_tree(
 ) -> Result<trace_core::query::dep_tree::DependencyGraph, String> {
     let engine = engine.inner().clone();
     tauri::async_runtime::spawn_blocking(move || {
-        engine.build_dep_tree(
-            &session_id,
-            seq,
-            &target,
-            DepTreeOptions {
-                data_only: data_only.unwrap_or(false),
-                max_nodes,
-            },
-        ).map_err(|e| e.to_string())
+        engine
+            .build_dep_tree(
+                &session_id,
+                seq,
+                &target,
+                DepTreeOptions {
+                    data_only: data_only.unwrap_or(false),
+                    max_nodes,
+                },
+            )
+            .map_err(|e| e.to_string())
     })
     .await
     .map_err(|e| format!("Task execution failed: {}", e))?
@@ -486,13 +533,15 @@ pub async fn build_dependency_tree_from_slice(
 ) -> Result<trace_core::query::dep_tree::DependencyGraph, String> {
     let engine = engine.inner().clone();
     tauri::async_runtime::spawn_blocking(move || {
-        engine.build_dep_tree_from_slice(
-            &session_id,
-            DepTreeOptions {
-                data_only: data_only.unwrap_or(false),
-                max_nodes,
-            },
-        ).map_err(|e| e.to_string())
+        engine
+            .build_dep_tree_from_slice(
+                &session_id,
+                DepTreeOptions {
+                    data_only: data_only.unwrap_or(false),
+                    max_nodes,
+                },
+            )
+            .map_err(|e| e.to_string())
     })
     .await
     .map_err(|e| format!("Task execution failed: {}", e))?
@@ -504,7 +553,9 @@ pub fn get_line_def_registers(
     seq: u32,
     engine: State<'_, Arc<TraceEngine>>,
 ) -> Result<Vec<String>, String> {
-    engine.get_line_def_registers(&session_id, seq).map_err(|e| e.to_string())
+    engine
+        .get_line_def_registers(&session_id, seq)
+        .map_err(|e| e.to_string())
 }
 
 // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
@@ -518,7 +569,9 @@ pub fn get_reg_def_use_chain(
     reg_name: String,
     engine: State<'_, Arc<TraceEngine>>,
 ) -> Result<trace_core::DefUseChain, String> {
-    engine.get_def_use_chain(&session_id, seq, &reg_name).map_err(|e| e.to_string())
+    engine
+        .get_def_use_chain(&session_id, seq, &reg_name)
+        .map_err(|e| e.to_string())
 }
 
 // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
@@ -543,7 +596,9 @@ pub fn load_crypto_cache(
     session_id: String,
     engine: State<'_, Arc<TraceEngine>>,
 ) -> Result<Option<trace_core::query::crypto::CryptoScanResult>, String> {
-    engine.load_crypto_cache(&session_id).map_err(|e| e.to_string())
+    engine
+        .load_crypto_cache(&session_id)
+        .map_err(|e| e.to_string())
 }
 
 // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
@@ -551,9 +606,7 @@ pub fn load_crypto_cache(
 // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
 #[tauri::command]
-pub fn get_cache_dir(
-    engine: State<'_, Arc<TraceEngine>>,
-) -> trace_core::CacheInfo {
+pub fn get_cache_dir(engine: State<'_, Arc<TraceEngine>>) -> trace_core::CacheInfo {
     engine.get_cache_dir()
 }
 
@@ -566,9 +619,7 @@ pub fn set_cache_dir(
 }
 
 #[tauri::command]
-pub fn clear_all_cache(
-    engine: State<'_, Arc<TraceEngine>>,
-) -> trace_core::ClearResult {
+pub fn clear_all_cache(engine: State<'_, Arc<TraceEngine>>) -> trace_core::ClearResult {
     engine.clear_all_cache()
 }
 
@@ -586,9 +637,7 @@ pub async fn start_mcp(
 
 /// 同步命令（有意为之）：仅做 lock + cancel + emit，无需 await。
 #[tauri::command]
-pub fn stop_mcp(
-    controller: State<'_, crate::mcp::McpController>,
-) -> crate::mcp::McpStatusInfo {
+pub fn stop_mcp(controller: State<'_, crate::mcp::McpController>) -> crate::mcp::McpStatusInfo {
     controller.stop()
 }
 

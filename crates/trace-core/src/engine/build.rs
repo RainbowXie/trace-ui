@@ -1,14 +1,14 @@
-use std::sync::atomic::Ordering;
 use std::collections::HashMap;
+use std::sync::atomic::Ordering;
 
+use crate::api_types::{BuildOptions, BuildResult, Phase, Progress, ProgressCallback};
 use crate::cache;
+use crate::error::{Result, TraceError};
 use crate::flat::archives::{CachedStore, Phase2Archive, ScanArchive};
 use crate::flat::convert;
 use crate::flat::line_index::LineIndexArchive;
-use crate::scan_unified::{ScanResult, ProgressFn};
 use crate::parallel::scan_unified_parallel;
-use crate::api_types::{BuildOptions, BuildResult, ProgressCallback, Progress, Phase};
-use crate::error::{TraceError, Result};
+use crate::scan_unified::{ProgressFn, ScanResult};
 
 /// 内部枚举：区分缓存命中 vs 新鲜扫描结果
 enum IndexResult {
@@ -61,7 +61,9 @@ impl super::TraceEngine {
         on_progress: Option<ProgressCallback>,
     ) -> Result<BuildResult> {
         let (mmap_arc, file_path) = {
-            let state = handle.state.read()
+            let state = handle
+                .state
+                .read()
                 .map_err(|e| TraceError::Internal(e.to_string()))?;
             (state.mmap.clone(), state.file_path.clone())
         };
@@ -150,10 +152,13 @@ impl super::TraceEngine {
         // 将其包在 Arc 里即可跨线程共享、并满足 ProgressFn 的 'static 约束。
         let sid = session_id.to_string();
         let progress_fn: Option<ProgressFn> = on_progress.map(|cb| {
-            let cb_arc: std::sync::Arc<dyn Fn(Progress) + Send + Sync> =
-                std::sync::Arc::from(cb);
+            let cb_arc: std::sync::Arc<dyn Fn(Progress) + Send + Sync> = std::sync::Arc::from(cb);
             let progress_box: ProgressFn = Box::new(move |processed: usize, total: usize| {
-                let fraction = if total == 0 { 0.0 } else { processed as f64 / total as f64 };
+                let fraction = if total == 0 {
+                    0.0
+                } else {
+                    processed as f64 / total as f64
+                };
                 cb_arc(Progress {
                     session_id: sid.clone(),
                     phase: Phase::Scanning,
@@ -168,15 +173,9 @@ impl super::TraceEngine {
             .map(|n| n.get())
             .unwrap_or(4);
 
-        let mut scan_result = scan_unified_parallel(
-            data,
-            false,
-            false,
-            skip_strings,
-            progress_fn,
-            num_cpus,
-        )
-        .map_err(|e| TraceError::Internal(format!("统一扫描失败: {}", e)))?;
+        let mut scan_result =
+            scan_unified_parallel(data, false, false, skip_strings, progress_fn, num_cpus)
+                .map_err(|e| TraceError::Internal(format!("统一扫描失败: {}", e)))?;
 
         // 格式检查：没有有效行
         if scan_result.scan_state.parsed_count == 0 && scan_result.scan_state.line_count > 0 {
@@ -205,7 +204,12 @@ impl super::TraceEngine {
         scan_result.scan_state.compact();
         eprintln!("[index] compact done");
 
-        self.apply_index_result(session_id, handle, IndexResult::ScanResult(scan_result), false)
+        self.apply_index_result(
+            session_id,
+            handle,
+            IndexResult::ScanResult(scan_result),
+            false,
+        )
     }
 
     fn apply_index_result(
@@ -228,9 +232,12 @@ impl super::TraceEngine {
                 call_annotations,
                 consumed_seqs,
             } => {
-                let mut state = handle.state.write()
+                let mut state = handle
+                    .state
+                    .write()
                     .map_err(|e| TraceError::Internal(e.to_string()))?;
-                let has_string_index = string_index.as_ref()
+                let has_string_index = string_index
+                    .as_ref()
                     .map(|si| !si.strings.is_empty())
                     .unwrap_or(false);
 
@@ -275,7 +282,10 @@ impl super::TraceEngine {
                     let mem_view = phase2_archive.mem_accesses.view();
                     eprintln!("[index] computing xref counts from flat view...");
                     let t_xref = std::time::Instant::now();
-                    crate::query::strings::StringBuilder::fill_xref_counts_view(&mut string_index, &mem_view);
+                    crate::query::strings::StringBuilder::fill_xref_counts_view(
+                        &mut string_index,
+                        &mem_view,
+                    );
                     eprintln!("[index] xref counts done: {:?}", t_xref.elapsed());
                 }
 
@@ -309,7 +319,9 @@ impl super::TraceEngine {
 
                 // 3. write lock：仅存储数据到 session
                 let (fp, mmap_arc, gum_extra, total_lines, has_string_index) = {
-                    let mut state = handle.state.write()
+                    let mut state = handle
+                        .state
+                        .write()
                         .map_err(|e| TraceError::Internal(e.to_string()))?;
 
                     let total_lines = scan_result.line_index.total_lines();
@@ -329,7 +341,8 @@ impl super::TraceEngine {
                     state.consumed_seqs = scan_result.consumed_seqs;
                     state.rebuild_call_search_texts();
 
-                    let gum_extra = if state.trace_format == trace_parser::types::TraceFormat::Gumtrace
+                    let gum_extra = if state.trace_format
+                        == trace_parser::types::TraceFormat::Gumtrace
                         && !state.call_annotations.is_empty()
                     {
                         Some((state.call_annotations.clone(), state.consumed_seqs.clone()))

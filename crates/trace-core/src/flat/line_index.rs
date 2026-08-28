@@ -23,7 +23,10 @@ pub struct LineIndexView<'a> {
 
 impl<'a> LineIndexView<'a> {
     pub fn from_raw(sampled_offsets: &'a [u64], total: u32) -> Self {
-        Self { sampled_offsets, total }
+        Self {
+            sampled_offsets,
+            total,
+        }
     }
 
     /// Return the total number of lines.

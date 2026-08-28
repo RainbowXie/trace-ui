@@ -56,7 +56,7 @@ impl SectionWriter {
     pub fn finish(self) -> Vec<u8> {
         let num_sections = self.sections.len() as u32;
         let raw_table_size = 4 + self.sections.len() * 16; // u32 + N * (u64 offset, u64 length)
-        // Pad table to 8-byte alignment so section data stays aligned
+                                                           // Pad table to 8-byte alignment so section data stays aligned
         let table_size = (raw_table_size + 7) & !7;
 
         let mut result = Vec::with_capacity(table_size + self.buf.len());
@@ -201,9 +201,9 @@ mod tests {
     fn test_multiple_sections() {
         let mut w = SectionWriter::new();
         w.write_slice(&[1u32, 2, 3]); // 0
-        w.write_slice(&[10u64, 20]);   // 1
-        w.write_u32(99);               // 2
-        w.write_bytes(b"test");        // 3
+        w.write_slice(&[10u64, 20]); // 1
+        w.write_u32(99); // 2
+        w.write_bytes(b"test"); // 3
         let bytes = w.finish();
 
         let r = SectionReader::new(&bytes).unwrap();

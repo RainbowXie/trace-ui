@@ -59,7 +59,9 @@ impl CallTreeBuilder {
             children_ids: Vec::new(),
         };
         self.nodes.push(child);
-        self.nodes[self.current_id as usize].children_ids.push(child_id);
+        self.nodes[self.current_id as usize]
+            .children_ids
+            .push(child_id);
         self.call_stack.push(self.current_id);
         self.current_id = child_id;
     }

@@ -29,7 +29,11 @@ mod big_array {
     pub fn deserialize<'de, D: Deserializer<'de>>(d: D) -> Result<[u32; RegId::COUNT], D::Error> {
         let v = Vec::<u32>::deserialize(d)?;
         v.try_into().map_err(|v: Vec<u32>| {
-            serde::de::Error::custom(format!("expected {} elements, got {}", RegId::COUNT, v.len()))
+            serde::de::Error::custom(format!(
+                "expected {} elements, got {}",
+                RegId::COUNT,
+                v.len()
+            ))
         })
     }
 }
@@ -123,18 +127,19 @@ impl MemLastDef {
     pub fn get(&self, addr: &u64) -> Option<(u32, u64)> {
         match self {
             Self::Map(m) => m.get(addr).copied(),
-            Self::Sorted(v) => {
-                v.binary_search_by_key(addr, |(a, _, _)| *a)
-                    .ok()
-                    .map(|i| (v[i].1, v[i].2))
-            }
+            Self::Sorted(v) => v
+                .binary_search_by_key(addr, |(a, _, _)| *a)
+                .ok()
+                .map(|i| (v[i].1, v[i].2)),
         }
     }
 
     /// 扫描期间插入（仅 Map 模式）
     pub fn insert(&mut self, addr: u64, value: (u32, u64)) {
         match self {
-            Self::Map(m) => { m.insert(addr, value); },
+            Self::Map(m) => {
+                m.insert(addr, value);
+            }
             Self::Sorted(_) => panic!("cannot insert into compacted MemLastDef"),
         }
     }
@@ -150,7 +155,8 @@ impl MemLastDef {
     /// 压缩为排序数组，释放 HashMap 开销
     pub fn compact(&mut self) {
         if let Self::Map(m) = self {
-            let mut sorted: Vec<(u64, u32, u64)> = m.drain()
+            let mut sorted: Vec<(u64, u32, u64)> = m
+                .drain()
                 .map(|(addr, (line, val))| (addr, line, val))
                 .collect();
             sorted.sort_unstable_by_key(|(addr, _, _)| *addr);
@@ -304,7 +310,11 @@ impl DepsStorage {
     pub fn row(&self, global_line: usize) -> &[u32] {
         match self {
             DepsStorage::Single(cd) => cd.row(global_line),
-            DepsStorage::Chunked { chunks, chunk_start_lines, .. } => {
+            DepsStorage::Chunked {
+                chunks,
+                chunk_start_lines,
+                ..
+            } => {
                 let line = global_line as u32;
                 let chunk_idx = match chunk_start_lines.binary_search(&line) {
                     Ok(i) => i,
@@ -335,7 +345,11 @@ impl DepsStorage {
     pub fn total_deps(&self) -> usize {
         match self {
             DepsStorage::Single(cd) => cd.total_deps(),
-            DepsStorage::Chunked { chunks, patch_groups, .. } => {
+            DepsStorage::Chunked {
+                chunks,
+                patch_groups,
+                ..
+            } => {
                 let base: usize = chunks.iter().map(|c| c.total_deps()).sum();
                 let patches: usize = patch_groups.iter().map(|(_, v)| v.len()).sum();
                 base + patches
@@ -348,9 +362,7 @@ impl DepsStorage {
     pub fn num_rows(&self) -> usize {
         match self {
             DepsStorage::Single(cd) => cd.num_rows(),
-            DepsStorage::Chunked { chunks, .. } => {
-                chunks.iter().map(|c| c.num_rows()).sum()
-            }
+            DepsStorage::Chunked { chunks, .. } => chunks.iter().map(|c| c.num_rows()).sum(),
         }
     }
 
@@ -501,7 +513,16 @@ pub fn scan_pass1_bytes(
     profile: bool,
     no_prune: bool,
 ) -> Result<ScanState> {
-    scan_pass1_bytes_with_progress(data, data_only, start_seq, end_seq, line_targets, profile, no_prune, None)
+    scan_pass1_bytes_with_progress(
+        data,
+        data_only,
+        start_seq,
+        end_seq,
+        line_targets,
+        profile,
+        no_prune,
+        None,
+    )
 }
 
 pub fn scan_pass1_bytes_with_progress(
@@ -529,7 +550,10 @@ pub fn scan_pass1_bytes_with_progress(
         reg_last_def: RegLastDef::new(),
         mem_last_def: MemLastDef::default(),
         last_cond_branch: None,
-        deps: DepsStorage::single(CompactDeps::with_capacity(line_count_est, line_count_est * 2)),
+        deps: DepsStorage::single(CompactDeps::with_capacity(
+            line_count_est,
+            line_count_est * 2,
+        )),
         line_count: 0,
         parsed_count: 0,
         mem_op_count: 0,
@@ -673,8 +697,7 @@ pub fn scan_pass1_bytes_with_progress(
 
         // For non-pair LOAD: do mem deps (3b) first to determine pass-through,
         // then conditionally skip register deps (3a).
-        let is_non_pair_load = !is_pair
-            && line.mem_op.as_ref().is_some_and(|m| !m.is_write);
+        let is_non_pair_load = !is_pair && line.mem_op.as_ref().is_some_and(|m| !m.is_write);
         let mut is_pass_through = false;
 
         if is_non_pair_load && !no_prune {
@@ -824,7 +847,11 @@ pub fn scan_pass1_bytes_with_progress(
             // After SIMD expansion, defs may be [rt1_lo, rt1_hi, rt2_lo, rt2_hi, base?]
             // or [rt1, rt2, base?] for scalar. Split data defs at midpoint.
             let has_base_wb = line.writeback && line.base_reg.is_some();
-            let data_defs = if has_base_wb { &defs[..defs.len() - 1] } else { &defs[..] };
+            let data_defs = if has_base_wb {
+                &defs[..defs.len() - 1]
+            } else {
+                &defs[..]
+            };
             let mid = data_defs.len() / 2;
 
             for r in &data_defs[..mid] {
@@ -834,7 +861,9 @@ pub fn scan_pass1_bytes_with_progress(
                 state.reg_last_def.insert(*r, i | PAIR_HALF2_BIT); // half2
             }
             if has_base_wb {
-                state.reg_last_def.insert(*defs.last().unwrap(), i | PAIR_SHARED_BIT);
+                state
+                    .reg_last_def
+                    .insert(*defs.last().unwrap(), i | PAIR_SHARED_BIT);
             }
         } else if class == InsnClass::StorePair {
             // StorePair: writeback base is the only DEF (if present)
@@ -932,10 +961,7 @@ pub fn scan_pass1_bytes_with_progress(
         eprintln!("[profile] 已解析行数       : {}", state.parsed_count);
         eprintln!("[profile] 总行数           : {}", state.line_count);
         eprintln!("[profile] mem_last_def 条目: {}", state.mem_last_def.len());
-        eprintln!(
-            "[profile] deps 总边数      : {}",
-            state.deps.total_deps()
-        );
+        eprintln!("[profile] deps 总边数      : {}", state.deps.total_deps());
         eprintln!("[profile] pass-through 剪枝: {} loads", pruned_count);
         eprintln!("[profile] ──────────────────────────────");
     }
@@ -970,7 +996,11 @@ pub fn scan_pass1_bytes_with_progress(
 /// - 配对指令 (ldp/stp): `elem_width * 2`
 /// - SIMD 多寄存器 (ld1 {v0,v1,...}): `elem_width * 数据寄存器数`
 /// - 其它: `elem_width`
-pub fn mem_access_width(class: InsnClass, elem_width: u8, line: &trace_parser::types::ParsedLine) -> u8 {
+pub fn mem_access_width(
+    class: InsnClass,
+    elem_width: u8,
+    line: &trace_parser::types::ParsedLine,
+) -> u8 {
     match class {
         InsnClass::LoadPair | InsnClass::StorePair => elem_width.saturating_mul(2),
         InsnClass::SimdLoad | InsnClass::SimdStore => {
@@ -1041,8 +1071,14 @@ mod tests {
         // add x0 should have last def at line 2
         assert_eq!(state.reg_last_def.get(&RegId::X0), Some(&2));
         // add x0, x8, x9 depends on mov x8 (line 0) and mov x9 (line 1)
-        assert!(state.deps.row(2).contains(&0), "add should depend on mov x8");
-        assert!(state.deps.row(2).contains(&1), "add should depend on mov x9");
+        assert!(
+            state.deps.row(2).contains(&0),
+            "add should depend on mov x8"
+        );
+        assert!(
+            state.deps.row(2).contains(&1),
+            "add should depend on mov x9"
+        );
     }
 
     // =========================================================================
@@ -1278,8 +1314,8 @@ mod tests {
 
     #[test]
     fn test_scan_reg_at_line_valid() {
-        use trace_parser::types::LineTarget;
         use std::collections::HashMap;
+        use trace_parser::types::LineTarget;
 
         let lines = vec![mov_line("x8", 5)];
         let trace = lines.join("\n");
@@ -1300,8 +1336,8 @@ mod tests {
 
     #[test]
     fn test_scan_reg_at_line_invalid() {
-        use trace_parser::types::LineTarget;
         use std::collections::HashMap;
+        use trace_parser::types::LineTarget;
 
         let lines = vec![mov_line("x8", 5)];
         let trace = lines.join("\n");
@@ -1318,8 +1354,8 @@ mod tests {
 
     #[test]
     fn test_scan_mem_at_line_valid() {
-        use trace_parser::types::LineTarget;
         use std::collections::HashMap;
+        use trace_parser::types::LineTarget;
 
         let lines = vec![str_line("x8", "sp", 0xbffff010)];
         let trace = lines.join("\n");
@@ -1342,8 +1378,8 @@ mod tests {
 
     #[test]
     fn test_scan_mem_at_line_invalid() {
-        use trace_parser::types::LineTarget;
         use std::collections::HashMap;
+        use trace_parser::types::LineTarget;
 
         let lines = vec![str_line("x8", "sp", 0xbffff010)];
         let trace = lines.join("\n");
@@ -1363,8 +1399,8 @@ mod tests {
 
     #[test]
     fn test_scan_line_target_out_of_range() {
-        use trace_parser::types::LineTarget;
         use std::collections::HashMap;
+        use trace_parser::types::LineTarget;
 
         let lines = vec![mov_line("x8", 5)];
         let trace = lines.join("\n");
@@ -1381,8 +1417,8 @@ mod tests {
 
     #[test]
     fn test_scan_reg_at_line_fallback() {
-        use trace_parser::types::LineTarget;
         use std::collections::HashMap;
+        use trace_parser::types::LineTarget;
 
         // line 0: mov x8 (DEFs x8), line 1: str x8 (USEs x8)
         let lines = vec![mov_line("x8", 5), str_line("x8", "sp", 0x100)];
@@ -1401,8 +1437,8 @@ mod tests {
 
     #[test]
     fn test_scan_mem_at_line_fallback() {
-        use trace_parser::types::LineTarget;
         use std::collections::HashMap;
+        use trace_parser::types::LineTarget;
 
         // line 0: str x8 to 0x100, line 1: mov x9 (no mem op)
         let lines = vec![str_line("x8", "sp", 0x100), mov_line("x9", 10)];
@@ -1421,8 +1457,8 @@ mod tests {
 
     #[test]
     fn test_scan_reg_at_line_no_prior_def() {
-        use trace_parser::types::LineTarget;
         use std::collections::HashMap;
+        use trace_parser::types::LineTarget;
 
         let lines = vec![mov_line("x9", 5)];
         let trace = lines.join("\n");
@@ -1517,7 +1553,8 @@ mod tests {
 
     #[test]
     fn test_unknown_mnemonic_collected() {
-        let trace = r#"[00:00:00 001][lib.so 0x100] [d2800000] 0x40000100: "xyzzy v0, v1, v2" => v0=0x0"#;
+        let trace =
+            r#"[00:00:00 001][lib.so 0x100] [d2800000] 0x40000100: "xyzzy v0, v1, v2" => v0=0x0"#;
         let state = scan_from_string(trace, true).unwrap();
         assert_eq!(state.unknown_mnemonics.len(), 1);
         let (first_line, count) = state.unknown_mnemonics.get("xyzzy").unwrap();
@@ -1540,7 +1577,10 @@ mod tests {
     fn test_init_mem_load_marked() {
         let trace = r#"[00:00:00 001][lib.so 0x100] [f9400be0] 0x40000100: "ldr x0, [sp, #0x10]" ; mem[READ] abs=0xbffff010 sp=0xbffff000 => x0=0x2a"#;
         let state = scan_from_string(trace, true).unwrap();
-        assert!(state.init_mem_loads[0], "load from never-stored address should be marked");
+        assert!(
+            state.init_mem_loads[0],
+            "load from never-stored address should be marked"
+        );
     }
 
     // =========================================================================
@@ -1555,6 +1595,9 @@ mod tests {
             r#"[00:00:00 001][lib.so 0x108] [f9400be0] 0x40000108: "ldr x0, [sp, #0x10]" ; mem[READ] abs=0xbffff010 sp=0xbffff000 => x0=0x2a"#,
         ].join("\n");
         let state = scan_from_string(&trace, true).unwrap();
-        assert!(!state.init_mem_loads[2], "load from previously-stored address should NOT be marked");
+        assert!(
+            !state.init_mem_loads[2],
+            "load from previously-stored address should NOT be marked"
+        );
     }
 }

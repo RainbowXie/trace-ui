@@ -25,7 +25,8 @@ async fn test_mcp_http_endpoint_reachable() {
     });
 
     // Wait for server to be ready
-    let port = ready_rx.await
+    let port = ready_rx
+        .await
         .expect("ready channel closed")
         .expect("server failed to bind");
 
@@ -58,7 +59,11 @@ async fn test_mcp_http_endpoint_reachable() {
         .await
         .expect("request failed");
 
-    assert!(resp.status().is_success(), "Expected 2xx, got {}", resp.status());
+    assert!(
+        resp.status().is_success(),
+        "Expected 2xx, got {}",
+        resp.status()
+    );
 
     // Cleanup
     cancel.cancel();

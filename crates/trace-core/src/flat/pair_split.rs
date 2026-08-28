@@ -28,7 +28,11 @@ pub struct PairSplitEntry<'a> {
 
 impl<'a> PairSplitView<'a> {
     pub fn from_raw(keys: &'a [u32], seg_offsets: &'a [u32], data: &'a [u32]) -> Self {
-        Self { keys, seg_offsets, data }
+        Self {
+            keys,
+            seg_offsets,
+            data,
+        }
     }
 
     /// Binary search keys, return entry with 3 slices if found.

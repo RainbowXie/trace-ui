@@ -12,8 +12,8 @@ use smallvec::SmallVec;
 use crate::line_index::LineIndex;
 use crate::query::mem_access::MemAccessIndex;
 use crate::query::registers::RegCheckpoints;
-use crate::scanner::{CompactDeps, PairSplitDeps, RegLastDef};
 use crate::query::strings::StringIndex;
+use crate::scanner::{CompactDeps, PairSplitDeps, RegLastDef};
 use trace_parser::types::RegId;
 
 // === Cross-boundary unresolved items ===

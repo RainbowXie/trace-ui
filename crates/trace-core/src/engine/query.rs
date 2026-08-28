@@ -3,14 +3,14 @@ use std::sync::atomic::Ordering;
 
 use crate::api_types::*;
 use crate::browse::{parse_trace_line, parse_trace_line_gumtrace};
-use crate::error::{TraceError, Result};
+use crate::error::{Result, TraceError};
 use crate::flat::line_index::LineIndexView;
 use crate::phase2::extract_insn_offset;
 use crate::query::call_tree::CallTreeNode;
 use crate::query::crypto::CryptoScanResult;
-use crate::query::strings::{StringEncoding, StringRw, StringBuilder};
-use trace_parser::types::{parse_reg, TraceFormat, RegId};
-use trace_parser::{parser, insn_class, def_use, gumtrace as gumtrace_parser};
+use crate::query::strings::{StringBuilder, StringEncoding, StringRw};
+use trace_parser::types::{parse_reg, RegId, TraceFormat};
+use trace_parser::{def_use, gumtrace as gumtrace_parser, insn_class, parser};
 
 // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 //  Private helpers
@@ -78,25 +78,74 @@ fn node_to_dto(
 // ── Registers helpers ──
 
 const REG_NAMES: &[(&str, u8)] = &[
-    ("X0", 0), ("X1", 1), ("X2", 2), ("X3", 3), ("X4", 4),
-    ("X5", 5), ("X6", 6), ("X7", 7), ("X8", 8), ("X9", 9),
-    ("X10", 10), ("X11", 11), ("X12", 12), ("X13", 13), ("X14", 14),
-    ("X15", 15), ("X16", 16), ("X17", 17), ("X18", 18), ("X19", 19),
-    ("X20", 20), ("X21", 21), ("X22", 22), ("X23", 23), ("X24", 24),
-    ("X25", 25), ("X26", 26), ("X27", 27), ("X28", 28),
-    ("X29", 29), ("X30", 30), ("SP", 31), ("NZCV", 65),
+    ("X0", 0),
+    ("X1", 1),
+    ("X2", 2),
+    ("X3", 3),
+    ("X4", 4),
+    ("X5", 5),
+    ("X6", 6),
+    ("X7", 7),
+    ("X8", 8),
+    ("X9", 9),
+    ("X10", 10),
+    ("X11", 11),
+    ("X12", 12),
+    ("X13", 13),
+    ("X14", 14),
+    ("X15", 15),
+    ("X16", 16),
+    ("X17", 17),
+    ("X18", 18),
+    ("X19", 19),
+    ("X20", 20),
+    ("X21", 21),
+    ("X22", 22),
+    ("X23", 23),
+    ("X24", 24),
+    ("X25", 25),
+    ("X26", 26),
+    ("X27", 27),
+    ("X28", 28),
+    ("X29", 29),
+    ("X30", 30),
+    ("SP", 31),
+    ("NZCV", 65),
 ];
 
 fn reg_id_to_name(r: RegId) -> Option<&'static str> {
     match r.0 {
-        0 => Some("X0"), 1 => Some("X1"), 2 => Some("X2"), 3 => Some("X3"),
-        4 => Some("X4"), 5 => Some("X5"), 6 => Some("X6"), 7 => Some("X7"),
-        8 => Some("X8"), 9 => Some("X9"), 10 => Some("X10"), 11 => Some("X11"),
-        12 => Some("X12"), 13 => Some("X13"), 14 => Some("X14"), 15 => Some("X15"),
-        16 => Some("X16"), 17 => Some("X17"), 18 => Some("X18"), 19 => Some("X19"),
-        20 => Some("X20"), 21 => Some("X21"), 22 => Some("X22"), 23 => Some("X23"),
-        24 => Some("X24"), 25 => Some("X25"), 26 => Some("X26"), 27 => Some("X27"),
-        28 => Some("X28"), 29 => Some("X29"), 30 => Some("X30"),
+        0 => Some("X0"),
+        1 => Some("X1"),
+        2 => Some("X2"),
+        3 => Some("X3"),
+        4 => Some("X4"),
+        5 => Some("X5"),
+        6 => Some("X6"),
+        7 => Some("X7"),
+        8 => Some("X8"),
+        9 => Some("X9"),
+        10 => Some("X10"),
+        11 => Some("X11"),
+        12 => Some("X12"),
+        13 => Some("X13"),
+        14 => Some("X14"),
+        15 => Some("X15"),
+        16 => Some("X16"),
+        17 => Some("X17"),
+        18 => Some("X18"),
+        19 => Some("X19"),
+        20 => Some("X20"),
+        21 => Some("X21"),
+        22 => Some("X22"),
+        23 => Some("X23"),
+        24 => Some("X24"),
+        25 => Some("X25"),
+        26 => Some("X26"),
+        27 => Some("X27"),
+        28 => Some("X28"),
+        29 => Some("X29"),
+        30 => Some("X30"),
         31 => Some("SP"),
         65 => Some("NZCV"),
         _ => None,
@@ -107,7 +156,10 @@ fn reg_id_to_name(r: RegId) -> Option<&'static str> {
 
 const MAX_SCAN_RANGE: u32 = 50000;
 
-fn parse_line_for_format(line: &str, format: TraceFormat) -> Option<trace_parser::types::ParsedLine> {
+fn parse_line_for_format(
+    line: &str,
+    format: TraceFormat,
+) -> Option<trace_parser::types::ParsedLine> {
     match format {
         TraceFormat::Unidbg => parser::parse_line(line),
         TraceFormat::Gumtrace => gumtrace_parser::parse_line_gumtrace(line),
@@ -118,33 +170,60 @@ fn parse_line_for_format(line: &str, format: TraceFormat) -> Option<trace_parser
 
 /// 28 crypto algorithms with their magic number constants.
 const CRYPTO_MAGIC_NUMBERS: &[(&str, &[u32])] = &[
-    ("MD5",          &[0xD76AA478, 0xE8C7B756, 0x242070DB, 0xC1BDCEEE]),
-    ("SHA1",         &[0x5A827999, 0x6ED9EBA1, 0x8F1BBCDC, 0xCA62C1D6]),
-    ("SHA256",       &[0x428A2F98, 0x71374491, 0xB5C0FBCF, 0xE9B5DBA5]),
-    ("SM3",          &[0x79CC4519, 0x7A879D8A]),
-    ("CRC32",        &[0x77073096, 0xEE0E612C, 0xEDB88320, 0x04C11DB7]),
-    ("CRC32C",       &[0x82F63B78]),
-    ("ChaCha20/Salsa20", &[0x61707865, 0x3320646E, 0x79622D32, 0x6B206574]),
+    ("MD5", &[0xD76AA478, 0xE8C7B756, 0x242070DB, 0xC1BDCEEE]),
+    ("SHA1", &[0x5A827999, 0x6ED9EBA1, 0x8F1BBCDC, 0xCA62C1D6]),
+    ("SHA256", &[0x428A2F98, 0x71374491, 0xB5C0FBCF, 0xE9B5DBA5]),
+    ("SM3", &[0x79CC4519, 0x7A879D8A]),
+    ("CRC32", &[0x77073096, 0xEE0E612C, 0xEDB88320, 0x04C11DB7]),
+    ("CRC32C", &[0x82F63B78]),
+    (
+        "ChaCha20/Salsa20",
+        &[0x61707865, 0x3320646E, 0x79622D32, 0x6B206574],
+    ),
     ("HMAC (generic)", &[0x36363636, 0x5C5C5C5C]),
-    ("TEA",          &[0x9E3779B9]),
-    ("Twofish",      &[0xBCBC3275, 0xECEC21F3, 0x202043C6, 0xB3B3C9F4]),
-    ("Blowfish",     &[0x243F6A88, 0x85A308D3]),
-    ("RC6",          &[0xB7E15163, 0x9E3779B9]),
-    ("AES",          &[0xC66363A5, 0xF87C7C84]),
-    ("APLib",        &[0x32335041]),
-    ("RC4",          &[0x4F3B2B74, 0x4E27D213]),
-    ("Threefish",    &[0x1B22B279, 0xAE23C8A4, 0xBC6F0C0D, 0x5E27A878]),
-    ("Camellia",     &[0x4D49E62D, 0x934F19C8, 0x34E72602, 0xF75E005E]),
-    ("Serpent",      &[0xC43FFF8B, 0x1D03D043, 0x1B2A04D0, 0x9AC28989]),
-    ("AES_SBOX",     &[0x637C777B, 0xF26B6FC5, 0x3001672B, 0xFEFED7AB]),
-    ("SHA256_K2",    &[0x3956C25B, 0x59F111F1, 0x923F82A4, 0xAB1C5ED5]),
-    ("SHA512_IV",    &[0x6A09E667, 0xF3BCC908, 0xBB67AE85, 0x84CAA73B]),
-    ("Camellia_IV",  &[0xA09E667F, 0x3BCC908B, 0xB67AE858, 0x4CAA73B2]),
-    ("Whirlpool_T0", &[0x18186018, 0xC07830D8, 0x60281818, 0xD8181860]),
-    ("Poly1305",     &[0xEB44ACC0, 0xD8DFB523]),
-    ("DES",          &[0xFEE1A2B3, 0xD7BEF080]),
-    ("DES1",         &[0x3A322A22, 0x2A223A32]),
-    ("DES_SBOX",     &[0x2C1E241B, 0x5A7F361D, 0x3D4793C6, 0x0B0EEDF8]),
+    ("TEA", &[0x9E3779B9]),
+    ("Twofish", &[0xBCBC3275, 0xECEC21F3, 0x202043C6, 0xB3B3C9F4]),
+    ("Blowfish", &[0x243F6A88, 0x85A308D3]),
+    ("RC6", &[0xB7E15163, 0x9E3779B9]),
+    ("AES", &[0xC66363A5, 0xF87C7C84]),
+    ("APLib", &[0x32335041]),
+    ("RC4", &[0x4F3B2B74, 0x4E27D213]),
+    (
+        "Threefish",
+        &[0x1B22B279, 0xAE23C8A4, 0xBC6F0C0D, 0x5E27A878],
+    ),
+    (
+        "Camellia",
+        &[0x4D49E62D, 0x934F19C8, 0x34E72602, 0xF75E005E],
+    ),
+    ("Serpent", &[0xC43FFF8B, 0x1D03D043, 0x1B2A04D0, 0x9AC28989]),
+    (
+        "AES_SBOX",
+        &[0x637C777B, 0xF26B6FC5, 0x3001672B, 0xFEFED7AB],
+    ),
+    (
+        "SHA256_K2",
+        &[0x3956C25B, 0x59F111F1, 0x923F82A4, 0xAB1C5ED5],
+    ),
+    (
+        "SHA512_IV",
+        &[0x6A09E667, 0xF3BCC908, 0xBB67AE85, 0x84CAA73B],
+    ),
+    (
+        "Camellia_IV",
+        &[0xA09E667F, 0x3BCC908B, 0xB67AE858, 0x4CAA73B2],
+    ),
+    (
+        "Whirlpool_T0",
+        &[0x18186018, 0xC07830D8, 0x60281818, 0xD8181860],
+    ),
+    ("Poly1305", &[0xEB44ACC0, 0xD8DFB523]),
+    ("DES", &[0xFEE1A2B3, 0xD7BEF080]),
+    ("DES1", &[0x3A322A22, 0x2A223A32]),
+    (
+        "DES_SBOX",
+        &[0x2C1E241B, 0x5A7F361D, 0x3D4793C6, 0x0B0EEDF8],
+    ),
 ];
 
 /// Pre-compute all needle bytes (lowercase hex of each magic number).
@@ -227,11 +306,12 @@ impl super::TraceEngine {
         length: u32,
     ) -> Result<MemorySnapshot> {
         let handle = self.get_handle(session_id)?;
-        let state = handle.state.read()
+        let state = handle
+            .state
+            .read()
             .map_err(|e| TraceError::Internal(e.to_string()))?;
 
-        let mem_view = state.mem_accesses_view()
-            .ok_or(TraceError::IndexNotReady)?;
+        let mem_view = state.mem_accesses_view().ok_or(TraceError::IndexNotReady)?;
 
         // 对齐到 16 字节边界
         let base = addr & !0xF;
@@ -292,15 +372,22 @@ impl super::TraceEngine {
         center_seq: u32,
     ) -> Result<MemHistoryMeta> {
         let handle = self.get_handle(session_id)?;
-        let state = handle.state.read()
+        let state = handle
+            .state
+            .read()
             .map_err(|e| TraceError::Internal(e.to_string()))?;
 
-        let mem_view = state.mem_accesses_view()
-            .ok_or(TraceError::IndexNotReady)?;
+        let mem_view = state.mem_accesses_view().ok_or(TraceError::IndexNotReady)?;
 
         let records = match mem_view.query(addr) {
             Some(r) => r,
-            None => return Ok(MemHistoryMeta { total: 0, center_index: 0, samples: Vec::new() }),
+            None => {
+                return Ok(MemHistoryMeta {
+                    total: 0,
+                    center_index: 0,
+                    samples: Vec::new(),
+                })
+            }
         };
 
         let center_index = records.partition_point(|r| r.seq < center_seq);
@@ -318,7 +405,8 @@ impl super::TraceEngine {
                 .map(|i| {
                     let idx = i * records.len() / SAMPLE_COUNT;
                     let rec = &records[idx];
-                    let disasm = line_index.as_ref()
+                    let disasm = line_index
+                        .as_ref()
                         .and_then(|li| li.get_line(data, rec.seq))
                         .and_then(|raw| match format {
                             TraceFormat::Unidbg => parse_trace_line(rec.seq, raw),
@@ -328,10 +416,19 @@ impl super::TraceEngine {
                         .unwrap_or_default();
                     MemHistoryRecord {
                         seq: rec.seq,
-                        rw: if rec.is_read() { "R".to_string() } else { "W".to_string() },
+                        rw: if rec.is_read() {
+                            "R".to_string()
+                        } else {
+                            "W".to_string()
+                        },
                         data: format!("0x{:x}", rec.data),
                         size: rec.size,
-                        insn_addr: resolve_offset(rec.seq, rec.insn_addr, line_index.as_ref(), data),
+                        insn_addr: resolve_offset(
+                            rec.seq,
+                            rec.insn_addr,
+                            line_index.as_ref(),
+                            data,
+                        ),
                         disasm,
                     }
                 })
@@ -353,11 +450,12 @@ impl super::TraceEngine {
         limit: usize,
     ) -> Result<Vec<MemHistoryRecord>> {
         let handle = self.get_handle(session_id)?;
-        let state = handle.state.read()
+        let state = handle
+            .state
+            .read()
             .map_err(|e| TraceError::Internal(e.to_string()))?;
 
-        let mem_view = state.mem_accesses_view()
-            .ok_or(TraceError::IndexNotReady)?;
+        let mem_view = state.mem_accesses_view().ok_or(TraceError::IndexNotReady)?;
 
         let records = match mem_view.query(addr) {
             Some(r) => r,
@@ -368,15 +466,15 @@ impl super::TraceEngine {
         let end = (start + limit).min(records.len());
         let slice = &records[start..end];
 
-        let line_index = state.line_index_view()
-            .ok_or(TraceError::IndexNotReady)?;
+        let line_index = state.line_index_view().ok_or(TraceError::IndexNotReady)?;
         let data: &[u8] = &state.mmap;
         let format = state.trace_format;
 
         let result: Vec<MemHistoryRecord> = slice
             .iter()
             .map(|rec| {
-                let disasm = line_index.get_line(data, rec.seq)
+                let disasm = line_index
+                    .get_line(data, rec.seq)
                     .and_then(|raw| match format {
                         TraceFormat::Unidbg => parse_trace_line(rec.seq, raw),
                         TraceFormat::Gumtrace => parse_trace_line_gumtrace(rec.seq, raw),
@@ -385,7 +483,11 @@ impl super::TraceEngine {
                     .unwrap_or_default();
                 MemHistoryRecord {
                     seq: rec.seq,
-                    rw: if rec.is_read() { "R".to_string() } else { "W".to_string() },
+                    rw: if rec.is_read() {
+                        "R".to_string()
+                    } else {
+                        "W".to_string()
+                    },
                     data: format!("0x{:x}", rec.data),
                     size: rec.size,
                     insn_addr: resolve_offset(rec.seq, rec.insn_addr, Some(&line_index), data),
@@ -399,19 +501,17 @@ impl super::TraceEngine {
 
     // ━━━━━━━━━━━━━━━━━━━━━━ Registers ━━━━━━━━━━━━━━━━━━━━━━
 
-    pub fn get_registers_at(
-        &self,
-        session_id: &str,
-        seq: u32,
-    ) -> Result<HashMap<String, String>> {
+    pub fn get_registers_at(&self, session_id: &str, seq: u32) -> Result<HashMap<String, String>> {
         let handle = self.get_handle(session_id)?;
-        let state = handle.state.read()
+        let state = handle
+            .state
+            .read()
             .map_err(|e| TraceError::Internal(e.to_string()))?;
 
-        let reg_view = state.reg_checkpoints_view()
+        let reg_view = state
+            .reg_checkpoints_view()
             .ok_or(TraceError::IndexNotReady)?;
-        let line_index = state.line_index_view()
-            .ok_or(TraceError::IndexNotReady)?;
+        let line_index = state.line_index_view().ok_or(TraceError::IndexNotReady)?;
 
         // 找最近检查点
         let (ckpt_seq, snapshot) = reg_view
@@ -448,7 +548,9 @@ impl super::TraceEngine {
                 TraceFormat::Gumtrace => parse_trace_line_gumtrace(seq, raw),
             };
             if let Some(parsed) = parsed {
-                let pc_display = if let Some(hex_str) = parsed.address.strip_prefix("0x")
+                let pc_display = if let Some(hex_str) = parsed
+                    .address
+                    .strip_prefix("0x")
                     .or_else(|| parsed.address.strip_prefix("0X"))
                 {
                     if let Ok(addr_val) = u64::from_str_radix(hex_str, 16) {
@@ -481,9 +583,8 @@ impl super::TraceEngine {
                     let first_reg = parsed.operands.first().and_then(|op| op.as_reg());
                     let cls = insn_class::classify(parsed.mnemonic.as_str(), first_reg);
                     let (_, uses) = def_use::determine_def_use(cls, &parsed);
-                    let read_names: Vec<&str> = uses.iter()
-                        .filter_map(|r| reg_id_to_name(*r))
-                        .collect();
+                    let read_names: Vec<&str> =
+                        uses.iter().filter_map(|r| reg_id_to_name(*r)).collect();
                     if !read_names.is_empty() {
                         result.insert("__read".to_string(), read_names.join(","));
                     }
@@ -498,11 +599,12 @@ impl super::TraceEngine {
 
     pub fn get_call_tree(&self, session_id: &str) -> Result<Vec<CallTreeNodeDto>> {
         let handle = self.get_handle(session_id)?;
-        let state = handle.state.read()
+        let state = handle
+            .state
+            .read()
             .map_err(|e| TraceError::Internal(e.to_string()))?;
 
-        let call_tree = state.call_tree.as_ref()
-            .ok_or(TraceError::IndexNotReady)?;
+        let call_tree = state.call_tree.as_ref().ok_or(TraceError::IndexNotReady)?;
 
         let data: &[u8] = &state.mmap;
         let line_index = state.line_index_view();
@@ -523,16 +625,19 @@ impl super::TraceEngine {
         include_self: bool,
     ) -> Result<Vec<CallTreeNodeDto>> {
         let handle = self.get_handle(session_id)?;
-        let state = handle.state.read()
+        let state = handle
+            .state
+            .read()
             .map_err(|e| TraceError::Internal(e.to_string()))?;
 
-        let call_tree = state.call_tree.as_ref()
-            .ok_or(TraceError::IndexNotReady)?;
+        let call_tree = state.call_tree.as_ref().ok_or(TraceError::IndexNotReady)?;
 
         let data: &[u8] = &state.mmap;
         let line_index = state.line_index_view();
 
-        let node = call_tree.nodes.get(node_id as usize)
+        let node = call_tree
+            .nodes
+            .get(node_id as usize)
             .ok_or_else(|| TraceError::InvalidArgument(format!("节点 {} 不存在", node_id)))?;
 
         let mut result = Vec::new();
@@ -552,11 +657,12 @@ impl super::TraceEngine {
 
     pub fn get_call_tree_node_count(&self, session_id: &str) -> Result<u32> {
         let handle = self.get_handle(session_id)?;
-        let state = handle.state.read()
+        let state = handle
+            .state
+            .read()
             .map_err(|e| TraceError::Internal(e.to_string()))?;
 
-        let call_tree = state.call_tree.as_ref()
-            .ok_or(TraceError::IndexNotReady)?;
+        let call_tree = state.call_tree.as_ref().ok_or(TraceError::IndexNotReady)?;
 
         Ok(call_tree.nodes.len() as u32)
     }
@@ -569,23 +675,26 @@ impl super::TraceEngine {
         options: StringQueryOptions,
     ) -> Result<StringsResult> {
         let handle = self.get_handle(session_id)?;
-        let state = handle.state.read()
+        let state = handle
+            .state
+            .read()
             .map_err(|e| TraceError::Internal(e.to_string()))?;
 
-        let string_index = state.string_index.as_ref()
+        let string_index = state
+            .string_index
+            .as_ref()
             .ok_or(TraceError::IndexNotReady)?;
 
         let search_lower = options.search.as_ref().map(|s| s.to_lowercase());
 
-        let filtered: Vec<(usize, &crate::query::strings::StringRecord)> = string_index.strings
+        let filtered: Vec<(usize, &crate::query::strings::StringRecord)> = string_index
+            .strings
             .iter()
             .enumerate()
             .filter(|(_, r)| r.byte_len >= options.min_len)
-            .filter(|(_, r)| {
-                match &search_lower {
-                    Some(q) => r.content.to_lowercase().contains(q.as_str()),
-                    None => true,
-                }
+            .filter(|(_, r)| match &search_lower {
+                Some(q) => r.content.to_lowercase().contains(q.as_str()),
+                None => true,
             })
             .collect();
 
@@ -612,7 +721,10 @@ impl super::TraceEngine {
             })
             .collect();
 
-        Ok(StringsResult { strings: page, total })
+        Ok(StringsResult {
+            strings: page,
+            total,
+        })
     }
 
     pub fn get_string_xrefs(
@@ -622,14 +734,14 @@ impl super::TraceEngine {
         byte_len: u32,
     ) -> Result<Vec<StringXRef>> {
         let handle = self.get_handle(session_id)?;
-        let state = handle.state.read()
+        let state = handle
+            .state
+            .read()
             .map_err(|e| TraceError::Internal(e.to_string()))?;
 
-        let mem_view = state.mem_accesses_view()
-            .ok_or(TraceError::IndexNotReady)?;
+        let mem_view = state.mem_accesses_view().ok_or(TraceError::IndexNotReady)?;
 
-        let line_index = state.line_index_view()
-            .ok_or(TraceError::IndexNotReady)?;
+        let line_index = state.line_index_view().ok_or(TraceError::IndexNotReady)?;
         let mmap = &state.mmap;
         let format = state.trace_format;
 
@@ -642,18 +754,24 @@ impl super::TraceEngine {
                 for rec in records {
                     if seen_seqs.insert(rec.seq) {
                         let rw_str = if rec.is_read() { "R" } else { "W" };
-                        let disasm = line_index.get_line(mmap, rec.seq)
+                        let disasm = line_index
+                            .get_line(mmap, rec.seq)
                             .and_then(|raw| match format {
                                 TraceFormat::Unidbg => parse_trace_line(rec.seq, raw),
                                 TraceFormat::Gumtrace => parse_trace_line_gumtrace(rec.seq, raw),
                             })
                             .map(|t| t.disasm)
                             .unwrap_or_default();
-                        let insn_addr_str = line_index.get_line(mmap, rec.seq)
+                        let insn_addr_str = line_index
+                            .get_line(mmap, rec.seq)
                             .and_then(|raw| std::str::from_utf8(raw).ok())
                             .map(|line_str| {
                                 let off = extract_insn_offset(line_str);
-                                if off != 0 { format!("0x{:x}", off) } else { format!("0x{:x}", rec.insn_addr) }
+                                if off != 0 {
+                                    format!("0x{:x}", off)
+                                } else {
+                                    format!("0x{:x}", rec.insn_addr)
+                                }
                             })
                             .unwrap_or_else(|| format!("0x{:x}", rec.insn_addr));
                         xrefs.push(StringXRef {
@@ -675,10 +793,14 @@ impl super::TraceEngine {
         let handle = self.get_handle(session_id)?;
 
         // 使用 compare_exchange 防止并发扫描
-        if handle.scanning_strings.compare_exchange(
-            false, true, Ordering::SeqCst, Ordering::SeqCst
-        ).is_err() {
-            return Err(TraceError::OperationInProgress("scan_strings already running".to_string()));
+        if handle
+            .scanning_strings
+            .compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst)
+            .is_err()
+        {
+            return Err(TraceError::OperationInProgress(
+                "scan_strings already running".to_string(),
+            ));
         }
 
         // 确保无论成功与否都重置 scanning_strings
@@ -686,15 +808,20 @@ impl super::TraceEngine {
             // 1. Collect READ+WRITE records and reset cancel flag
             let mut accesses: Vec<(u64, u64, u8, u32, StringRw)>;
             {
-                let state = handle.state.read()
+                let state = handle
+                    .state
+                    .read()
                     .map_err(|e| TraceError::Internal(e.to_string()))?;
-                let mem_view = state.mem_accesses_view()
-                    .ok_or(TraceError::IndexNotReady)?;
+                let mem_view = state.mem_accesses_view().ok_or(TraceError::IndexNotReady)?;
 
                 accesses = Vec::new();
                 for (addr, rec) in mem_view.iter_all() {
                     if rec.size <= 8 {
-                        let rw = if rec.is_write() { StringRw::Write } else { StringRw::Read };
+                        let rw = if rec.is_write() {
+                            StringRw::Write
+                        } else {
+                            StringRw::Read
+                        };
                         accesses.push((addr, rec.data, rec.size, rec.seq, rw));
                     }
                 }
@@ -719,16 +846,19 @@ impl super::TraceEngine {
             // 5. finish + fill_xref_counts
             let mut string_index = sb.finish();
             {
-                let state = handle.state.read()
+                let state = handle
+                    .state
+                    .read()
                     .map_err(|e| TraceError::Internal(e.to_string()))?;
-                let mem_view = state.mem_accesses_view()
-                    .ok_or(TraceError::IndexNotReady)?;
+                let mem_view = state.mem_accesses_view().ok_or(TraceError::IndexNotReady)?;
                 StringBuilder::fill_xref_counts_view(&mut string_index, &mem_view);
             }
 
             // 6. Write results and update cache
             {
-                let mut state = handle.state.write()
+                let mut state = handle
+                    .state
+                    .write()
                     .map_err(|e| TraceError::Internal(e.to_string()))?;
                 crate::cache::save_string_cache(&state.file_path, &state.mmap, &string_index);
                 state.string_index = Some(string_index);
@@ -760,12 +890,13 @@ impl super::TraceEngine {
         options: DepTreeOptions,
     ) -> Result<crate::query::dep_tree::DependencyGraph> {
         let handle = self.get_handle(session_id)?;
-        let state = handle.state.read()
+        let state = handle
+            .state
+            .read()
             .map_err(|e| TraceError::Internal(e.to_string()))?;
 
         let format = state.trace_format;
-        let lidx_view = state.line_index_view()
-            .ok_or(TraceError::IndexNotReady)?;
+        let lidx_view = state.line_index_view().ok_or(TraceError::IndexNotReady)?;
 
         let spec = if target.starts_with("mem:") {
             format!("{}@{}", target, seq + 1)
@@ -774,20 +905,31 @@ impl super::TraceEngine {
             format!("reg:{}@{}", reg_name, seq + 1)
         };
 
-        let reg_last_def = state.reg_last_def.as_ref()
+        let reg_last_def = state
+            .reg_last_def
+            .as_ref()
             .ok_or(TraceError::IndexNotReady)?;
-        let mem_last_def = state.mem_last_def_view()
-            .ok_or(TraceError::IndexNotReady)?;
+        let mem_last_def = state.mem_last_def_view().ok_or(TraceError::IndexNotReady)?;
 
         let max_nodes = options.max_nodes.unwrap_or(DEFAULT_MAX_NODES);
         let start_idx = super::slice::resolve_start_index(
-            &spec, reg_last_def, &mem_last_def, &state.mmap, &lidx_view, format,
-        ).map_err(|e| TraceError::InvalidArgument(e))?;
+            &spec,
+            reg_last_def,
+            &mem_last_def,
+            &state.mmap,
+            &lidx_view,
+            format,
+        )
+        .map_err(|e| TraceError::InvalidArgument(e))?;
 
-        let scan_view = state.scan_view()
-            .ok_or(TraceError::IndexNotReady)?;
+        let scan_view = state.scan_view().ok_or(TraceError::IndexNotReady)?;
 
-        let mut graph = crate::query::dep_tree::build_graph(&scan_view, start_idx, options.data_only, max_nodes);
+        let mut graph = crate::query::dep_tree::build_graph(
+            &scan_view,
+            start_idx,
+            options.data_only,
+            max_nodes,
+        );
         crate::query::dep_tree::populate_graph_info(&mut graph, &state.mmap, &lidx_view, format);
         Ok(graph)
     }
@@ -798,49 +940,56 @@ impl super::TraceEngine {
         options: DepTreeOptions,
     ) -> Result<crate::query::dep_tree::DependencyGraph> {
         let handle = self.get_handle(session_id)?;
-        let state = handle.state.read()
+        let state = handle
+            .state
+            .read()
             .map_err(|e| TraceError::Internal(e.to_string()))?;
 
-        let origin = state.slice_origin.as_ref()
-            .ok_or_else(|| TraceError::InvalidArgument(
-                "No active taint analysis result, please run taint tracking first".to_string()
-            ))?;
-        let spec = origin.from_specs.first()
-            .ok_or_else(|| TraceError::InvalidArgument("No from_specs in SliceOrigin".to_string()))?;
+        let origin = state.slice_origin.as_ref().ok_or_else(|| {
+            TraceError::InvalidArgument(
+                "No active taint analysis result, please run taint tracking first".to_string(),
+            )
+        })?;
+        let spec = origin.from_specs.first().ok_or_else(|| {
+            TraceError::InvalidArgument("No from_specs in SliceOrigin".to_string())
+        })?;
         let data_only = options.data_only || origin.data_only;
         let max_nodes = options.max_nodes.unwrap_or(DEFAULT_MAX_NODES);
 
-        let reg_last_def = state.reg_last_def.as_ref()
+        let reg_last_def = state
+            .reg_last_def
+            .as_ref()
             .ok_or(TraceError::IndexNotReady)?;
-        let mem_last_def = state.mem_last_def_view()
-            .ok_or(TraceError::IndexNotReady)?;
-        let lidx_view = state.line_index_view()
-            .ok_or(TraceError::IndexNotReady)?;
+        let mem_last_def = state.mem_last_def_view().ok_or(TraceError::IndexNotReady)?;
+        let lidx_view = state.line_index_view().ok_or(TraceError::IndexNotReady)?;
         let format = state.trace_format;
 
         let start_idx = super::slice::resolve_start_index(
-            spec, reg_last_def, &mem_last_def, &state.mmap, &lidx_view, format,
-        ).map_err(|e| TraceError::InvalidArgument(e))?;
+            spec,
+            reg_last_def,
+            &mem_last_def,
+            &state.mmap,
+            &lidx_view,
+            format,
+        )
+        .map_err(|e| TraceError::InvalidArgument(e))?;
 
-        let scan_view = state.scan_view()
-            .ok_or(TraceError::IndexNotReady)?;
+        let scan_view = state.scan_view().ok_or(TraceError::IndexNotReady)?;
 
-        let mut graph = crate::query::dep_tree::build_graph(&scan_view, start_idx, data_only, max_nodes);
+        let mut graph =
+            crate::query::dep_tree::build_graph(&scan_view, start_idx, data_only, max_nodes);
         crate::query::dep_tree::populate_graph_info(&mut graph, &state.mmap, &lidx_view, format);
         Ok(graph)
     }
 
-    pub fn get_line_def_registers(
-        &self,
-        session_id: &str,
-        seq: u32,
-    ) -> Result<Vec<String>> {
+    pub fn get_line_def_registers(&self, session_id: &str, seq: u32) -> Result<Vec<String>> {
         let handle = self.get_handle(session_id)?;
-        let state = handle.state.read()
+        let state = handle
+            .state
+            .read()
             .map_err(|e| TraceError::Internal(e.to_string()))?;
 
-        let lidx_view = state.line_index_view()
-            .ok_or(TraceError::IndexNotReady)?;
+        let lidx_view = state.line_index_view().ok_or(TraceError::IndexNotReady)?;
         let format = state.trace_format;
 
         if let Some(raw) = lidx_view.get_line(&state.mmap, seq) {
@@ -861,14 +1010,11 @@ impl super::TraceEngine {
 
     // ━━━━━━━━━━━━━━━━━━━━━━ DEF/USE ━━━━━━━━━━━━━━━━━━━━━━
 
-    pub fn get_def_use_chain(
-        &self,
-        session_id: &str,
-        seq: u32,
-        reg: &str,
-    ) -> Result<DefUseChain> {
+    pub fn get_def_use_chain(&self, session_id: &str, seq: u32, reg: &str) -> Result<DefUseChain> {
         let handle = self.get_handle(session_id)?;
-        let state = handle.state.read()
+        let state = handle
+            .state
+            .read()
             .map_err(|e| TraceError::Internal(e.to_string()))?;
 
         let target_reg = parse_reg(reg)
@@ -876,8 +1022,7 @@ impl super::TraceEngine {
 
         let total = state.total_lines;
         let format = state.trace_format;
-        let line_index = state.line_index_view()
-            .ok_or(TraceError::IndexNotReady)?;
+        let line_index = state.line_index_view().ok_or(TraceError::IndexNotReady)?;
 
         // === 分析 anchor 行：判断 target_reg 在当前行是 DEF 还是 USE ===
         let mut anchor_is_use = false;
@@ -911,8 +1056,10 @@ impl super::TraceEngine {
                             }
                         } else if format == TraceFormat::Gumtrace
                             && target_reg == RegId::X0
-                            && matches!(gumtrace_parser::parse_special_line(line_str),
-                                Some(gumtrace_parser::SpecialLine::Ret { .. }))
+                            && matches!(
+                                gumtrace_parser::parse_special_line(line_str),
+                                Some(gumtrace_parser::SpecialLine::Ret { .. })
+                            )
                         {
                             def_seq = Some(s);
                             break;
@@ -947,8 +1094,10 @@ impl super::TraceEngine {
                             }
                         } else if format == TraceFormat::Gumtrace
                             && target_reg == RegId::X0
-                            && matches!(gumtrace_parser::parse_special_line(line_str),
-                                Some(gumtrace_parser::SpecialLine::Ret { .. }))
+                            && matches!(
+                                gumtrace_parser::parse_special_line(line_str),
+                                Some(gumtrace_parser::SpecialLine::Ret { .. })
+                            )
                         {
                             redefined_seq = Some(s);
                             break;
@@ -967,15 +1116,14 @@ impl super::TraceEngine {
 
     // ━━━━━━━━━━━━━━━━━━━━━━ Crypto ━━━━━━━━━━━━━━━━━━━━━━
 
-    pub fn scan_crypto(
-        &self,
-        session_id: &str,
-    ) -> Result<CryptoScanResult> {
+    pub fn scan_crypto(&self, session_id: &str) -> Result<CryptoScanResult> {
         let handle = self.get_handle(session_id)?;
 
         // 检查内存缓存
         {
-            let state = handle.state.read()
+            let state = handle
+                .state
+                .read()
                 .map_err(|e| TraceError::Internal(e.to_string()))?;
             if let Some(cached) = &state.crypto_cache {
                 return Ok(cached.clone());
@@ -983,7 +1131,9 @@ impl super::TraceEngine {
             // 检查磁盘缓存
             if let Some(cached) = crate::cache::load_crypto_cache(&state.file_path, &state.mmap) {
                 drop(state);
-                let mut state = handle.state.write()
+                let mut state = handle
+                    .state
+                    .write()
                     .map_err(|e| TraceError::Internal(e.to_string()))?;
                 state.crypto_cache = Some(cached.clone());
                 return Ok(cached);
@@ -997,9 +1147,13 @@ impl super::TraceEngine {
             .unwrap_or(4);
 
         let (mmap_ref, total_lines, trace_format, chunks) = {
-            let state = handle.state.read()
+            let state = handle
+                .state
+                .read()
                 .map_err(|e| TraceError::Internal(e.to_string()))?;
-            let total_lines = state.lidx_store.as_ref()
+            let total_lines = state
+                .lidx_store
+                .as_ref()
                 .map(|s| s.total_lines())
                 .unwrap_or(0);
 
@@ -1011,9 +1165,12 @@ impl super::TraceEngine {
                     let mut chunks = Vec::with_capacity(num_chunks);
                     for i in 0..num_chunks {
                         let start_seq = (i * lines_per_chunk) as u32;
-                        if start_seq >= total_lines { break; }
+                        if start_seq >= total_lines {
+                            break;
+                        }
                         let end_seq = ((i + 1) * lines_per_chunk).min(total_lines as usize) as u32;
-                        let start_offset = li.line_byte_offset(data, start_seq).unwrap_or(0) as usize;
+                        let start_offset =
+                            li.line_byte_offset(data, start_seq).unwrap_or(0) as usize;
                         chunks.push((start_seq, end_seq, start_offset));
                     }
                     chunks
@@ -1030,9 +1187,17 @@ impl super::TraceEngine {
 
         let all_matches = if let Some(chunks) = chunks {
             use rayon::prelude::*;
-            let chunk_results: Vec<Vec<crate::query::crypto::CryptoMatch>> = chunks.par_iter()
+            let chunk_results: Vec<Vec<crate::query::crypto::CryptoMatch>> = chunks
+                .par_iter()
                 .map(|&(start_seq, end_seq, start_offset)| {
-                    scan_chunk(data, start_seq, end_seq, start_offset, &needles, trace_format)
+                    scan_chunk(
+                        data,
+                        start_seq,
+                        end_seq,
+                        start_offset,
+                        &needles,
+                        trace_format,
+                    )
                 })
                 .collect();
 
@@ -1059,7 +1224,9 @@ impl super::TraceEngine {
 
         // 写入内存缓存 + 磁盘缓存
         {
-            let mut state = handle.state.write()
+            let mut state = handle
+                .state
+                .write()
                 .map_err(|e| TraceError::Internal(e.to_string()))?;
             crate::cache::save_crypto_cache(&state.file_path, &state.mmap, &result);
             state.crypto_cache = Some(result.clone());
@@ -1068,12 +1235,11 @@ impl super::TraceEngine {
         Ok(result)
     }
 
-    pub fn load_crypto_cache(
-        &self,
-        session_id: &str,
-    ) -> Result<Option<CryptoScanResult>> {
+    pub fn load_crypto_cache(&self, session_id: &str) -> Result<Option<CryptoScanResult>> {
         let handle = self.get_handle(session_id)?;
-        let mut state = handle.state.write()
+        let mut state = handle
+            .state
+            .write()
             .map_err(|e| TraceError::Internal(e.to_string()))?;
 
         if state.crypto_cache.is_some() {
@@ -1088,18 +1254,18 @@ impl super::TraceEngine {
 
     // ━━━━━━━━━━━━━━━━━━━━━━ Functions ━━━━━━━━━━━━━━━━━━━━━━
 
-    pub fn get_function_calls(
-        &self,
-        session_id: &str,
-    ) -> Result<FunctionCallsResult> {
+    pub fn get_function_calls(&self, session_id: &str) -> Result<FunctionCallsResult> {
         let handle = self.get_handle(session_id)?;
-        let state = handle.state.read()
+        let state = handle
+            .state
+            .read()
             .map_err(|e| TraceError::Internal(e.to_string()))?;
 
         // Group by func_name
         let mut groups: HashMap<String, (bool, Vec<FunctionCallOccurrence>)> = HashMap::new();
         for (&seq, ann) in &state.call_annotations {
-            let entry = groups.entry(ann.func_name.clone())
+            let entry = groups
+                .entry(ann.func_name.clone())
                 .or_insert_with(|| (ann.is_jni, Vec::new()));
             entry.1.push(FunctionCallOccurrence {
                 seq,
@@ -1108,17 +1274,25 @@ impl super::TraceEngine {
         }
 
         let mut total_calls = 0usize;
-        let mut functions: Vec<FunctionCallEntry> = groups.into_iter()
+        let mut functions: Vec<FunctionCallEntry> = groups
+            .into_iter()
             .map(|(func_name, (is_jni, mut occs))| {
                 occs.sort_by_key(|o| o.seq);
                 total_calls += occs.len();
-                FunctionCallEntry { func_name, is_jni, occurrences: occs }
+                FunctionCallEntry {
+                    func_name,
+                    is_jni,
+                    occurrences: occs,
+                }
             })
             .collect();
 
         // Sort by first occurrence seq
         functions.sort_by_key(|f| f.occurrences.first().map(|o| o.seq).unwrap_or(u32::MAX));
 
-        Ok(FunctionCallsResult { functions, total_calls })
+        Ok(FunctionCallsResult {
+            functions,
+            total_calls,
+        })
     }
 }

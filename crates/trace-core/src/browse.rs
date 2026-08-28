@@ -57,11 +57,18 @@ pub fn parse_trace_line_gumtrace(seq: u32, raw: &[u8]) -> Option<TraceLine> {
     let abs_end = bang;
     let address = &rest[..abs_end]; // 绝对地址
     let offset_start = bang + 1;
-    let offset_end = rest[offset_start..].find(' ').map(|p| offset_start + p).unwrap_or(rest.len());
+    let offset_end = rest[offset_start..]
+        .find(' ')
+        .map(|p| offset_start + p)
+        .unwrap_or(rest.len());
     let so_offset = &rest[offset_start..offset_end]; // 偏移地址
 
     // Instruction text
-    let insn_start = if offset_end < rest.len() { offset_end + 1 } else { rest.len() };
+    let insn_start = if offset_end < rest.len() {
+        offset_end + 1
+    } else {
+        rest.len()
+    };
     let semicolon_pos = rest[insn_start..].find(';').map(|p| insn_start + p);
     let (insn_end, annot_start) = if let Some(semi) = semicolon_pos {
         (semi, semi + 1)
@@ -90,7 +97,8 @@ pub fn parse_trace_line_gumtrace(seq: u32, raw: &[u8]) -> Option<TraceLine> {
     let (changes, reg_before) = if let Some(pos) = annot_area.find(" -> ") {
         let changes = annot_area[pos + 4..].trim().to_string();
         let before = annot_area[..pos].trim();
-        let reg_before = before.split_whitespace()
+        let reg_before = before
+            .split_whitespace()
             .filter(|tok| !tok.starts_with("mem_w=") && !tok.starts_with("mem_r="))
             .collect::<Vec<_>>()
             .join(" ");
@@ -98,7 +106,9 @@ pub fn parse_trace_line_gumtrace(seq: u32, raw: &[u8]) -> Option<TraceLine> {
     } else {
         // 没有 " -> "：无寄存器变化（如 str/strb 等 store 指令），
         // annotation 中的寄存器值即为 before 值
-        let reg_before = annot_area.trim().split_whitespace()
+        let reg_before = annot_area
+            .trim()
+            .split_whitespace()
             .filter(|tok| !tok.starts_with("mem_w=") && !tok.starts_with("mem_r="))
             .collect::<Vec<_>>()
             .join(" ");
@@ -154,7 +164,8 @@ fn extract_gumtrace_mem_addr(line: &str) -> Option<String> {
         if let Some(pos) = line.find(marker) {
             let val_start = pos + marker.len();
             let rest = &line[val_start..];
-            let val_end = rest.find(|c: char| !c.is_ascii_hexdigit() && c != 'x' && c != 'X')
+            let val_end = rest
+                .find(|c: char| !c.is_ascii_hexdigit() && c != 'x' && c != 'X')
                 .unwrap_or(rest.len());
             return Some(rest[..val_end].to_string());
         }
@@ -226,7 +237,8 @@ fn extract_mem_addr(line: &str) -> Option<String> {
     let pos = line.find("abs=0x")?;
     let val_start = pos + 4; // "abs=" 之后
     let rest = &line[val_start..];
-    let val_end = rest.find(|c: char| !c.is_ascii_hexdigit() && c != 'x' && c != 'X')
+    let val_end = rest
+        .find(|c: char| !c.is_ascii_hexdigit() && c != 'x' && c != 'X')
         .unwrap_or(rest.len());
     Some(rest[..val_end].to_string())
 }
@@ -236,17 +248,36 @@ fn extract_mem_size(disasm: &str) -> Option<u8> {
     let mnemonic = disasm.split_whitespace().next().unwrap_or("");
     let mn = mnemonic.to_lowercase();
     // 字节操作: ldrb, strb, ldurb, sturb, ldarb, stlrb, ldaxrb, stlxrb, ...
-    if mn.ends_with('b') && (mn.starts_with("ldr") || mn.starts_with("str") || mn.starts_with("ldu") || mn.starts_with("stu") || mn.starts_with("lda") || mn.starts_with("stl") || mn.starts_with("cas")) {
+    if mn.ends_with('b')
+        && (mn.starts_with("ldr")
+            || mn.starts_with("str")
+            || mn.starts_with("ldu")
+            || mn.starts_with("stu")
+            || mn.starts_with("lda")
+            || mn.starts_with("stl")
+            || mn.starts_with("cas"))
+    {
         return Some(1);
     }
     // 半字操作: ldrh, strh, ldurh, sturh, ...
-    if mn.ends_with('h') && (mn.starts_with("ldr") || mn.starts_with("str") || mn.starts_with("ldu") || mn.starts_with("stu")) {
+    if mn.ends_with('h')
+        && (mn.starts_with("ldr")
+            || mn.starts_with("str")
+            || mn.starts_with("ldu")
+            || mn.starts_with("stu"))
+    {
         return Some(2);
     }
     // SIMD/FP: 看目标寄存器前缀
     // stp/ldp q寄存器 = 16字节 pair (32), d = 8字节 pair (16), s = 4字节 pair (8)
     // str/ldr q = 16, d = 8, s = 4
-    if mn.starts_with("ldr") || mn.starts_with("str") || mn.starts_with("ldu") || mn.starts_with("stu") || mn.starts_with("ldp") || mn.starts_with("stp") {
+    if mn.starts_with("ldr")
+        || mn.starts_with("str")
+        || mn.starts_with("ldu")
+        || mn.starts_with("stu")
+        || mn.starts_with("ldp")
+        || mn.starts_with("stp")
+    {
         // 检查第一个操作数的寄存器前缀
         let args = &disasm[mnemonic.len()..].trim_start();
         let first_reg = args.split([',', ' ']).next().unwrap_or("");
@@ -256,12 +287,22 @@ fn extract_mem_size(disasm: &str) -> Option<u8> {
         }
         if first_reg.starts_with('d') || first_reg.starts_with('D') {
             // 排除 "d0" 是 SIMD，但 "d" 也可能是其他
-            if first_reg.len() > 1 && first_reg[1..].chars().next().map_or(false, |c| c.is_ascii_digit()) {
+            if first_reg.len() > 1
+                && first_reg[1..]
+                    .chars()
+                    .next()
+                    .map_or(false, |c| c.is_ascii_digit())
+            {
                 return Some(if is_pair { 16 } else { 8 });
             }
         }
         if first_reg.starts_with('s') || first_reg.starts_with('S') {
-            if first_reg.len() > 1 && first_reg[1..].chars().next().map_or(false, |c| c.is_ascii_digit()) {
+            if first_reg.len() > 1
+                && first_reg[1..]
+                    .chars()
+                    .next()
+                    .map_or(false, |c| c.is_ascii_digit())
+            {
                 return Some(if is_pair { 8 } else { 4 });
             }
         }
@@ -305,12 +346,10 @@ fn extract_reg_before(line: &str, _changes: &str) -> String {
 
     let between = line[start..arrow_pos].trim();
     // 过滤掉 "; "、"mem[WRITE]"、"mem[READ]"、"abs=0xHEX" token，返回全部寄存器值
-    between.split_whitespace()
+    between
+        .split_whitespace()
         .filter(|tok| {
-            *tok != ";" &&
-            *tok != "mem[WRITE]" &&
-            *tok != "mem[READ]" &&
-            !tok.starts_with("abs=0x")
+            *tok != ";" && *tok != "mem[WRITE]" && *tok != "mem[READ]" && !tok.starts_with("abs=0x")
         })
         .collect::<Vec<_>>()
         .join(" ")

@@ -1,5 +1,5 @@
 use rustc_hash::FxHashMap;
-use serde::{Serialize, Deserialize};
+use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum MemRw {
@@ -46,9 +46,8 @@ impl MemAccessIndex {
     }
 
     pub fn iter_all(&self) -> impl Iterator<Item = (u64, &MemAccessRecord)> + '_ {
-        self.index.iter().flat_map(|(&addr, records)| {
-            records.iter().map(move |r| (addr, r))
-        })
+        self.index
+            .iter()
+            .flat_map(|(&addr, records)| records.iter().map(move |r| (addr, r)))
     }
-
 }

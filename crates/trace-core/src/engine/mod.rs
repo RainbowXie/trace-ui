@@ -1,18 +1,18 @@
-mod build;
 mod browse;
+mod build;
+mod memory;
+mod query;
 mod search;
 mod slice;
-mod query;
-mod memory;
 
+use memmap2::Mmap;
+use std::collections::HashMap;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, RwLock};
-use std::collections::HashMap;
-use memmap2::Mmap;
 
-use crate::session::{SessionHandle, SessionState};
-use crate::error::{TraceError, Result};
 use crate::api_types::*;
+use crate::error::{Result, TraceError};
+use crate::session::{SessionHandle, SessionState};
 use trace_parser::types::TraceFormat;
 
 pub struct TraceEngine {
@@ -27,9 +27,12 @@ impl TraceEngine {
     }
 
     pub(crate) fn get_handle(&self, session_id: &str) -> Result<Arc<SessionHandle>> {
-        let sessions = self.sessions.read()
+        let sessions = self
+            .sessions
+            .read()
             .map_err(|e| TraceError::Internal(e.to_string()))?;
-        sessions.get(session_id)
+        sessions
+            .get(session_id)
             .cloned()
             .ok_or_else(|| TraceError::SessionNotFound(session_id.to_string()))
     }
@@ -37,13 +40,10 @@ impl TraceEngine {
     // ━━ 会话管理 ━━
 
     pub fn create_session(&self, path: &str) -> Result<SessionInfo> {
-        let file = std::fs::File::open(path)
-            .map_err(|e| TraceError::Io(e))?;
-        let metadata = file.metadata()
-            .map_err(|e| TraceError::Io(e))?;
+        let file = std::fs::File::open(path).map_err(|e| TraceError::Io(e))?;
+        let metadata = file.metadata().map_err(|e| TraceError::Io(e))?;
         let file_size = metadata.len();
-        let mmap = unsafe { Mmap::map(&file) }
-            .map_err(|e| TraceError::Io(e))?;
+        let mmap = unsafe { Mmap::map(&file) }.map_err(|e| TraceError::Io(e))?;
         let trace_hash = crate::memory_search::compute_trace_content_hash(&mmap);
 
         #[cfg(unix)]
@@ -87,7 +87,9 @@ impl TraceEngine {
         });
 
         {
-            let mut sessions = self.sessions.write()
+            let mut sessions = self
+                .sessions
+                .write()
                 .map_err(|e| TraceError::Internal(e.to_string()))?;
             sessions.insert(session_id.clone(), handle);
         }
@@ -106,7 +108,9 @@ impl TraceEngine {
 
     pub fn close_session(&self, session_id: &str) -> Result<()> {
         let removed = {
-            let mut sessions = self.sessions.write()
+            let mut sessions = self
+                .sessions
+                .write()
                 .map_err(|e| TraceError::Internal(e.to_string()))?;
             sessions.remove(session_id)
         };
@@ -118,7 +122,9 @@ impl TraceEngine {
 
     pub fn get_session_info(&self, session_id: &str) -> Result<SessionInfo> {
         let handle = self.get_handle(session_id)?;
-        let state = handle.state.read()
+        let state = handle
+            .state
+            .read()
             .map_err(|e| TraceError::Internal(e.to_string()))?;
 
         Ok(SessionInfo {
@@ -138,19 +144,22 @@ impl TraceEngine {
             Ok(s) => s,
             Err(_) => return Vec::new(),
         };
-        sessions.iter().filter_map(|(id, handle)| {
-            let state = handle.state.read().ok()?;
-            Some(SessionInfo {
-                session_id: id.clone(),
-                file_path: handle.file_path.clone(),
-                file_size: handle.file_size,
-                total_lines: state.total_lines,
-                index_ready: state.scan_store.is_some(),
-                building: handle.building.load(Ordering::Relaxed),
-                has_slice_result: state.slice_result.is_some(),
-                trace_format: Some(state.trace_format),
+        sessions
+            .iter()
+            .filter_map(|(id, handle)| {
+                let state = handle.state.read().ok()?;
+                Some(SessionInfo {
+                    session_id: id.clone(),
+                    file_path: handle.file_path.clone(),
+                    file_size: handle.file_size,
+                    total_lines: state.total_lines,
+                    index_ready: state.scan_store.is_some(),
+                    building: handle.building.load(Ordering::Relaxed),
+                    has_slice_result: state.slice_result.is_some(),
+                    trace_format: Some(state.trace_format),
+                })
             })
-        }).collect()
+            .collect()
     }
 
     // ━━ 缓存管理 ━━
@@ -163,8 +172,7 @@ impl TraceEngine {
     pub fn set_cache_dir(&self, path: Option<String>) -> Result<()> {
         let path_buf = path.map(std::path::PathBuf::from);
         if let Some(ref p) = path_buf {
-            std::fs::create_dir_all(p)
-                .map_err(|e| TraceError::Io(e))?;
+            std::fs::create_dir_all(p).map_err(|e| TraceError::Io(e))?;
         }
         crate::cache::set_cache_dir_override(path_buf);
         Ok(())
@@ -172,7 +180,10 @@ impl TraceEngine {
 
     pub fn clear_all_cache(&self) -> ClearResult {
         let (files_deleted, bytes_freed) = crate::cache::clear_all_cache();
-        ClearResult { files_deleted, bytes_freed }
+        ClearResult {
+            files_deleted,
+            bytes_freed,
+        }
     }
 
     pub fn delete_file_cache(&self, path: &str) {

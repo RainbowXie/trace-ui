@@ -1,4 +1,4 @@
-use serde::{Serialize, Deserialize};
+use serde::{Deserialize, Serialize};
 use trace_parser::types::RegId;
 
 /// 包装 [u64; RegId::COUNT] 以支持 serde（serde 原生不支持长度 > 32 的数组）
@@ -15,7 +15,11 @@ impl<'de> Deserialize<'de> for RegSnapshot {
     fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
         let v: Vec<u64> = Vec::deserialize(deserializer)?;
         let arr: [u64; RegId::COUNT] = v.try_into().map_err(|v: Vec<u64>| {
-            serde::de::Error::custom(format!("expected {} elements, got {}", RegId::COUNT, v.len()))
+            serde::de::Error::custom(format!(
+                "expected {} elements, got {}",
+                RegId::COUNT,
+                v.len()
+            ))
         })?;
         Ok(RegSnapshot(arr))
     }

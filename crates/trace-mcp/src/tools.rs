@@ -25,7 +25,8 @@ const MAX_SEARCH: u32 = 200;
 const DEFAULT_SEARCH: u32 = 30;
 
 fn json(val: &impl serde::Serialize) -> String {
-    serde_json::to_string(val).unwrap_or_else(|e| format!("{{\"error\": \"serialization failed: {}\"}}", e))
+    serde_json::to_string(val)
+        .unwrap_or_else(|e| format!("{{\"error\": \"serialization failed: {}\"}}", e))
 }
 
 /// Run a blocking closure on the tokio blocking thread pool to avoid starving
@@ -149,7 +150,9 @@ fn format_memory_search_result(result: MemorySearchResult) -> String {
 
 /// 检查 changes 字段是否仅包含栈/帧指针寄存器变化
 fn is_stack_only_change(changes: &str) -> bool {
-    if changes.is_empty() { return false; }
+    if changes.is_empty() {
+        return false;
+    }
     let mut has_any = false;
     for token in changes.split_whitespace() {
         if let Some(eq_pos) = token.find('=') {
@@ -169,13 +172,17 @@ fn parse_addr_range(range: &str) -> Result<(u64, u64), String> {
     let parts: Vec<&str> = range.split('-').collect();
     if parts.len() != 2 {
         return Err(format!(
-            "Invalid addr_range format '{}'. Expected: '0x246F00-0x249800'", range
+            "Invalid addr_range format '{}'. Expected: '0x246F00-0x249800'",
+            range
         ));
     }
     let start = parse_hex_addr(parts[0].trim())?;
     let end = parse_hex_addr(parts[1].trim())?;
     if start > end {
-        return Err(format!("Invalid addr_range: start (0x{:x}) > end (0x{:x})", start, end));
+        return Err(format!(
+            "Invalid addr_range: start (0x{:x}) > end (0x{:x})",
+            start, end
+        ));
     }
     Ok((start, end))
 }
@@ -185,15 +192,23 @@ fn parse_seq_range(range: &str) -> Result<(u32, u32), String> {
     let parts: Vec<&str> = range.split('-').collect();
     if parts.len() != 2 {
         return Err(format!(
-            "Invalid seq_range format '{}'. Expected: '3000-6000'", range
+            "Invalid seq_range format '{}'. Expected: '3000-6000'",
+            range
         ));
     }
-    let start: u32 = parts[0].trim().parse()
+    let start: u32 = parts[0]
+        .trim()
+        .parse()
         .map_err(|_| format!("Invalid start seq: '{}'", parts[0].trim()))?;
-    let end: u32 = parts[1].trim().parse()
+    let end: u32 = parts[1]
+        .trim()
+        .parse()
         .map_err(|_| format!("Invalid end seq: '{}'", parts[1].trim()))?;
     if start > end {
-        return Err(format!("Invalid seq_range: start ({}) > end ({})", start, end));
+        return Err(format!(
+            "Invalid seq_range: start ({}) > end ({})",
+            start, end
+        ));
     }
     Ok((start, end))
 }
@@ -237,7 +252,8 @@ impl TraceToolHandler {
                     1 => Ok(sessions[0].session_id.clone()),
                     n => Err(format!(
                         "Multiple sessions active ({}). Please specify session_id. \
-                         Use list_sessions to see all sessions.", n
+                         Use list_sessions to see all sessions.",
+                        n
                     )),
                 }
             }
@@ -259,7 +275,8 @@ impl TraceToolHandler {
     ) -> Result<String, String> {
         let engine = self.engine.clone();
         blocking(move || {
-            let session = engine.create_session(&req.file_path)
+            let session = engine
+                .create_session(&req.file_path)
                 .map_err(|e| format!("Failed to open trace: {}", e))?;
 
             let session_id = session.session_id.clone();
@@ -271,15 +288,18 @@ impl TraceToolHandler {
             match engine.build_index(&session_id, options, None) {
                 Ok(build) => {
                     // Extract additional info (graceful fallback on failure)
-                    let module_name = engine.get_lines(&session_id, &[0])
+                    let module_name = engine
+                        .get_lines(&session_id, &[0])
                         .ok()
                         .and_then(|lines| lines.first().and_then(|l| l.so_name.clone()));
 
-                    let entry_address = engine.get_call_tree_children(&session_id, 0, true)
+                    let entry_address = engine
+                        .get_call_tree_children(&session_id, 0, true)
                         .ok()
                         .and_then(|nodes| nodes.first().map(|n| n.func_addr.clone()));
 
-                    let trace_format = engine.get_session_info(&session_id)
+                    let trace_format = engine
+                        .get_session_info(&session_id)
                         .ok()
                         .and_then(|info| info.trace_format.map(|f| format!("{:?}", f)));
 
@@ -303,7 +323,8 @@ impl TraceToolHandler {
                     Err(format!("Failed to build index: {}", e))
                 }
             }
-        }).await
+        })
+        .await
     }
 
     // ━━━━━━━━━━━━━━━━━━━━━━ 数据查看 ━━━━━━━━━━━━━━━━━━━━━━
@@ -323,7 +344,9 @@ impl TraceToolHandler {
         let count = req.count.min(MAX_LINES);
         let end = req.start_seq.saturating_add(count);
         let seqs: Vec<u32> = (req.start_seq..end).collect();
-        let lines = self.engine.get_lines(&sid, &seqs)
+        let lines = self
+            .engine
+            .get_lines(&sid, &seqs)
             .map_err(|e| e.to_string())?;
         Ok(json(&serde_json::json!({
             "lines": format_lines(&lines, req.full),
@@ -346,11 +369,15 @@ impl TraceToolHandler {
         let seq = match req.seq {
             Some(s) => s,
             None => {
-                let info = self.engine.get_session_info(&sid).map_err(|e| e.to_string())?;
+                let info = self
+                    .engine
+                    .get_session_info(&sid)
+                    .map_err(|e| e.to_string())?;
                 info.total_lines.saturating_sub(1)
             }
         };
-        self.engine.get_memory_at(&sid, addr, seq, length)
+        self.engine
+            .get_memory_at(&sid, addr, seq, length)
             .map(|snap| json(&snap))
             .map_err(|e| e.to_string())
     }
@@ -404,13 +431,16 @@ impl TraceToolHandler {
                 fuzzy: false,
                 max_results: Some(max),
             };
-            let result = engine.search(&sid, &req.query, options)
+            let result = engine
+                .search(&sid, &req.query, options)
                 .map_err(|e| e.to_string())?;
 
             // seq range filter
             let filtered_seqs: Vec<u32> = if let Some(ref range) = req.seq_range {
                 let (start, end) = parse_seq_range(range)?;
-                result.match_seqs.iter()
+                result
+                    .match_seqs
+                    .iter()
                     .copied()
                     .filter(|&seq| seq >= start && seq <= end)
                     .collect()
@@ -421,15 +451,21 @@ impl TraceToolHandler {
             let total_after_seq_filter = filtered_seqs.len();
 
             // Load lines (take more than needed to handle addr_range filtering)
-            let load_count = if req.addr_range.is_some() { (max as usize) * 3 } else { max as usize };
+            let load_count = if req.addr_range.is_some() {
+                (max as usize) * 3
+            } else {
+                max as usize
+            };
             let preview_seqs: Vec<u32> = filtered_seqs.iter().copied().take(load_count).collect();
-            let lines = engine.get_lines(&sid, &preview_seqs)
+            let lines = engine
+                .get_lines(&sid, &preview_seqs)
                 .map_err(|e| e.to_string())?;
 
             // addr_range filter
             let final_lines: Vec<&TraceLine> = if let Some(ref range) = req.addr_range {
                 let (start, end) = parse_addr_range(range)?;
-                lines.iter()
+                lines
+                    .iter()
                     .filter(|l| line_in_addr_range(l, start, end))
                     .take(max as usize)
                     .collect()
@@ -461,7 +497,8 @@ impl TraceToolHandler {
                 "total_scanned": result.total_scanned,
                 "truncated": result.truncated || final_lines.len() < total_after_seq_filter,
             })))
-        }).await
+        })
+        .await
     }
 
     #[tool(
@@ -480,30 +517,39 @@ impl TraceToolHandler {
         let limit = req.limit.min(200);
         let ctx_lines = req.context_lines.min(5);
 
-        let all_seqs = self.engine.get_tainted_seqs(&sid)
+        let all_seqs = self
+            .engine
+            .get_tainted_seqs(&sid)
             .map_err(|e| e.to_string())?;
 
         let total_tainted = all_seqs.len() as u32;
 
         // 栈操作过滤
-        let (after_stack_filter, stack_ops_filtered) = if req.ignore_stack_ops && !all_seqs.is_empty() {
-            let all_lines = self.engine.get_lines(&sid, &all_seqs)
-                .map_err(|e| e.to_string())?;
-            let kept: Vec<TraceLine> = all_lines.into_iter()
-                .filter(|line| !is_stack_only_change(&line.changes))
-                .collect();
-            let filtered_count = total_tainted - kept.len() as u32;
-            (kept, filtered_count)
-        } else {
-            let all_lines = self.engine.get_lines(&sid, &all_seqs)
-                .map_err(|e| e.to_string())?;
-            (all_lines, 0u32)
-        };
+        let (after_stack_filter, stack_ops_filtered) =
+            if req.ignore_stack_ops && !all_seqs.is_empty() {
+                let all_lines = self
+                    .engine
+                    .get_lines(&sid, &all_seqs)
+                    .map_err(|e| e.to_string())?;
+                let kept: Vec<TraceLine> = all_lines
+                    .into_iter()
+                    .filter(|line| !is_stack_only_change(&line.changes))
+                    .collect();
+                let filtered_count = total_tainted - kept.len() as u32;
+                (kept, filtered_count)
+            } else {
+                let all_lines = self
+                    .engine
+                    .get_lines(&sid, &all_seqs)
+                    .map_err(|e| e.to_string())?;
+                (all_lines, 0u32)
+            };
 
         // 地址范围过滤
         let after_addr_filter: Vec<TraceLine> = if let Some(ref range) = req.addr_range {
             let (start, end) = parse_addr_range(range)?;
-            after_stack_filter.into_iter()
+            after_stack_filter
+                .into_iter()
                 .filter(|l| line_in_addr_range(l, start, end))
                 .collect()
         } else {
@@ -513,30 +559,32 @@ impl TraceToolHandler {
         let total_after_filter = after_addr_filter.len() as u32;
 
         // 分页
-        let page_lines: Vec<TraceLine> = after_addr_filter.into_iter()
+        let page_lines: Vec<TraceLine> = after_addr_filter
+            .into_iter()
             .skip(req.offset as usize)
             .take(limit as usize)
             .collect();
 
         // 上下文摘要
-        let context = self.engine.get_slice_origin(&sid)
-            .ok()
-            .flatten()
-            .map(|o| {
-                let mut ctx = format!("taint from {}, data_only={}",
-                    o.from_specs.join(", "), o.data_only);
-                if let Some(s) = o.start_seq {
-                    ctx.push_str(&format!(", start_seq={}", s));
-                }
-                if let Some(e) = o.end_seq {
-                    ctx.push_str(&format!(", end_seq={}", e));
-                }
-                ctx
-            });
+        let context = self.engine.get_slice_origin(&sid).ok().flatten().map(|o| {
+            let mut ctx = format!(
+                "taint from {}, data_only={}",
+                o.from_specs.join(", "),
+                o.data_only
+            );
+            if let Some(s) = o.start_seq {
+                ctx.push_str(&format!(", start_seq={}", s));
+            }
+            if let Some(e) = o.end_seq {
+                ctx.push_str(&format!(", end_seq={}", e));
+            }
+            ctx
+        });
 
         // 上下文行展开
         if ctx_lines > 0 && !page_lines.is_empty() {
-            let tainted_seqs: std::collections::HashSet<u32> = page_lines.iter().map(|l| l.seq).collect();
+            let tainted_seqs: std::collections::HashSet<u32> =
+                page_lines.iter().map(|l| l.seq).collect();
             let mut expanded_seqs = std::collections::BTreeSet::new();
             for line in &page_lines {
                 let start = line.seq.saturating_sub(ctx_lines);
@@ -545,32 +593,36 @@ impl TraceToolHandler {
                     expanded_seqs.insert(s);
                 }
             }
-            let extra_seqs: Vec<u32> = expanded_seqs.iter().copied()
+            let extra_seqs: Vec<u32> = expanded_seqs
+                .iter()
+                .copied()
                 .filter(|s| !tainted_seqs.contains(s))
                 .collect();
-            let extra_lines = self.engine.get_lines(&sid, &extra_seqs)
-                .unwrap_or_default();
-            let extra_map: std::collections::HashMap<u32, &TraceLine> = extra_lines.iter()
-                .map(|l| (l.seq, l))
-                .collect();
+            let extra_lines = self.engine.get_lines(&sid, &extra_seqs).unwrap_or_default();
+            let extra_map: std::collections::HashMap<u32, &TraceLine> =
+                extra_lines.iter().map(|l| (l.seq, l)).collect();
 
             let mut output_lines: Vec<serde_json::Value> = Vec::new();
             for seq in expanded_seqs {
                 if let Some(tl) = page_lines.iter().find(|l| l.seq == seq) {
                     let mut obj = if req.full {
-                        serde_json::to_value(tl).unwrap_or_else(|e| serde_json::json!({"error": e.to_string()}))
+                        serde_json::to_value(tl)
+                            .unwrap_or_else(|e| serde_json::json!({"error": e.to_string()}))
                     } else {
                         compact_line(tl)
                     };
-                    obj.as_object_mut().map(|o| o.insert("tainted".to_string(), serde_json::json!(true)));
+                    obj.as_object_mut()
+                        .map(|o| o.insert("tainted".to_string(), serde_json::json!(true)));
                     output_lines.push(obj);
                 } else if let Some(el) = extra_map.get(&seq) {
                     let mut obj = if req.full {
-                        serde_json::to_value(*el).unwrap_or_else(|e| serde_json::json!({"error": e.to_string()}))
+                        serde_json::to_value(*el)
+                            .unwrap_or_else(|e| serde_json::json!({"error": e.to_string()}))
                     } else {
                         compact_line(el)
                     };
-                    obj.as_object_mut().map(|o| o.insert("tainted".to_string(), serde_json::json!(false)));
+                    obj.as_object_mut()
+                        .map(|o| o.insert("tainted".to_string(), serde_json::json!(false)));
                     output_lines.push(obj);
                 }
             }
@@ -600,7 +652,6 @@ impl TraceToolHandler {
         })))
     }
 
-
     // ━━━━━━━━━━━━━━━━━━━━━━ 结构信息 ━━━━━━━━━━━━━━━━━━━━━━
 
     fn collect_tree_to_depth(
@@ -610,21 +661,27 @@ impl TraceToolHandler {
         depth: u32,
         max_nodes: u32,
     ) -> Result<Vec<serde_json::Value>, String> {
-        let nodes = self.engine.get_call_tree_children(session_id, node_id, true)
+        let nodes = self
+            .engine
+            .get_call_tree_children(session_id, node_id, true)
             .map_err(|e| e.to_string())?;
         if nodes.is_empty() {
             return Ok(vec![]);
         }
-        let mut result: Vec<serde_json::Value> = vec![serde_json::to_value(&nodes[0])
-            .map_err(|e| e.to_string())?];
+        let mut result: Vec<serde_json::Value> =
+            vec![serde_json::to_value(&nodes[0]).map_err(|e| e.to_string())?];
         if depth <= 1 {
             for child in &nodes[1..] {
-                if result.len() as u32 >= max_nodes { break; }
+                if result.len() as u32 >= max_nodes {
+                    break;
+                }
                 result.push(serde_json::to_value(child).map_err(|e| e.to_string())?);
             }
         } else {
             for child in &nodes[1..] {
-                if result.len() as u32 >= max_nodes { break; }
+                if result.len() as u32 >= max_nodes {
+                    break;
+                }
                 let remaining = max_nodes - result.len() as u32;
                 let sub = self.collect_tree_to_depth(session_id, child.id, depth - 1, remaining)?;
                 result.extend(sub);
@@ -677,7 +734,9 @@ impl TraceToolHandler {
             limit,
             search: req.search,
         };
-        let result = self.engine.get_strings(&sid, options)
+        let result = self
+            .engine
+            .get_strings(&sid, options)
             .map_err(|e| e.to_string())?;
         let has_results = !result.strings.is_empty();
         let mut response = serde_json::json!({
@@ -714,7 +773,8 @@ impl TraceToolHandler {
                 end_seq: req.end_seq,
                 data_only: req.data_only,
             };
-            let result = engine.run_slice(&sid, &req.from_specs, options)
+            let result = engine
+                .run_slice(&sid, &req.from_specs, options)
                 .map_err(|e| e.to_string())?;
 
             // 2. 仅返回统计信息
@@ -734,8 +794,7 @@ impl TraceToolHandler {
             }
 
             // 3. 获取污点行
-            let all_seqs = engine.get_tainted_seqs(&sid)
-                .map_err(|e| e.to_string())?;
+            let all_seqs = engine.get_tainted_seqs(&sid).map_err(|e| e.to_string())?;
 
             if all_seqs.is_empty() {
                 return Ok(json(&serde_json::json!({
@@ -750,13 +809,15 @@ impl TraceToolHandler {
                 })));
             }
 
-            let all_lines = engine.get_lines(&sid, &all_seqs)
+            let all_lines = engine
+                .get_lines(&sid, &all_seqs)
                 .map_err(|e| e.to_string())?;
 
             // 4. 栈操作过滤
             let (kept, stack_filtered) = if req.ignore_stack_ops {
                 let before = all_lines.len();
-                let filtered: Vec<TraceLine> = all_lines.into_iter()
+                let filtered: Vec<TraceLine> = all_lines
+                    .into_iter()
                     .filter(|l| !is_stack_only_change(&l.changes))
                     .collect();
                 let diff = before - filtered.len();
@@ -797,7 +858,8 @@ impl TraceToolHandler {
                     "All tainted lines included."
                 },
             })))
-        }).await
+        })
+        .await
     }
 
     #[tool(
@@ -815,13 +877,18 @@ impl TraceToolHandler {
 
         if let Some(node_id) = req.node_id {
             // Mode 1: 按 node_id 分析函数调用详情
-            let nodes = self.engine.get_call_tree_children(&sid, node_id, true)
+            let nodes = self
+                .engine
+                .get_call_tree_children(&sid, node_id, true)
                 .map_err(|e| e.to_string())?;
-            let node = nodes.first()
+            let node = nodes
+                .first()
                 .ok_or_else(|| format!("Node {} not found", node_id))?;
 
             // 获取入口参数 X0-X7
-            let entry_regs = self.engine.get_registers_at(&sid, node.entry_seq)
+            let entry_regs = self
+                .engine
+                .get_registers_at(&sid, node.entry_seq)
                 .unwrap_or_default();
             let mut args = serde_json::Map::new();
             for i in 0..=7 {
@@ -833,7 +900,8 @@ impl TraceToolHandler {
 
             // 获取返回值
             let return_value = if node.exit_seq > node.entry_seq {
-                self.engine.get_registers_at(&sid, node.exit_seq)
+                self.engine
+                    .get_registers_at(&sid, node.exit_seq)
                     .ok()
                     .and_then(|regs| regs.get("X0").cloned())
             } else {
@@ -871,14 +939,20 @@ impl TraceToolHandler {
             })))
         } else if let Some(ref func_name) = req.func_name {
             // Mode 2: 按名称搜索函数
-            let result = self.engine.get_function_calls(&sid)
+            let result = self
+                .engine
+                .get_function_calls(&sid)
                 .map_err(|e| e.to_string())?;
 
             let query_lower = func_name.to_lowercase();
-            let matched: Vec<serde_json::Value> = result.functions.iter()
+            let matched: Vec<serde_json::Value> = result
+                .functions
+                .iter()
                 .filter(|f| f.func_name.to_lowercase().contains(&query_lower))
                 .map(|f| {
-                    let occs: Vec<serde_json::Value> = f.occurrences.iter()
+                    let occs: Vec<serde_json::Value> = f
+                        .occurrences
+                        .iter()
                         .take(50)
                         .map(|o| {
                             serde_json::json!({
@@ -911,12 +985,16 @@ impl TraceToolHandler {
             })))
         } else {
             // Mode 3: list all functions with pagination
-            let result = self.engine.get_function_calls(&sid)
+            let result = self
+                .engine
+                .get_function_calls(&sid)
                 .map_err(|e| e.to_string())?;
 
             let limit = req.limit.min(100) as usize;
             let total = result.functions.len();
-            let page: Vec<serde_json::Value> = result.functions.iter()
+            let page: Vec<serde_json::Value> = result
+                .functions
+                .iter()
                 .skip(req.offset as usize)
                 .take(limit)
                 .map(|f| {

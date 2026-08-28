@@ -16,7 +16,6 @@ pub struct FlatMemAccessRecord {
     pub _pad: [u8; 2], // explicit pad to reach 24 bytes total
 }
 
-
 impl FlatMemAccessRecord {
     #[inline]
     pub fn is_read(&self) -> bool {
@@ -52,8 +51,16 @@ pub struct MemAccessView<'a> {
 }
 
 impl<'a> MemAccessView<'a> {
-    pub fn from_raw(addrs: &'a [u64], offsets: &'a [u32], records: &'a [FlatMemAccessRecord]) -> Self {
-        Self { addrs, offsets, records }
+    pub fn from_raw(
+        addrs: &'a [u64],
+        offsets: &'a [u32],
+        records: &'a [FlatMemAccessRecord],
+    ) -> Self {
+        Self {
+            addrs,
+            offsets,
+            records,
+        }
     }
 
     /// Binary search addrs, return records slice for the given address.
@@ -80,7 +87,11 @@ impl<'a> MemAccessView<'a> {
 
     /// Iterate (addr, records_slice) for a range of address indices.
     /// Used for parallel partitioning.
-    pub fn iter_addr_range(&self, start_idx: usize, end_idx: usize) -> impl Iterator<Item = (u64, &[FlatMemAccessRecord])> {
+    pub fn iter_addr_range(
+        &self,
+        start_idx: usize,
+        end_idx: usize,
+    ) -> impl Iterator<Item = (u64, &[FlatMemAccessRecord])> {
         let addrs = &self.addrs[start_idx..end_idx];
         let offsets = &self.offsets[start_idx..=end_idx]; // inclusive end for CSR
         addrs.iter().zip(offsets.windows(2)).map(|(&addr, window)| {
