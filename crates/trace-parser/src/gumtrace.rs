@@ -16,15 +16,17 @@ use crate::types::*;
 pub struct CallAnnotation {
     pub func_name: String,
     pub is_jni: bool,
-    pub args: Vec<(String, String)>,  // (index, decoded_value)
+    pub args: Vec<(String, String)>, // (index, decoded_value)
     pub ret_value: Option<String>,
-    pub raw_lines: Vec<String>,       // 所有原始特殊行（用于 tooltip）
+    pub raw_lines: Vec<String>, // 所有原始特殊行（用于 tooltip）
 }
 
 impl CallAnnotation {
     /// 生成紧凑摘要，如: strlen("HttpRequestCallback") → 0x13
     pub fn summary(&self) -> String {
-        let decoded_args: Vec<String> = self.args.iter()
+        let decoded_args: Vec<String> = self
+            .args
+            .iter()
             .map(|(_, v)| {
                 if v.starts_with("0x") || v.starts_with("0X") {
                     v.clone()
@@ -98,9 +100,16 @@ impl CallAnnotation {
             text.push('\n');
             text.push_str(&hex_str.replace(" ", ""));
             // 追加连续 ASCII 表示（可打印字符保留，不可打印用 . 替换）
-            let ascii: String = raw_bytes.iter().map(|&b| {
-                if b.is_ascii_graphic() || b == b' ' { b as char } else { '.' }
-            }).collect();
+            let ascii: String = raw_bytes
+                .iter()
+                .map(|&b| {
+                    if b.is_ascii_graphic() || b == b' ' {
+                        b as char
+                    } else {
+                        '.'
+                    }
+                })
+                .collect();
             text.push('\n');
             text.push_str(&ascii);
         }
@@ -120,8 +129,10 @@ pub fn detect_format(data: &[u8]) -> TraceFormat {
 
         if !line.is_empty() {
             // unidbg: starts with [HH:MM:SS (timestamp)
-            if line.len() > 10 && line[0] == b'['
-                && line[1].is_ascii_digit() && line[2].is_ascii_digit()
+            if line.len() > 10
+                && line[0] == b'['
+                && line[1].is_ascii_digit()
+                && line[2].is_ascii_digit()
                 && line[3] == b':'
             {
                 return TraceFormat::Unidbg;
@@ -190,7 +201,7 @@ pub fn parse_special_line(raw: &str) -> Option<SpecialLine> {
     }
 
     // hexdump lines or hex data lines
-    if raw.starts_with("hexdump ") || raw.chars().next().map_or(false, |c| c.is_ascii_hexdigit()) {
+    if raw.starts_with("hexdump ") || raw.chars().next().is_some_and(|c| c.is_ascii_hexdigit()) {
         return Some(SpecialLine::HexDump);
     }
 
@@ -259,7 +270,9 @@ fn parse_line_gumtrace_inner(raw: &str, extract_regs: bool) -> Option<ParsedLine
         (annot, annot)
     };
 
-    let insn_text = std::str::from_utf8(&bytes[insn_start..insn_end]).ok()?.trim();
+    let insn_text = std::str::from_utf8(&bytes[insn_start..insn_end])
+        .ok()?
+        .trim();
 
     if insn_text.is_empty() {
         return None;
@@ -308,16 +321,16 @@ fn parse_line_gumtrace_inner(raw: &str, extract_regs: bool) -> Option<ParsedLine
 
     // 8. Parse memory ops: mem_w=0xADDR or mem_r=0xADDR
     let mem_op = if annot_start < bytes.len() {
-        find_gumtrace_mem_op(
-            &bytes[annot_start..],
+        find_gumtrace_mem_op(GumtraceMemOpContext {
+            search: &bytes[annot_start..],
             mnemonic,
             operand_text,
             raw_first_reg_prefix,
-            bytes,
+            full_bytes: bytes,
             arrow_abs_pos,
-            result_line.lane_index,
-            result_line.lane_elem_width,
-        )
+            lane_index: result_line.lane_index,
+            lane_elem_width: result_line.lane_elem_width,
+        })
     } else {
         None
     };
@@ -380,11 +393,10 @@ fn gumtrace_reg_alias(reg_name: &str) -> Option<&'static str> {
 
 /// 在 GumTrace 注解中查找寄存器值，先尝试原名再尝试别名。
 fn find_reg_value_with_alias(bytes: &[u8], reg_name: &str, start_pos: usize) -> Option<u64> {
-    find_reg_value(bytes, reg_name.as_bytes(), start_pos)
-        .or_else(|| {
-            gumtrace_reg_alias(reg_name)
-                .and_then(|alias| find_reg_value(bytes, alias.as_bytes(), start_pos))
-        })
+    find_reg_value(bytes, reg_name.as_bytes(), start_pos).or_else(|| {
+        gumtrace_reg_alias(reg_name)
+            .and_then(|alias| find_reg_value(bytes, alias.as_bytes(), start_pos))
+    })
 }
 
 /// GumTrace 一行内所有 memory marker 的解析结果。
@@ -443,52 +455,57 @@ fn parse_gumtrace_mem_markers(search: &[u8]) -> Option<GumMemMarkers> {
     first.map(|first| GumMemMarkers { first, any_write })
 }
 
-fn find_gumtrace_mem_op(
-    search: &[u8],
-    mnemonic: &str,
-    operand_text: &str,
+struct GumtraceMemOpContext<'a> {
+    search: &'a [u8],
+    mnemonic: &'a str,
+    operand_text: &'a str,
     raw_first_reg_prefix: Option<u8>,
-    full_bytes: &[u8],
+    full_bytes: &'a [u8],
     arrow_abs_pos: Option<usize>,
     lane_index: Option<u8>,
     lane_elem_width: Option<u8>,
-) -> Option<MemOp> {
-    let markers = parse_gumtrace_mem_markers(search)?;
+}
+
+fn find_gumtrace_mem_op(cx: GumtraceMemOpContext<'_>) -> Option<MemOp> {
+    let markers = parse_gumtrace_mem_markers(cx.search)?;
     let (raw_is_write, addr) = markers.first;
     // 根据助记符覆盖 is_write：GumTrace 可能对 ldp 等 LOAD 指令错误标记 mem_w。
     // atomic RMW 的读旧值/写新值是同一操作的两次标注，只要出现写 marker 就按
     // 写处理（使访问范围失效），与 marker 顺序无关。
-    let is_write = if is_atomic_rmw(mnemonic) {
+    let is_write = if is_atomic_rmw(cx.mnemonic) {
         markers.any_write
-    } else if mnemonic.starts_with("ld") {
+    } else if cx.mnemonic.starts_with("ld") {
         false
-    } else if mnemonic.starts_with("st") {
+    } else if cx.mnemonic.starts_with("st") {
         true
     } else {
         raw_is_write
     };
 
-    let layout = classify_mem_layout(mnemonic, operand_text);
-    let mut elem_width = determine_elem_width(mnemonic, raw_first_reg_prefix);
+    let layout = classify_mem_layout(cx.mnemonic, cx.operand_text);
+    let mut elem_width = determine_elem_width(cx.mnemonic, cx.raw_first_reg_prefix);
     if layout == MemLayout::Atomic {
-        elem_width = atomic_elem_width(mnemonic, raw_first_reg_prefix);
-    } else if let (Some(_), Some(lew)) = (lane_index, lane_elem_width) {
+        elem_width = atomic_elem_width(cx.mnemonic, cx.raw_first_reg_prefix);
+    } else if let (Some(_), Some(lew)) = (cx.lane_index, cx.lane_elem_width) {
         elem_width = lew;
-    } else if matches!(mnemonic, "ld1" | "ld2" | "ld3" | "ld4" | "st1" | "st2" | "st3" | "st4") {
-        if let Some(arr_width) = simd_arrangement_total_width(operand_text) {
+    } else if matches!(
+        cx.mnemonic,
+        "ld1" | "ld2" | "ld3" | "ld4" | "st1" | "st2" | "st3" | "st4"
+    ) {
+        if let Some(arr_width) = simd_arrangement_total_width(cx.operand_text) {
             elem_width = arr_width;
         }
     }
 
     // Extract value for pass-through pruning
-    let sc_abs = full_bytes.len() - search.len();
+    let sc_abs = cx.full_bytes.len() - cx.search.len();
     let search_start = if is_write {
         Some(sc_abs)
     } else {
-        arrow_abs_pos.map(|apos| apos + 4)
+        cx.arrow_abs_pos.map(|apos| apos + 4)
     };
     let (value, value_lo, value_hi) = if elem_width <= 8 {
-        let v = first_memory_data_reg_name(mnemonic, operand_text).and_then(|reg_name| {
+        let v = first_memory_data_reg_name(cx.mnemonic, cx.operand_text).and_then(|reg_name| {
             // 零寄存器不依赖 trace 注解：它永远读出已知的 0。
             // store 侧零寄存器是已知零；load 侧目标被丢弃，证明不了内存为零。
             if reg_name == "xzr" || reg_name == "wzr" {
@@ -496,10 +513,10 @@ fn find_gumtrace_mem_op(
             }
             let ss = search_start?;
             if is_simd_reg_name(reg_name) {
-                let full = find_simd_reg_u128(full_bytes, reg_name, ss)?;
-                extract_simd_lane_value(full, elem_width, lane_index)
+                let full = find_simd_reg_u128(cx.full_bytes, reg_name, ss)?;
+                extract_simd_lane_value(full, elem_width, cx.lane_index)
             } else {
-                let raw_val = find_reg_value_with_alias(full_bytes, reg_name, ss)?;
+                let raw_val = find_reg_value_with_alias(cx.full_bytes, reg_name, ss)?;
                 let mask = if elem_width >= 8 {
                     u64::MAX
                 } else {
@@ -511,8 +528,8 @@ fn find_gumtrace_mem_op(
         (v, None, None)
     } else if elem_width == 16 {
         // 128-bit SIMD: 用 u128 解析后拆为 low/high 两个 u64
-        let v128 = first_memory_data_reg_name(mnemonic, operand_text)
-            .and_then(|reg_name| find_simd_reg_u128(full_bytes, reg_name, search_start?));
+        let v128 = first_memory_data_reg_name(cx.mnemonic, cx.operand_text)
+            .and_then(|reg_name| find_simd_reg_u128(cx.full_bytes, reg_name, search_start?));
         match v128 {
             Some(val) => (None, Some(val as u64), Some((val >> 64) as u64)),
             None => (None, None, None),
@@ -522,29 +539,33 @@ fn find_gumtrace_mem_op(
     };
 
     // Pair / multi-register SIMD：提取第二个寄存器的值
-    let (value2, value2_lo, value2_hi) = if parser::is_pair_mnemonic(mnemonic)
-        || parser::is_simd_multi_reg(mnemonic, operand_text)
+    let (value2, value2_lo, value2_hi) = if parser::is_pair_mnemonic(cx.mnemonic)
+        || parser::is_simd_multi_reg(cx.mnemonic, cx.operand_text)
     {
         if elem_width <= 8 {
-            let v2 = second_memory_data_reg_name(mnemonic, operand_text).and_then(|reg_name| {
+            let v2 = second_memory_data_reg_name(cx.mnemonic, cx.operand_text).and_then(|reg_name| {
                 // store 侧零寄存器是已知零；load 侧目标被丢弃，证明不了内存为零。
                 if reg_name == "xzr" || reg_name == "wzr" {
                     return if is_write { Some(0) } else { None };
                 }
                 let ss = search_start?;
                 if is_simd_reg_name(reg_name) {
-                    let full = find_simd_reg_u128(full_bytes, reg_name, ss)?;
+                    let full = find_simd_reg_u128(cx.full_bytes, reg_name, ss)?;
                     extract_simd_lane_value(full, elem_width, None)
                 } else {
-                    let raw_val = find_reg_value_with_alias(full_bytes, reg_name, ss)?;
-                    let mask = if elem_width >= 8 { u64::MAX } else { (1u64 << (elem_width as u32 * 8)) - 1 };
+                    let raw_val = find_reg_value_with_alias(cx.full_bytes, reg_name, ss)?;
+                    let mask = if elem_width >= 8 {
+                        u64::MAX
+                    } else {
+                        (1u64 << (elem_width as u32 * 8)) - 1
+                    };
                     Some(raw_val & mask)
                 }
             });
             (v2, None, None)
         } else if elem_width == 16 {
-            let v128 = second_memory_data_reg_name(mnemonic, operand_text)
-                .and_then(|reg_name| find_simd_reg_u128(full_bytes, reg_name, search_start?));
+            let v128 = second_memory_data_reg_name(cx.mnemonic, cx.operand_text)
+                .and_then(|reg_name| find_simd_reg_u128(cx.full_bytes, reg_name, search_start?));
             match v128 {
                 Some(val) => (None, Some(val as u64), Some((val >> 64) as u64)),
                 None => (None, None, None),
@@ -556,7 +577,7 @@ fn find_gumtrace_mem_op(
         (None, None, None)
     };
 
-    let value_count = parser::memory_value_count(mnemonic, operand_text);
+    let value_count = parser::memory_value_count(cx.mnemonic, cx.operand_text);
     // SIMD structure 指令的 replay 需要每个寄存器的完整 128-bit 值；
     // 既有 value/value2 字段的 lane 截取语义保持不变，供依赖分析使用。
     let (simd_values, simd_reg_bytes, simd_elem_bytes) = if matches!(
@@ -566,15 +587,15 @@ fn find_gumtrace_mem_op(
         let mut values = [None; 4];
         if let Some(ss) = search_start {
             for (index, slot) in values.iter_mut().enumerate().take(usize::from(value_count)) {
-                if let Some(name) = memory_data_reg_name_at(mnemonic, operand_text, index) {
-                    *slot = find_simd_reg_u128(full_bytes, name, ss);
+                if let Some(name) = memory_data_reg_name_at(cx.mnemonic, cx.operand_text, index) {
+                    *slot = find_simd_reg_u128(cx.full_bytes, name, ss);
                 }
             }
         }
         (
             values,
-            simd_arrangement_total_width(operand_text).unwrap_or(0),
-            simd_arrangement_element_width(operand_text).unwrap_or(0),
+            simd_arrangement_total_width(cx.operand_text).unwrap_or(0),
+            simd_arrangement_element_width(cx.operand_text).unwrap_or(0),
         )
     } else {
         ([None; 4], 0, 0)
@@ -586,12 +607,12 @@ fn find_gumtrace_mem_op(
     ) {
         // exclusive store 是否真正写入由状态寄存器的 post-arrow 值决定：
         // 0 成功，非 0 失败（无内存效果），缺失则状态未知。
-        let post_start = arrow_abs_pos.map(|pos| pos + 4);
-        parser::data_reg_name_at(operand_text, 0).and_then(|name| {
+        let post_start = cx.arrow_abs_pos.map(|pos| pos + 4);
+        parser::data_reg_name_at(cx.operand_text, 0).and_then(|name| {
             if name == "xzr" || name == "wzr" {
                 return None;
             }
-            find_reg_value(full_bytes, name.as_bytes(), post_start?)
+            find_reg_value(cx.full_bytes, name.as_bytes(), post_start?)
         })
     } else {
         None
@@ -612,7 +633,7 @@ fn find_gumtrace_mem_op(
         simd_values,
         simd_reg_bytes,
         simd_elem_bytes,
-        simd_lane: lane_index.unwrap_or(0),
+        simd_lane: cx.lane_index.unwrap_or(0),
         exclusive_status,
     })
 }
@@ -734,8 +755,16 @@ mod tests {
         let line = parse_line_gumtrace(raw).expect("should parse");
         let mem = line.mem_op.as_ref().expect("should have mem_op");
         assert!(!mem.is_write);
-        assert_eq!(mem.value, Some(0x798484e190), "x29 loaded value via fp alias after ->");
-        assert_eq!(mem.value2, Some(0x7a39cae298), "x30 loaded value via lr alias after ->");
+        assert_eq!(
+            mem.value,
+            Some(0x798484e190),
+            "x29 loaded value via fp alias after ->"
+        );
+        assert_eq!(
+            mem.value2,
+            Some(0x7a39cae298),
+            "x30 loaded value via lr alias after ->"
+        );
     }
 
     #[test]
@@ -765,9 +794,7 @@ mod tests {
         assert!(parse_line_gumtrace("call func: __strlen_aarch64(0x75150f2e20)").is_none());
         assert!(parse_line_gumtrace("args0: HttpRequestCallback").is_none());
         assert!(parse_line_gumtrace("ret: 0x13").is_none());
-        assert!(
-            parse_line_gumtrace("hexdump at address 0x75150f2e20 with length 0x14:").is_none()
-        );
+        assert!(parse_line_gumtrace("hexdump at address 0x75150f2e20 with length 0x14:").is_none());
         assert!(parse_line_gumtrace(
             "75150f2e20: 48 74 74 70 52 65 71 75 65 73 74 43 61 6c 6c 62 |HttpRequestCallb|"
         )
@@ -842,7 +869,8 @@ mod tests {
 
     #[test]
     fn test_parse_gumtrace_no_semicolon_with_arrow() {
-        let raw = "[libsscronet.so] 0x7a39fa11e4!0x5a01e4 mov x0, x1 x0=0xdead x1=0xbeef -> x0=0xbeef";
+        let raw =
+            "[libsscronet.so] 0x7a39fa11e4!0x5a01e4 mov x0, x1 x0=0xdead x1=0xbeef -> x0=0xbeef";
         let line = parse_line_gumtrace(raw).unwrap();
         assert_eq!(line.mnemonic.as_str(), "mov");
         assert!(line.has_arrow);

@@ -142,8 +142,6 @@ pub enum InsnClass {
     Extend,
 }
 
-
-
 /// Map mnemonic + first operand register type to InsnClass.
 ///
 /// `first_reg`: the RegId of the first operand (for scalar/vector disambiguation).
@@ -489,7 +487,10 @@ fn has_nzcv_operand(ops: &[Operand]) -> bool {
 ///
 /// 调用方不再需要手动执行 SimdLoad→SimdLaneLoad、SysReg→SysRegNzcv 等精化。
 pub fn classify_and_refine(line: &super::types::ParsedLine) -> InsnClass {
-    let first_reg = line.operands.first().and_then(|o: &super::types::Operand| o.as_reg());
+    let first_reg = line
+        .operands
+        .first()
+        .and_then(|o: &super::types::Operand| o.as_reg());
     let class = classify(line.mnemonic.as_str(), first_reg);
     match class {
         InsnClass::SimdLoad if line.lane_index.is_some() => InsnClass::SimdLaneLoad,
@@ -504,7 +505,7 @@ pub fn classify_and_refine(line: &super::types::ParsedLine) -> InsnClass {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::types::{RegId, ParsedLine, Mnemonic, Operand};
+    use crate::types::RegId;
 
     const INSN_CLASS_COUNT: usize = 42;
 
@@ -898,10 +899,12 @@ mod tests {
     #[test]
     fn test_classify_and_refine_simd_lane_load() {
         use crate::types::*;
-        let mut line = ParsedLine::default();
-        line.mnemonic = Mnemonic::new("ld1");
-        line.operands = smallvec::smallvec![Operand::Reg(RegId::V0)];
-        line.lane_index = Some(3);
+        let line = ParsedLine {
+            mnemonic: Mnemonic::new("ld1"),
+            operands: smallvec::smallvec![Operand::Reg(RegId::V0)],
+            lane_index: Some(3),
+            ..Default::default()
+        };
         let class = super::classify_and_refine(&line);
         assert_eq!(class, InsnClass::SimdLaneLoad);
     }
@@ -909,9 +912,11 @@ mod tests {
     #[test]
     fn test_classify_and_refine_sysreg_nzcv() {
         use crate::types::*;
-        let mut line = ParsedLine::default();
-        line.mnemonic = Mnemonic::new("mrs");
-        line.operands = smallvec::smallvec![Operand::Reg(RegId::X0), Operand::Reg(RegId::NZCV)];
+        let line = ParsedLine {
+            mnemonic: Mnemonic::new("mrs"),
+            operands: smallvec::smallvec![Operand::Reg(RegId::X0), Operand::Reg(RegId::NZCV)],
+            ..Default::default()
+        };
         let class = super::classify_and_refine(&line);
         assert_eq!(class, InsnClass::SysRegNzcvRead);
     }
@@ -919,13 +924,15 @@ mod tests {
     #[test]
     fn test_classify_and_refine_no_refinement() {
         use crate::types::*;
-        let mut line = ParsedLine::default();
-        line.mnemonic = Mnemonic::new("add");
-        line.operands = smallvec::smallvec![
-            Operand::Reg(RegId::X0),
-            Operand::Reg(RegId::X1),
-            Operand::Reg(RegId::X2)
-        ];
+        let line = ParsedLine {
+            mnemonic: Mnemonic::new("add"),
+            operands: smallvec::smallvec![
+                Operand::Reg(RegId::X0),
+                Operand::Reg(RegId::X1),
+                Operand::Reg(RegId::X2)
+            ],
+            ..Default::default()
+        };
         let class = super::classify_and_refine(&line);
         assert_eq!(class, InsnClass::AluReg);
     }
@@ -1221,9 +1228,8 @@ mod tests {
     #[test]
     fn test_classify_hint_mnemonics() {
         let hint_mnemonics = [
-            "yield", "wfe", "wfi", "sev", "sevl",
-            "csdb", "esb", "psb", "tsb", "dgh",
-            "bti", "sb", "ssbb", "pssbb",
+            "yield", "wfe", "wfi", "sev", "sevl", "csdb", "esb", "psb", "tsb", "dgh", "bti", "sb",
+            "ssbb", "pssbb",
         ];
         for mnemonic in hint_mnemonics {
             assert_eq!(classify(mnemonic, None), InsnClass::Nop, "{mnemonic}");
@@ -1237,10 +1243,7 @@ mod tests {
         // fmov v0.d[1], x0 — lane 写入，精化为 SimdRMW
         let lane_write = ParsedLine {
             mnemonic: Mnemonic::new("fmov"),
-            operands: smallvec::smallvec![
-                Operand::RegLane(RegId::V0, 1),
-                Operand::Reg(RegId::X0),
-            ],
+            operands: smallvec::smallvec![Operand::RegLane(RegId::V0, 1), Operand::Reg(RegId::X0),],
             lane_index: Some(1),
             ..Default::default()
         };

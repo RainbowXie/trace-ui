@@ -2,16 +2,11 @@ use smallvec::SmallVec;
 use std::fmt;
 
 /// Trace 日志格式
-#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, serde::Serialize, serde::Deserialize)]
 pub enum TraceFormat {
+    #[default]
     Unidbg,
     Gumtrace,
-}
-
-impl Default for TraceFormat {
-    fn default() -> Self {
-        TraceFormat::Unidbg
-    }
 }
 
 /// ARM64 寄存器标识符。
@@ -139,13 +134,19 @@ impl RegId {
     }
 
     /// True if this is a SIMD lo-lane (v0..v31, IDs 33-64).
-    pub fn is_simd_lo(self) -> bool { self.0 >= 33 && self.0 <= 64 }
+    pub fn is_simd_lo(self) -> bool {
+        self.0 >= 33 && self.0 <= 64
+    }
 
     /// True if this is a SIMD hi-lane (v0_hi..v31_hi, IDs 66-97).
-    pub fn is_simd_hi(self) -> bool { self.0 >= 66 && self.0 <= 97 }
+    pub fn is_simd_hi(self) -> bool {
+        self.0 >= 66 && self.0 <= 97
+    }
 
     /// True if this is any SIMD register (lo or hi lane).
-    pub fn is_simd(self) -> bool { self.is_simd_lo() || self.is_simd_hi() }
+    pub fn is_simd(self) -> bool {
+        self.is_simd_lo() || self.is_simd_hi()
+    }
 }
 
 impl fmt::Debug for RegId {
@@ -375,6 +376,9 @@ impl std::fmt::Display for Mnemonic {
     }
 }
 
+/// 寄存器与数值的轻量关联列表（用于 validate 模式中的箭头解析）
+pub type RegValueList = SmallVec<[(RegId, u64); 4]>;
+
 /// 解析后的 trace 行。
 ///
 /// 每行 trace 被解析为此结构，供分类和 DEF/USE 分析使用。
@@ -400,9 +404,9 @@ pub struct ParsedLine {
     /// SIMD lane 元素宽度（字节），从排列标识符推断：s=4, d=8, h=2, b=1。
     pub lane_elem_width: Option<u8>,
     /// `=>` 箭头左侧的寄存器值对（仅 validate 模式填充）。
-    pub pre_arrow_regs: Option<Box<SmallVec<[(RegId, u64); 4]>>>,
+    pub pre_arrow_regs: Option<Box<RegValueList>>,
     /// `=>` 箭头右侧的寄存器值对（仅 validate 模式填充）。
-    pub post_arrow_regs: Option<Box<SmallVec<[(RegId, u64); 4]>>>,
+    pub post_arrow_regs: Option<Box<RegValueList>>,
 }
 
 /// @LINE 目标验证条目，传入扫描器在 Pass 1 中验证
