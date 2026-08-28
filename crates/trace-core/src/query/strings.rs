@@ -81,6 +81,7 @@ impl Page {
     }
 }
 
+#[derive(Default)]
 pub struct PagedMemory {
     pages: FxHashMap<u64, Box<Page>>,
 }
@@ -167,6 +168,7 @@ struct ActiveString {
 const MAX_SCAN_LEN: u64 = 1024;
 const MIN_CACHE_LEN: u32 = 2;
 
+#[derive(Default)]
 pub struct StringBuilder {
     byte_image: PagedMemory,
     active: FxHashMap<u32, ActiveString>,
@@ -408,7 +410,7 @@ impl StringBuilder {
                     let ascii_bytes: Vec<u8> = bytes
                         .iter()
                         .copied()
-                        .take_while(|&b| b >= 0x20 && b <= 0x7E)
+                        .take_while(|&b| (0x20..=0x7E).contains(&b))
                         .collect();
                     if ascii_bytes.len() < MIN_CACHE_LEN as usize {
                         continue;
@@ -530,7 +532,7 @@ impl StringBuilder {
 
         // Parallel build of read_counts: partition by address index ranges
         let num_threads = rayon::current_num_threads().max(1);
-        let chunk_size = (addr_count + num_threads - 1) / num_threads;
+        let chunk_size = addr_count.div_ceil(num_threads);
 
         let partial_counts: Vec<FxHashMap<u64, u32>> = (0..num_threads)
             .into_par_iter()
@@ -573,7 +575,7 @@ impl StringBuilder {
 }
 
 fn is_printable_or_utf8(b: u8) -> bool {
-    (b >= 0x20 && b <= 0x7E) || (b >= 0x80 && b <= 0xF4)
+    (0x20..=0x7E).contains(&b) || (0x80..=0xF4).contains(&b)
 }
 
 #[cfg(test)]

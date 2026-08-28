@@ -6,7 +6,7 @@ use trace_parser::types::RegId;
 
 use super::bitvec::{BitView, FlatBitVec};
 use super::cache_format::{SectionReader, SectionWriter};
-use super::deps::{DepsView, FlatDeps};
+use super::deps::{DepsRawSlices, DepsView, FlatDeps};
 use super::line_index::{LineIndexArchive, LineIndexView};
 use super::mem_access::{FlatMemAccess, MemAccessView};
 use super::mem_last_def::{FlatMemLastDef, MemLastDefView};
@@ -113,16 +113,16 @@ impl ScanArchive {
             return None;
         }
         Some(ScanViews {
-            deps: DepsView::from_raw(
-                r.slice(0),
-                r.slice(1),
-                r.slice(2),
-                r.slice(3),
-                r.slice(4),
-                r.slice(5),
-                r.slice(6),
-                r.slice(7),
-            ),
+            deps: DepsView::from_raw(DepsRawSlices {
+                chunk_start_lines: r.slice(0),
+                chunk_offsets_start: r.slice(1),
+                chunk_data_start: r.slice(2),
+                all_offsets: r.slice(3),
+                all_data: r.slice(4),
+                patch_lines: r.slice(5),
+                patch_offsets: r.slice(6),
+                patch_data: r.slice(7),
+            }),
             mem_last_def: MemLastDefView::from_raw(r.slice(8), r.slice(9), r.slice(10)),
             pair_split: PairSplitView::from_raw(r.slice(11), r.slice(12), r.slice(13)),
             init_mem_loads: BitView::from_raw(r.slice(14), r.u32_val(15)),

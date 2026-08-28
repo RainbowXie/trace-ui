@@ -16,6 +16,7 @@ pub struct LineIndex {
 ///
 /// 供 scan_unified 在逐行遍历时调用 `add_line(byte_offset)`，
 /// 最终 `finish()` 生成 LineIndex。
+#[derive(Default)]
 pub struct LineIndexBuilder {
     sampled_offsets: Vec<u64>,
     line_count: u32,
@@ -276,7 +277,7 @@ mod tests {
 
         // 验证采样点数量：ceil(10000/256) = 40 个块，但只有完整块起始被记录
         // 块数 = 10000/256 = 39 个完整块 + 1 个不完整块 = 40 个采样点
-        let expected_samples = (10000 + BLOCK_SIZE - 1) / BLOCK_SIZE;
+        let expected_samples = 10000_u32.div_ceil(BLOCK_SIZE);
         assert_eq!(idx.sampled_offsets.len(), expected_samples as usize);
 
         // 内存缩减：采样索引只存 expected_samples 个 u64，而非 10000 个

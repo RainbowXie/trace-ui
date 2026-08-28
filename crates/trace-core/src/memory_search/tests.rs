@@ -2,15 +2,6 @@
 
 use super::parse_pattern_hex;
 use super::scan::{ByteValue, SearchState};
-use std::sync::Mutex;
-
-pub(super) static CACHE_TEST_LOCK: Mutex<()> = Mutex::new(());
-
-/// 测试 panic 会 poison 全局锁；缓存测试需要互相隔离的状态，
-/// 必须用 poison 容忍的方式取锁，否则一个失败会连带全部缓存测试。
-pub(super) fn cache_test_guard() -> std::sync::MutexGuard<'static, ()> {
-    CACHE_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner())
-}
 
 #[test]
 fn pattern_parser_accepts_compact_and_spaced_hex() {

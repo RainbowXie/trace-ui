@@ -15,6 +15,7 @@ use crate::error::{Result, TraceError};
 use crate::session::{SessionHandle, SessionState};
 use trace_parser::types::TraceFormat;
 
+#[derive(Default)]
 pub struct TraceEngine {
     sessions: RwLock<HashMap<String, Arc<SessionHandle>>>,
 }
@@ -40,10 +41,10 @@ impl TraceEngine {
     // ━━ 会话管理 ━━
 
     pub fn create_session(&self, path: &str) -> Result<SessionInfo> {
-        let file = std::fs::File::open(path).map_err(|e| TraceError::Io(e))?;
-        let metadata = file.metadata().map_err(|e| TraceError::Io(e))?;
+        let file = std::fs::File::open(path).map_err(TraceError::Io)?;
+        let metadata = file.metadata().map_err(TraceError::Io)?;
         let file_size = metadata.len();
-        let mmap = unsafe { Mmap::map(&file) }.map_err(|e| TraceError::Io(e))?;
+        let mmap = unsafe { Mmap::map(&file) }.map_err(TraceError::Io)?;
         let trace_hash = crate::memory_search::compute_trace_content_hash(&mmap);
 
         #[cfg(unix)]
@@ -172,7 +173,7 @@ impl TraceEngine {
     pub fn set_cache_dir(&self, path: Option<String>) -> Result<()> {
         let path_buf = path.map(std::path::PathBuf::from);
         if let Some(ref p) = path_buf {
-            std::fs::create_dir_all(p).map_err(|e| TraceError::Io(e))?;
+            std::fs::create_dir_all(p).map_err(TraceError::Io)?;
         }
         crate::cache::set_cache_dir_override(path_buf);
         Ok(())

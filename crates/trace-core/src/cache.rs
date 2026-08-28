@@ -12,6 +12,17 @@ const HEADER_LEN_V4: usize = 64;
 
 static CACHE_DIR_OVERRIDE: RwLock<Option<PathBuf>> = RwLock::new(None);
 
+#[cfg(test)]
+static CACHE_DIR_OVERRIDE_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+/// 单元测试中使用 `set_cache_dir_override` 时必须持有此锁，防止并行测试覆盖全局 override。
+#[cfg(test)]
+pub(crate) fn cache_dir_override_test_lock() -> std::sync::MutexGuard<'static, ()> {
+    CACHE_DIR_OVERRIDE_LOCK
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+}
+
 pub fn set_cache_dir_override(path: Option<PathBuf>) {
     *CACHE_DIR_OVERRIDE.write().unwrap() = path;
 }

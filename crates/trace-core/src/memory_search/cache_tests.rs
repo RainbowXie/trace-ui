@@ -11,13 +11,13 @@ use super::fingerprint::{
     fd_signature, fingerprint_path, search_memory_fd_verified,
     search_memory_fd_verified_with_signature, FingerprintSource,
 };
-use super::tests::cache_test_guard;
 use super::{
     cache_header_total_len, memory_cache_path, search_memory_cached,
     search_memory_cached_with_trace_hash, sha256, trace_content_hash, MemorySearchOptions,
     CACHE_HEADER_LEN, CACHE_RECORD_LEN, CACHE_RECORD_READ_COUNT, CACHE_TAG_LEN, SEARCH_SCAN_COUNT,
     TRACE_HASH_COUNT,
 };
+use crate::cache::cache_dir_override_test_lock as cache_test_guard;
 #[cfg(unix)]
 use crate::error::TraceError;
 
@@ -87,6 +87,7 @@ fn cache_contains_all_occurrences_and_default_ranges_hit_without_rescanning() {
 
 #[test]
 fn cache_identity_uses_trace_content_not_pathname() {
+    let _guard = cache_test_guard();
     let data = b"trace";
     let trace_hash = sha256(data);
     let pattern_hash = sha256(&[1, 2, 3]);

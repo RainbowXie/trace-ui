@@ -252,7 +252,7 @@ mod tests {
         .join("\n");
 
         let state = scanner::scan_from_string(&trace, false).unwrap();
-        let (deps, pair_split, init_mem_loads) = state_to_scan_view(&state);
+        let (deps, pair_split, _init_mem_loads) = state_to_scan_view(&state);
         let view = ScanView {
             deps: deps.view(),
             pair_split: pair_split.view(),
@@ -281,7 +281,7 @@ mod tests {
         .join("\n");
 
         let state = scanner::scan_from_string(&trace, false).unwrap();
-        let (deps, pair_split, init_mem_loads) = state_to_scan_view(&state);
+        let (deps, pair_split, _init_mem_loads) = state_to_scan_view(&state);
         let view = ScanView {
             deps: deps.view(),
             pair_split: pair_split.view(),
@@ -309,7 +309,7 @@ mod tests {
         .join("\n");
 
         let state = scanner::scan_from_string(&trace, false).unwrap();
-        let (deps, pair_split, init_mem_loads) = state_to_scan_view(&state);
+        let (deps, pair_split, _init_mem_loads) = state_to_scan_view(&state);
         let view = ScanView {
             deps: deps.view(),
             pair_split: pair_split.view(),
@@ -338,7 +338,7 @@ mod tests {
         .join("\n");
 
         let state = scanner::scan_from_string(&trace, false).unwrap();
-        let (deps, pair_split, init_mem_loads) = state_to_scan_view(&state);
+        let (deps, pair_split, _init_mem_loads) = state_to_scan_view(&state);
         let view = ScanView {
             deps: deps.view(),
             pair_split: pair_split.view(),
@@ -366,7 +366,7 @@ mod tests {
         let trace = r#"[00:00:00 001][lib.so 0x100] [d2800108] 0x40000100: "mov x0, #5" => x0=0x5"#;
 
         let state = scanner::scan_from_string(trace, false).unwrap();
-        let (deps, pair_split, init_mem_loads) = state_to_scan_view(&state);
+        let (deps, pair_split, _init_mem_loads) = state_to_scan_view(&state);
         let view = ScanView {
             deps: deps.view(),
             pair_split: pair_split.view(),
@@ -388,7 +388,7 @@ mod tests {
         let trace = r#"[00:00:00 001][lib.so 0x100] [d2800108] 0x40000100: "mov x0, #5" => x0=0x5"#;
 
         let state = scanner::scan_from_string(trace, false).unwrap();
-        let (deps, pair_split, init_mem_loads) = state_to_scan_view(&state);
+        let (deps, pair_split, _init_mem_loads) = state_to_scan_view(&state);
         let view = ScanView {
             deps: deps.view(),
             pair_split: pair_split.view(),
@@ -452,7 +452,7 @@ mod tests {
         .join("\n");
 
         let state = scanner::scan_from_string(&trace, false).unwrap();
-        let (deps, pair_split, init_mem_loads) = state_to_scan_view(&state);
+        let (deps, pair_split, _init_mem_loads) = state_to_scan_view(&state);
         let view = ScanView {
             deps: deps.view(),
             pair_split: pair_split.view(),

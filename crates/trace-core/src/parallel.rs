@@ -79,14 +79,16 @@ pub fn scan_unified_parallel(
 
             chunk_scan::scan_chunk(
                 data,
-                meta.start_byte,
-                meta.end_byte,
-                meta.start_line,
-                format,
-                data_only,
-                no_prune,
-                true, // 并行扫描始终跳过字符串：跨 chunk 边界会断裂，改由 MemAccessIndex 构建后用路径 1 精确构建
-                chunk_cb,
+                chunk_scan::ScanChunkConfig {
+                    start_byte: meta.start_byte,
+                    end_byte: meta.end_byte,
+                    start_line: meta.start_line,
+                    format,
+                    data_only,
+                    no_prune,
+                    skip_strings: true, // 并行扫描始终跳过字符串：跨 chunk 边界会断裂，改由 MemAccessIndex 构建后用路径 1 精确构建
+                    progress_cb: chunk_cb,
+                },
             )
         })
         .collect();
@@ -310,14 +312,16 @@ mod tests {
             .map(|meta| {
                 crate::chunk_scan::scan_chunk(
                     data,
-                    meta.start_byte,
-                    meta.end_byte,
-                    meta.start_line,
-                    format,
-                    data_only,
-                    no_prune,
-                    skip_strings,
-                    None,
+                    crate::chunk_scan::ScanChunkConfig {
+                        start_byte: meta.start_byte,
+                        end_byte: meta.end_byte,
+                        start_line: meta.start_line,
+                        format,
+                        data_only,
+                        no_prune,
+                        skip_strings,
+                        progress_cb: None,
+                    },
                 )
             })
             .collect();

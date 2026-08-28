@@ -16,7 +16,7 @@ pub struct MemAccessRecord {
     pub size: u8,
 }
 
-#[derive(Serialize, Deserialize)]
+#[derive(Serialize, Deserialize, Default)]
 pub struct MemAccessIndex {
     index: FxHashMap<u64, Vec<MemAccessRecord>>,
 }

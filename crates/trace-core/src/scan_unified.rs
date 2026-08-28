@@ -348,7 +348,7 @@ pub fn scan_unified(
         // Non-pair LOADs with pruning enabled are already handled above;
         // handle: pair LOADs, non-pair LOADs with pruning disabled
         if let Some(ref mem) = line.mem_op {
-            if !mem.is_write && !(is_non_pair_load && !no_prune) {
+            if !mem.is_write && (!is_non_pair_load || no_prune) {
                 let width = mem_access_width(class, mem.elem_width, &line);
                 let mut has_init_mem = false;
                 for offset in 0..width as u64 {

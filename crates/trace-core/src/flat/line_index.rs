@@ -86,18 +86,6 @@ impl<'a> LineIndexView<'a> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::line_index::LineIndex;
-
-    /// Build a LineIndexArchive from an existing LineIndex (for testing cross-compatibility).
-    fn from_line_index(idx: &LineIndex) -> LineIndexArchive {
-        // Access private fields via the public interface: re-build from data.
-        // Since we can't access private fields directly, build independently.
-        // Use the same algorithm as LineIndex::build.
-        LineIndexArchive {
-            sampled_offsets: extract_sampled_offsets(idx),
-            total: idx.total_lines(),
-        }
-    }
 
     /// Extract sampled_offsets from LineIndex by probing get_line offsets.
     /// We don't have direct field access, so we rebuild from scratch using the same data.
@@ -123,11 +111,6 @@ mod tests {
             sampled_offsets,
             total: line_count,
         }
-    }
-
-    // Placeholder to satisfy the from_line_index function signature (unused directly).
-    fn extract_sampled_offsets(_idx: &LineIndex) -> Vec<u64> {
-        vec![] // not used directly; we use build_archive instead
     }
 
     #[test]

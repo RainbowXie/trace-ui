@@ -81,7 +81,7 @@ fn format_lines(lines: &[TraceLine], full: bool) -> Vec<serde_json::Value> {
             })
             .collect()
     } else {
-        lines.iter().map(|l| compact_line(l)).collect()
+        lines.iter().map(compact_line).collect()
     }
 }
 
@@ -702,7 +702,7 @@ impl TraceToolHandler {
         Parameters(req): Parameters<GetCallTreeRequest>,
     ) -> Result<String, String> {
         let sid = self.resolve_session(req.session_id)?;
-        let depth = req.depth.min(3).max(1);
+        let depth = req.depth.clamp(1, 3);
         let max_nodes: u32 = 500;
         let nodes = self.collect_tree_to_depth(&sid, req.node_id, depth, max_nodes)?;
         let total_count = self.engine.get_call_tree_node_count(&sid).unwrap_or(0);
@@ -1052,9 +1052,9 @@ impl TraceToolHandler {
 
                 let context: Vec<serde_json::Value> = ctx_lines.iter().map(|l| {
                     let mut obj = compact_line(l);
-                    obj.as_object_mut().map(|o| {
+                    if let Some(o) = obj.as_object_mut() {
                         o.insert("is_match".to_string(), serde_json::json!(l.seq == m.seq));
-                    });
+                    }
                     obj
                 }).collect();
 

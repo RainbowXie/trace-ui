@@ -24,6 +24,17 @@ impl FlatDeps {
     }
 }
 
+pub struct DepsRawSlices<'a> {
+    pub chunk_start_lines: &'a [u32],
+    pub chunk_offsets_start: &'a [u32],
+    pub chunk_data_start: &'a [u32],
+    pub all_offsets: &'a [u32],
+    pub all_data: &'a [u32],
+    pub patch_lines: &'a [u32],
+    pub patch_offsets: &'a [u32],
+    pub patch_data: &'a [u32],
+}
+
 pub struct DepsView<'a> {
     chunk_start_lines: &'a [u32],
     chunk_offsets_start: &'a [u32],
@@ -36,25 +47,16 @@ pub struct DepsView<'a> {
 }
 
 impl<'a> DepsView<'a> {
-    pub fn from_raw(
-        chunk_start_lines: &'a [u32],
-        chunk_offsets_start: &'a [u32],
-        chunk_data_start: &'a [u32],
-        all_offsets: &'a [u32],
-        all_data: &'a [u32],
-        patch_lines: &'a [u32],
-        patch_offsets: &'a [u32],
-        patch_data: &'a [u32],
-    ) -> Self {
+    pub fn from_raw(slices: DepsRawSlices<'a>) -> Self {
         Self {
-            chunk_start_lines,
-            chunk_offsets_start,
-            chunk_data_start,
-            all_offsets,
-            all_data,
-            patch_lines,
-            patch_offsets,
-            patch_data,
+            chunk_start_lines: slices.chunk_start_lines,
+            chunk_offsets_start: slices.chunk_offsets_start,
+            chunk_data_start: slices.chunk_data_start,
+            all_offsets: slices.all_offsets,
+            all_data: slices.all_data,
+            patch_lines: slices.patch_lines,
+            patch_offsets: slices.patch_offsets,
+            patch_data: slices.patch_data,
         }
     }
 

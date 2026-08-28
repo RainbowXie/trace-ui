@@ -221,13 +221,10 @@ pub fn bitvec_to_flat(bv: &bitvec::prelude::BitVec) -> FlatBitVec {
     let raw: &[usize] = bv.as_raw_slice();
     // SAFETY: usize is valid to reinterpret as bytes; all bits are initialised.
     let byte_data: &[u8] = unsafe {
-        core::slice::from_raw_parts(
-            raw.as_ptr() as *const u8,
-            raw.len() * std::mem::size_of::<usize>(),
-        )
+        core::slice::from_raw_parts(raw.as_ptr() as *const u8, std::mem::size_of_val(raw))
     };
     // Only keep the bytes actually needed to hold `len` bits
-    let needed_bytes = (len as usize + 7) / 8;
+    let needed_bytes = (len as usize).div_ceil(8);
     FlatBitVec {
         data: byte_data[..needed_bytes].to_vec(),
         len,
@@ -381,14 +378,14 @@ mod tests {
         let mut ckpts = RegCheckpoints::new(100);
 
         let mut vals0 = [0u64; RegId::COUNT];
-        for i in 0..RegId::COUNT {
-            vals0[i] = i as u64 * 10;
+        for (i, val) in vals0.iter_mut().enumerate() {
+            *val = i as u64 * 10;
         }
         ckpts.save_checkpoint(&vals0);
 
         let mut vals1 = [0u64; RegId::COUNT];
-        for i in 0..RegId::COUNT {
-            vals1[i] = i as u64 * 20;
+        for (i, val) in vals1.iter_mut().enumerate() {
+            *val = i as u64 * 20;
         }
         ckpts.save_checkpoint(&vals1);
 

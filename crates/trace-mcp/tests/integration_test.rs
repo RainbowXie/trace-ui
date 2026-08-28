@@ -126,7 +126,7 @@ fn test_get_trace_lines_overflow_safe() {
     let seqs: Vec<u32> = (start_seq..end).collect();
     // These seqs are way beyond the trace — get_lines should not panic (the key property).
     // It may return empty lines with default fields since the engine handles out-of-range gracefully.
-    let lines = engine
+    let _lines = engine
         .get_lines(&sid, &seqs)
         .expect("get_lines should not panic on out-of-range seqs");
 
@@ -505,7 +505,7 @@ fn test_get_function_list() {
 fn test_get_strings() {
     let (engine, sid) = setup_session(&get_trace_path());
 
-    let result = engine
+    let _result = engine
         .get_strings(
             &sid,
             trace_core::StringQueryOptions {
@@ -547,7 +547,7 @@ fn test_scan_strings_after_skip() {
     engine.scan_strings(&sid).expect("scan_strings");
 
     // Should be able to query strings now
-    let result = engine
+    let _result = engine
         .get_strings(
             &sid,
             trace_core::StringQueryOptions {

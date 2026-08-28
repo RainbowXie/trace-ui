@@ -401,9 +401,9 @@ pub fn fix_reg_checkpoints(
     prev_final_reg_values: &[u64; RegId::COUNT],
 ) {
     for snapshot in &mut ckpts.snapshots {
-        for r in 0..RegId::COUNT {
-            if snapshot.0[r] == u64::MAX && prev_final_reg_values[r] != u64::MAX {
-                snapshot.0[r] = prev_final_reg_values[r];
+        for (r, &prev_val) in prev_final_reg_values.iter().enumerate() {
+            if snapshot.0[r] == u64::MAX && prev_val != u64::MAX {
+                snapshot.0[r] = prev_val;
             }
         }
     }
@@ -657,6 +657,8 @@ pub fn merge_all_chunks(
         cb(0.15);
     }
 
+    type StringAccessList = Vec<(u64, u64, u8, u32, crate::query::strings::StringRw)>;
+
     // === Pass 2: Decompose chunk_results (move out data) ===
     let mut chunk_deps = Vec::with_capacity(num_chunks);
     let mut chunk_inits = Vec::with_capacity(num_chunks);
@@ -664,8 +666,7 @@ pub fn merge_all_chunks(
     let mut chunk_reg_ckpts = Vec::with_capacity(num_chunks);
     let mut chunk_line_indices = Vec::with_capacity(num_chunks);
     let mut chunk_mem_indices = Vec::with_capacity(num_chunks);
-    let mut chunk_string_accesses: Vec<Vec<(u64, u64, u8, u32, crate::query::strings::StringRw)>> =
-        Vec::with_capacity(num_chunks);
+    let mut chunk_string_accesses: Vec<StringAccessList> = Vec::with_capacity(num_chunks);
     let mut all_consumed_seqs = Vec::new();
     let mut chunk_start_lines = Vec::with_capacity(num_chunks);
     let mut total_parsed_count = 0u32;
@@ -938,7 +939,7 @@ pub fn merge_all_chunks(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::chunk_scan::scan_chunk;
+    use crate::chunk_scan::{scan_chunk, ScanChunkConfig};
     use smallvec::smallvec;
 
     #[test]
@@ -1346,11 +1347,11 @@ mod tests {
 
         let merged = merge_init_mem_loads(vec![b1, b2], &corrections);
         assert_eq!(merged.len(), 5);
-        assert_eq!(merged[0], false); // corrected from true
-        assert_eq!(merged[1], false); // original
-        assert_eq!(merged[2], true); // original
-        assert_eq!(merged[3], false); // original
-        assert_eq!(merged[4], false); // corrected from true
+        assert!(!merged[0]); // corrected from true
+        assert!(!merged[1]); // original
+        assert!(merged[2]); // original
+        assert!(!merged[3]); // original
+        assert!(!merged[4]); // corrected from true
     }
 
     #[test]
@@ -1477,25 +1478,29 @@ mod tests {
 
         let chunk0 = scan_chunk(
             data,
-            0,
-            split,
-            0,
-            TraceFormat::Gumtrace,
-            true,
-            false,
-            true,
-            None,
+            ScanChunkConfig {
+                start_byte: 0,
+                end_byte: split,
+                start_line: 0,
+                format: TraceFormat::Gumtrace,
+                data_only: true,
+                no_prune: false,
+                skip_strings: true,
+                progress_cb: None,
+            },
         );
         let chunk1 = scan_chunk(
             data,
-            split,
-            data.len(),
-            4,
-            TraceFormat::Gumtrace,
-            true,
-            false,
-            true,
-            None,
+            ScanChunkConfig {
+                start_byte: split,
+                end_byte: data.len(),
+                start_line: 4,
+                format: TraceFormat::Gumtrace,
+                data_only: true,
+                no_prune: false,
+                skip_strings: true,
+                progress_cb: None,
+            },
         );
         let merged = merge_all_chunks(
             vec![chunk0, chunk1],

@@ -107,7 +107,6 @@ pub fn parse_trace_line_gumtrace(seq: u32, raw: &[u8]) -> Option<TraceLine> {
         // 没有 " -> "：无寄存器变化（如 str/strb 等 store 指令），
         // annotation 中的寄存器值即为 before 值
         let reg_before = annot_area
-            .trim()
             .split_whitespace()
             .filter(|tok| !tok.starts_with("mem_w=") && !tok.starts_with("mem_r="))
             .collect::<Vec<_>>()
@@ -285,26 +284,23 @@ fn extract_mem_size(disasm: &str) -> Option<u8> {
         if first_reg.starts_with('q') || first_reg.starts_with('Q') {
             return Some(if is_pair { 32 } else { 16 });
         }
-        if first_reg.starts_with('d') || first_reg.starts_with('D') {
-            // 排除 "d0" 是 SIMD，但 "d" 也可能是其他
-            if first_reg.len() > 1
-                && first_reg[1..]
-                    .chars()
-                    .next()
-                    .map_or(false, |c| c.is_ascii_digit())
-            {
-                return Some(if is_pair { 16 } else { 8 });
-            }
+        if (first_reg.starts_with('d') || first_reg.starts_with('D'))
+            && first_reg.len() > 1
+            && first_reg[1..]
+                .chars()
+                .next()
+                .is_some_and(|c| c.is_ascii_digit())
+        {
+            return Some(if is_pair { 16 } else { 8 });
         }
-        if first_reg.starts_with('s') || first_reg.starts_with('S') {
-            if first_reg.len() > 1
-                && first_reg[1..]
-                    .chars()
-                    .next()
-                    .map_or(false, |c| c.is_ascii_digit())
-            {
-                return Some(if is_pair { 8 } else { 4 });
-            }
+        if (first_reg.starts_with('s') || first_reg.starts_with('S'))
+            && first_reg.len() > 1
+            && first_reg[1..]
+                .chars()
+                .next()
+                .is_some_and(|c| c.is_ascii_digit())
+        {
+            return Some(if is_pair { 8 } else { 4 });
         }
         // x寄存器 = 8字节, w寄存器 = 4字节
         if first_reg.starts_with('x') || first_reg.starts_with('X') {

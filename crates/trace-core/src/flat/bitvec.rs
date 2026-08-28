@@ -56,7 +56,7 @@ mod tests {
 
     fn make_bitvec(bits: &[bool]) -> FlatBitVec {
         let len = bits.len() as u32;
-        let byte_count = (bits.len() + 7) / 8;
+        let byte_count = bits.len().div_ceil(8);
         let mut data = vec![0u8; byte_count];
         for (i, &b) in bits.iter().enumerate() {
             if b {
@@ -84,10 +84,10 @@ mod tests {
     fn test_out_of_bounds() {
         let flat = make_bitvec(&[true, false]);
         let view = flat.view();
-        assert_eq!(view.get(0), true);
-        assert_eq!(view.get(1), false);
-        assert_eq!(view.get(2), false); // out of bounds → false
-        assert_eq!(view.get(100), false);
+        assert!(view.get(0));
+        assert!(!view.get(1));
+        assert!(!view.get(2)); // out of bounds → false
+        assert!(!view.get(100));
     }
 
     #[test]
@@ -99,7 +99,7 @@ mod tests {
         let view = flat.view();
         assert!(view.is_empty());
         assert_eq!(view.len(), 0);
-        assert_eq!(view.get(0), false);
+        assert!(!view.get(0));
     }
 
     #[test]
@@ -107,7 +107,7 @@ mod tests {
         let flat = make_bitvec(&[false; 16]);
         let view = flat.view();
         for i in 0..16 {
-            assert_eq!(view.get(i), false);
+            assert!(!view.get(i));
         }
     }
 
@@ -116,7 +116,7 @@ mod tests {
         let flat = make_bitvec(&[true; 16]);
         let view = flat.view();
         for i in 0..16 {
-            assert_eq!(view.get(i), true);
+            assert!(view.get(i));
         }
     }
 
@@ -128,9 +128,9 @@ mod tests {
         bits[8] = true;
         let flat = make_bitvec(&bits);
         let view = flat.view();
-        assert_eq!(view.get(6), false);
-        assert_eq!(view.get(7), true);
-        assert_eq!(view.get(8), true);
-        assert_eq!(view.get(9), false);
+        assert!(!view.get(6));
+        assert!(view.get(7));
+        assert!(view.get(8));
+        assert!(!view.get(9));
     }
 }

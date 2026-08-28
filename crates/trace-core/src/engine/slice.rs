@@ -92,7 +92,7 @@ fn resolve_reg_def(
                 if let Some(parsed) = parsed {
                     let cls = insn_class::classify_and_refine(&parsed);
                     let (defs, _) = def_use::determine_def_use(cls, &parsed);
-                    if defs.iter().any(|r| *r == target_reg) {
+                    if defs.contains(&target_reg) {
                         // For pair instructions, tag the line number with the
                         // correct half bit so BFS follows the right dependencies.
                         // This mirrors the logic in scanner.rs Step 4.
@@ -104,7 +104,7 @@ fn resolve_reg_def(
                                 &defs[..]
                             };
                             let mid = data_defs.len() / 2;
-                            if data_defs[mid..].iter().any(|r| *r == target_reg) {
+                            if data_defs[mid..].contains(&target_reg) {
                                 return Ok(s | PAIR_HALF2_BIT);
                             }
                             if has_base_wb && defs.last() == Some(&target_reg) {
@@ -193,7 +193,7 @@ impl TraceEngine {
                     &lidx_view,
                     format,
                 )
-                .map_err(|e| TraceError::InvalidArgument(e))?;
+                .map_err(TraceError::InvalidArgument)?;
                 start_indices.push(idx);
             }
 
@@ -335,7 +335,7 @@ impl TraceEngine {
         let marked_count = marked.count_ones() as u32;
         let total_lines = marked.len() as u32;
 
-        let file = std::fs::File::create(output_path).map_err(|e| TraceError::Io(e))?;
+        let file = std::fs::File::create(output_path).map_err(TraceError::Io)?;
         let mut writer = std::io::BufWriter::new(file);
 
         if format == "json" {
@@ -380,13 +380,13 @@ impl TraceEngine {
             // TXT: 纯污点行原文
             for seq in marked.iter_ones() {
                 if let Some(raw) = line_index.get_line(&state.mmap, seq as u32) {
-                    writer.write_all(raw).map_err(|e| TraceError::Io(e))?;
-                    writer.write_all(b"\n").map_err(|e| TraceError::Io(e))?;
+                    writer.write_all(raw).map_err(TraceError::Io)?;
+                    writer.write_all(b"\n").map_err(TraceError::Io)?;
                 }
             }
         }
 
-        writer.flush().map_err(|e| TraceError::Io(e))?;
+        writer.flush().map_err(TraceError::Io)?;
         Ok(())
     }
 }

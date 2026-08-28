@@ -6,7 +6,7 @@
 ///   [section data, each 8-byte aligned]
 ///
 /// All offsets are absolute (relative to the start of the section table).
-
+#[derive(Default)]
 pub struct SectionWriter {
     sections: Vec<(usize, usize)>, // (start_offset_in_buf, byte_length)
     buf: Vec<u8>,
@@ -27,7 +27,7 @@ impl SectionWriter {
             self.buf.push(0);
         }
         let offset = self.buf.len();
-        let byte_len = data.len() * std::mem::size_of::<T>();
+        let byte_len = std::mem::size_of_val(data);
         let ptr = data.as_ptr() as *const u8;
         self.buf
             .extend_from_slice(unsafe { std::slice::from_raw_parts(ptr, byte_len) });

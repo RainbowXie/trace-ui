@@ -341,11 +341,11 @@ impl super::TraceEngine {
                         let candidate_data = rec.data;
                         let candidate_size = rec.size;
 
-                        if check_offset < candidate_size as u64 {
-                            if best_seq.is_none() || candidate_seq > best_seq.unwrap() {
-                                best_seq = Some(candidate_seq);
-                                best_byte = ((candidate_data >> (check_offset * 8)) & 0xFF) as u8;
-                            }
+                        if check_offset < candidate_size as u64
+                            && (best_seq.is_none() || candidate_seq > best_seq.unwrap())
+                        {
+                            best_seq = Some(candidate_seq);
+                            best_byte = ((candidate_data >> (check_offset * 8)) & 0xFF) as u8;
                         }
                     }
                 }
@@ -920,7 +920,7 @@ impl super::TraceEngine {
             &lidx_view,
             format,
         )
-        .map_err(|e| TraceError::InvalidArgument(e))?;
+        .map_err(TraceError::InvalidArgument)?;
 
         let scan_view = state.scan_view().ok_or(TraceError::IndexNotReady)?;
 
@@ -972,7 +972,7 @@ impl super::TraceEngine {
             &lidx_view,
             format,
         )
-        .map_err(|e| TraceError::InvalidArgument(e))?;
+        .map_err(TraceError::InvalidArgument)?;
 
         let scan_view = state.scan_view().ok_or(TraceError::IndexNotReady)?;
 
@@ -1033,8 +1033,8 @@ impl super::TraceEngine {
                     let first_reg = parsed.operands.first().and_then(|op| op.as_reg());
                     let cls = insn_class::classify(parsed.mnemonic.as_str(), first_reg);
                     let (defs, uses) = def_use::determine_def_use(cls, &parsed);
-                    anchor_is_def = defs.iter().any(|r| *r == target_reg);
-                    anchor_is_use = uses.iter().any(|r| *r == target_reg);
+                    anchor_is_def = defs.contains(&target_reg);
+                    anchor_is_use = uses.contains(&target_reg);
                 }
             }
         }
@@ -1050,7 +1050,7 @@ impl super::TraceEngine {
                             let first_reg = parsed.operands.first().and_then(|op| op.as_reg());
                             let cls = insn_class::classify(parsed.mnemonic.as_str(), first_reg);
                             let (defs, _) = def_use::determine_def_use(cls, &parsed);
-                            if defs.iter().any(|r| *r == target_reg) {
+                            if defs.contains(&target_reg) {
                                 def_seq = Some(s);
                                 break;
                             }
@@ -1083,12 +1083,12 @@ impl super::TraceEngine {
                             let (defs, uses) = def_use::determine_def_use(cls, &parsed);
 
                             // 先检查 USE（同一行可能既 USE 又 DEF，如 add x0, x0, #1）
-                            if uses.iter().any(|r| *r == target_reg) {
+                            if uses.contains(&target_reg) {
                                 use_seqs.push(s);
                             }
 
                             // 再检查 DEF（重新定义 = 扫描终点）
-                            if defs.iter().any(|r| *r == target_reg) {
+                            if defs.contains(&target_reg) {
                                 redefined_seq = Some(s);
                                 break;
                             }
@@ -1161,7 +1161,7 @@ impl super::TraceEngine {
                 state.line_index_view().map(|li| {
                     let data: &[u8] = &state.mmap;
                     let num_chunks = num_cpus.min(16);
-                    let lines_per_chunk = (total_lines as usize + num_chunks - 1) / num_chunks;
+                    let lines_per_chunk = (total_lines as usize).div_ceil(num_chunks);
                     let mut chunks = Vec::with_capacity(num_chunks);
                     for i in 0..num_chunks {
                         let start_seq = (i * lines_per_chunk) as u32;

@@ -11,20 +11,25 @@ use crate::parallel::scan_unified_parallel;
 use crate::scan_unified::{ProgressFn, ScanResult};
 
 /// 内部枚举：区分缓存命中 vs 新鲜扫描结果
+///
+/// CacheHit 的 10 个字段整体 Box（large_enum_variant）：缓存命中是冷路径，
+/// 一次堆分配换取枚举尺寸不膨胀。
 enum IndexResult {
-    CacheHit {
-        phase2_store: CachedStore<Phase2Archive>,
-        call_tree: crate::query::call_tree::CallTree,
-        string_index: Option<crate::query::strings::StringIndex>,
-        scan_store: CachedStore<ScanArchive>,
-        reg_last_def: crate::scanner::RegLastDef,
-        lidx_store: CachedStore<LineIndexArchive>,
-        total_lines: u32,
-        format: trace_parser::types::TraceFormat,
-        call_annotations: HashMap<u32, trace_parser::gumtrace::CallAnnotation>,
-        consumed_seqs: Vec<u32>,
-    },
-    ScanResult(ScanResult),
+    CacheHit(Box<CacheHitData>),
+    ScanResult(Box<ScanResult>),
+}
+
+struct CacheHitData {
+    phase2_store: CachedStore<Phase2Archive>,
+    call_tree: crate::query::call_tree::CallTree,
+    string_index: Option<crate::query::strings::StringIndex>,
+    scan_store: CachedStore<ScanArchive>,
+    reg_last_def: crate::scanner::RegLastDef,
+    lidx_store: CachedStore<LineIndexArchive>,
+    total_lines: u32,
+    format: trace_parser::types::TraceFormat,
+    call_annotations: HashMap<u32, trace_parser::gumtrace::CallAnnotation>,
+    consumed_seqs: Vec<u32>,
 }
 
 impl super::TraceEngine {
@@ -120,7 +125,7 @@ impl super::TraceEngine {
                     total_lines, detected_format
                 );
 
-                let result = IndexResult::CacheHit {
+                let result = IndexResult::CacheHit(Box::new(CacheHitData {
                     phase2_store,
                     call_tree,
                     string_index,
@@ -131,7 +136,7 @@ impl super::TraceEngine {
                     format: detected_format,
                     call_annotations,
                     consumed_seqs,
-                };
+                }));
 
                 return self.apply_index_result(session_id, handle, result, true);
             }
@@ -207,7 +212,7 @@ impl super::TraceEngine {
         self.apply_index_result(
             session_id,
             handle,
-            IndexResult::ScanResult(scan_result),
+            IndexResult::ScanResult(Box::new(scan_result)),
             false,
         )
     }
@@ -220,18 +225,19 @@ impl super::TraceEngine {
         _from_cache: bool,
     ) -> Result<BuildResult> {
         match result {
-            IndexResult::CacheHit {
-                phase2_store,
-                call_tree,
-                string_index,
-                scan_store,
-                reg_last_def,
-                lidx_store,
-                total_lines,
-                format,
-                call_annotations,
-                consumed_seqs,
-            } => {
+            IndexResult::CacheHit(data) => {
+                let CacheHitData {
+                    phase2_store,
+                    call_tree,
+                    string_index,
+                    scan_store,
+                    reg_last_def,
+                    lidx_store,
+                    total_lines,
+                    format,
+                    call_annotations,
+                    consumed_seqs,
+                } = *data;
                 let mut state = handle
                     .state
                     .write()

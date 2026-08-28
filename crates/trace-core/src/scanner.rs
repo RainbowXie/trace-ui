@@ -85,6 +85,7 @@ impl RegLastDef {
 /// - `last_cond_branch`: line index of the most recent conditional branch
 /// - `deps`: per-line dependency edges (line indices this line depends on)
 /// - `line_count`: total number of lines processed
+///
 /// Bit 标记：dep 行号的高位表示 pair 指令的到达路径。
 /// 24M 行远不到 2^30，所以 bit 30-31 可以安全复用。
 ///
@@ -152,6 +153,11 @@ impl MemLastDef {
         }
     }
 
+    /// 是否为空
+    pub fn is_empty(&self) -> bool {
+        self.len() == 0
+    }
+
     /// 压缩为排序数组，释放 HashMap 开销
     pub fn compact(&mut self) {
         if let Self::Map(m) = self {
@@ -173,7 +179,7 @@ impl MemLastDef {
 /// - `offsets[i]` = 第 i 行的依赖在 `data` 中的起始索引
 /// - 第 i 行的依赖 = `data[offsets[i]..offsets[i+1]]`
 /// - `offsets` 长度 = 行数 + 1（末尾哨兵）
-#[derive(Clone, serde::Serialize, serde::Deserialize)]
+#[derive(Clone, Default, serde::Serialize, serde::Deserialize)]
 pub struct CompactDeps {
     pub offsets: Vec<u32>,
     pub data: Vec<u32>,
@@ -515,26 +521,41 @@ pub fn scan_pass1_bytes(
 ) -> Result<ScanState> {
     scan_pass1_bytes_with_progress(
         data,
+        Pass1Options {
+            data_only,
+            start_seq,
+            end_seq,
+            line_targets,
+            profile,
+            no_prune,
+        },
+        None,
+    )
+}
+
+/// pass1 扫描的选项集合，避免 `scan_pass1_bytes_with_progress` 堆积位置参数。
+pub struct Pass1Options<'a> {
+    pub data_only: bool,
+    pub start_seq: u32,
+    pub end_seq: Option<u32>,
+    pub line_targets: &'a std::collections::HashMap<u32, Vec<LineTarget>>,
+    pub profile: bool,
+    pub no_prune: bool,
+}
+
+pub fn scan_pass1_bytes_with_progress(
+    data: &[u8],
+    options: Pass1Options<'_>,
+    progress_fn: Option<&dyn Fn(usize, usize)>,
+) -> Result<ScanState> {
+    let Pass1Options {
         data_only,
         start_seq,
         end_seq,
         line_targets,
         profile,
         no_prune,
-        None,
-    )
-}
-
-pub fn scan_pass1_bytes_with_progress(
-    data: &[u8],
-    data_only: bool,
-    start_seq: u32,
-    end_seq: Option<u32>,
-    line_targets: &std::collections::HashMap<u32, Vec<LineTarget>>,
-    profile: bool,
-    no_prune: bool,
-    progress_fn: Option<&dyn Fn(usize, usize)>,
-) -> Result<ScanState> {
+    } = options;
     // Pre-count lines for capacity pre-allocation.
     // This memchr scan (~0.3s for 2.88GB) also pre-faults all mmap pages into
     // physical memory, warming the page cache for the main loop. Removing this
@@ -755,7 +776,7 @@ pub fn scan_pass1_bytes_with_progress(
         // Non-pair LOADs with pruning enabled are already handled above;
         // handle: pair LOADs, non-pair LOADs with pruning disabled
         if let Some(ref mem) = line.mem_op {
-            if !mem.is_write && !(is_non_pair_load && !no_prune) {
+            if !mem.is_write && (!is_non_pair_load || no_prune) {
                 let width = mem_access_width(class, mem.elem_width, &line);
                 let mut has_init_mem = false;
                 for offset in 0..width as u64 {
@@ -1059,7 +1080,7 @@ mod tests {
 
     #[test]
     fn test_simple_register_chain() {
-        let lines = vec![
+        let lines = [
             mov_line("x8", 5),
             mov_line("x9", 10),
             add_line("x0", "x8", "x9"),
@@ -1087,7 +1108,7 @@ mod tests {
 
     #[test]
     fn test_memory_dependency() {
-        let lines = vec![
+        let lines = [
             mov_line("x8", 42),
             str_line("x8", "sp", 0xbffff010),
             ldr_line("x0", "sp", 0xbffff010),
@@ -1113,7 +1134,7 @@ mod tests {
 
     #[test]
     fn test_control_dependency() {
-        let lines = vec![
+        let lines = [
             r#"[00:00:00 001][lib.so 0x300] [6b09011f] 0x40000300: "cmp x8, x9" x8=0x5 x9=0xa => nzcv=0x80000000"#.to_string(),
             r#"[00:00:00 001][lib.so 0x304] [54000040] 0x40000304: "b.eq #0x4000030c" nzcv=0x40000000"#.to_string(),
             mov_line("x0", 1),
@@ -1135,7 +1156,7 @@ mod tests {
 
     #[test]
     fn test_data_only_no_control_dep() {
-        let lines = vec![
+        let lines = [
             r#"[00:00:00 001][lib.so 0x300] [6b09011f] 0x40000300: "cmp x8, x9" x8=0x5 x9=0xa => nzcv=0x80000000"#.to_string(),
             r#"[00:00:00 001][lib.so 0x304] [54000040] 0x40000304: "b.eq #0x4000030c" nzcv=0x40000000"#.to_string(),
             mov_line("x0", 1),
@@ -1156,7 +1177,7 @@ mod tests {
 
     #[test]
     fn test_cond_branch_depends_on_flag_setter() {
-        let lines = vec![
+        let lines = [
             r#"[00:00:00 001][lib.so 0x300] [6b09011f] 0x40000300: "cmp x8, x9" x8=0x5 x9=0xa => nzcv=0x80000000"#.to_string(),
             r#"[00:00:00 001][lib.so 0x304] [54000040] 0x40000304: "b.eq #0x4000030c" nzcv=0x40000000"#.to_string(),
         ];
@@ -1176,7 +1197,7 @@ mod tests {
 
     #[test]
     fn test_reg_last_def_updated() {
-        let lines = vec![
+        let lines = [
             mov_line("x8", 1),
             mov_line("x8", 2), // overwrites x8
             mov_line("x0", 3),
@@ -1196,7 +1217,7 @@ mod tests {
 
     #[test]
     fn test_unparseable_lines_skipped() {
-        let lines = vec![
+        let lines = [
             "random log line that doesn't match".to_string(),
             mov_line("x0", 42),
         ];
@@ -1231,7 +1252,7 @@ mod tests {
 
     #[test]
     fn test_simd_lane_load_refinement() {
-        let lines = vec![
+        let lines = [
             r#"[00:00:00 001][lib.so 0x100] [4f000400] 0x40000100: "movi v0.4s, #0" => q0=0x0"#.to_string(),
             r#"[00:00:00 001][lib.so 0x104] [0d401de0] 0x40000104: "ld1 {v0.s}[1], [x15]" ; mem[READ] abs=0x40500000 q0=0x0 x15=0x40500000 => q0=0x100"#.to_string(),
         ];
@@ -1251,7 +1272,7 @@ mod tests {
 
     #[test]
     fn test_sysreg_nzcv_read_refinement() {
-        let lines = vec![
+        let lines = [
             r#"[00:00:00 001][lib.so 0x300] [6b09011f] 0x40000300: "cmp x8, x9" x8=0x5 x9=0xa => nzcv=0x80000000"#.to_string(),
             r#"[00:00:00 001][lib.so 0x304] [d53b4200] 0x40000304: "mrs x0, nzcv" nzcv=0x80000000 => x0=0x80000000"#.to_string(),
         ];
@@ -1271,7 +1292,7 @@ mod tests {
 
     #[test]
     fn test_scan_with_start_seq() {
-        let lines = vec![
+        let lines = [
             mov_line("x8", 5),
             mov_line("x9", 10),
             add_line("x0", "x8", "x9"),
@@ -1293,7 +1314,7 @@ mod tests {
 
     #[test]
     fn test_scan_with_end_seq() {
-        let lines = vec![
+        let lines = [
             mov_line("x8", 5),
             mov_line("x9", 10),
             add_line("x0", "x8", "x9"),
@@ -1317,7 +1338,7 @@ mod tests {
         use std::collections::HashMap;
         use trace_parser::types::LineTarget;
 
-        let lines = vec![mov_line("x8", 5)];
+        let lines = [mov_line("x8", 5)];
         let trace = lines.join("\n");
         let mut targets = HashMap::new();
         targets.insert(0u32, vec![LineTarget::Reg(RegId::X8)]);
@@ -1339,7 +1360,7 @@ mod tests {
         use std::collections::HashMap;
         use trace_parser::types::LineTarget;
 
-        let lines = vec![mov_line("x8", 5)];
+        let lines = [mov_line("x8", 5)];
         let trace = lines.join("\n");
         let mut targets = HashMap::new();
         targets.insert(0u32, vec![LineTarget::Reg(RegId::X0)]);
@@ -1357,7 +1378,7 @@ mod tests {
         use std::collections::HashMap;
         use trace_parser::types::LineTarget;
 
-        let lines = vec![str_line("x8", "sp", 0xbffff010)];
+        let lines = [str_line("x8", "sp", 0xbffff010)];
         let trace = lines.join("\n");
         let mut targets = HashMap::new();
         targets.insert(0u32, vec![LineTarget::Mem(0xbffff010)]);
@@ -1381,7 +1402,7 @@ mod tests {
         use std::collections::HashMap;
         use trace_parser::types::LineTarget;
 
-        let lines = vec![str_line("x8", "sp", 0xbffff010)];
+        let lines = [str_line("x8", "sp", 0xbffff010)];
         let trace = lines.join("\n");
         let mut targets = HashMap::new();
         targets.insert(0u32, vec![LineTarget::Mem(0xdeadbeef)]);
@@ -1402,7 +1423,7 @@ mod tests {
         use std::collections::HashMap;
         use trace_parser::types::LineTarget;
 
-        let lines = vec![mov_line("x8", 5)];
+        let lines = [mov_line("x8", 5)];
         let trace = lines.join("\n");
         let mut targets = HashMap::new();
         targets.insert(999u32, vec![LineTarget::Reg(RegId::X8)]);
@@ -1421,7 +1442,7 @@ mod tests {
         use trace_parser::types::LineTarget;
 
         // line 0: mov x8 (DEFs x8), line 1: str x8 (USEs x8)
-        let lines = vec![mov_line("x8", 5), str_line("x8", "sp", 0x100)];
+        let lines = [mov_line("x8", 5), str_line("x8", "sp", 0x100)];
         let trace = lines.join("\n");
         let mut targets = HashMap::new();
         targets.insert(1u32, vec![LineTarget::Reg(RegId::X8)]);
@@ -1441,7 +1462,7 @@ mod tests {
         use trace_parser::types::LineTarget;
 
         // line 0: str x8 to 0x100, line 1: mov x9 (no mem op)
-        let lines = vec![str_line("x8", "sp", 0x100), mov_line("x9", 10)];
+        let lines = [str_line("x8", "sp", 0x100), mov_line("x9", 10)];
         let trace = lines.join("\n");
         let mut targets = HashMap::new();
         targets.insert(1u32, vec![LineTarget::Mem(0x100)]);
@@ -1460,7 +1481,7 @@ mod tests {
         use std::collections::HashMap;
         use trace_parser::types::LineTarget;
 
-        let lines = vec![mov_line("x9", 5)];
+        let lines = [mov_line("x9", 5)];
         let trace = lines.join("\n");
         let mut targets = HashMap::new();
         targets.insert(0u32, vec![LineTarget::Reg(RegId::X8)]);
@@ -1475,7 +1496,7 @@ mod tests {
 
     #[test]
     fn test_scan_with_start_and_end_seq() {
-        let lines = vec![
+        let lines = [
             mov_line("x8", 5),
             mov_line("x9", 10),
             add_line("x0", "x8", "x9"),

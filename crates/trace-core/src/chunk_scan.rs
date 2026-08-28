@@ -32,22 +32,33 @@ const CHECKPOINT_INTERVAL: u32 = 1000;
 
 /// Scan a single chunk of trace data, producing a `ChunkResult`.
 ///
+pub struct ScanChunkConfig {
+    pub start_byte: usize,
+    pub end_byte: usize,
+    pub start_line: u32,
+    pub format: TraceFormat,
+    pub data_only: bool,
+    pub no_prune: bool,
+    pub skip_strings: bool,
+    pub progress_cb: Option<Arc<dyn Fn(usize) + Send + Sync>>,
+}
+
 /// This mirrors `scan_unified` logic but:
 /// - Operates on `data[start_byte..end_byte]` only
 /// - Uses global line numbers starting at `start_line`
 /// - Records unresolved items (loads/regs/pairs) for cross-chunk fixup
 /// - Logs CallTree and Gumtrace annotation events instead of building them directly
-pub fn scan_chunk(
-    data: &[u8],
-    start_byte: usize,
-    end_byte: usize,
-    start_line: u32,
-    format: TraceFormat,
-    data_only: bool,
-    no_prune: bool,
-    skip_strings: bool,
-    progress_cb: Option<Arc<dyn Fn(usize) + Send + Sync>>,
-) -> ChunkResult {
+pub fn scan_chunk(data: &[u8], config: ScanChunkConfig) -> ChunkResult {
+    let ScanChunkConfig {
+        start_byte,
+        end_byte,
+        start_line,
+        format,
+        data_only,
+        no_prune,
+        skip_strings,
+        progress_cb,
+    } = config;
     // ── Estimate line count for this chunk ──
     let chunk_len = end_byte - start_byte;
     let line_count_est = chunk_len / 110 + 1;
@@ -364,7 +375,7 @@ pub fn scan_chunk(
         // Non-pair LOADs with pruning enabled are already handled above;
         // handle: pair LOADs, non-pair LOADs with pruning disabled
         if let Some(ref mem) = line.mem_op {
-            if !mem.is_write && !(is_non_pair_load && !no_prune) {
+            if !mem.is_write && (!is_non_pair_load || no_prune) {
                 let width = mem_access_width(class, mem.elem_width, &line);
                 let mut has_init_mem = false;
                 for offset in 0..width as u64 {
@@ -474,9 +485,11 @@ pub fn scan_chunk(
                             });
                         } else {
                             // Fully local — same as scan_unified
-                            let mut split = PairSplitDeps::default();
-                            split.half1_deps = half1_deps_local;
-                            split.half2_deps = half2_deps_local;
+                            let mut split = PairSplitDeps {
+                                half1_deps: half1_deps_local,
+                                half2_deps: half2_deps_local,
+                                ..Default::default()
+                            };
 
                             // shared: base reg dep
                             if let Some(base) = line.base_reg {
@@ -916,7 +929,7 @@ mod tests {
     #[test]
     fn test_scan_chunk_single_chunk_register_chain() {
         // Build a simple trace: mov x8, mov x9, add x0 = x8 + x9
-        let lines = vec![
+        let lines = [
             mov_line("x8", 5),
             mov_line("x9", 10),
             add_line("x0", "x8", "x9"),
@@ -926,14 +939,16 @@ mod tests {
 
         let result = scan_chunk(
             data,
-            0,
-            data.len(),
-            0,
-            TraceFormat::Unidbg,
-            false,
-            false,
-            true,
-            None,
+            ScanChunkConfig {
+                start_byte: 0,
+                end_byte: data.len(),
+                start_line: 0,
+                format: TraceFormat::Unidbg,
+                data_only: false,
+                no_prune: false,
+                skip_strings: true,
+                progress_cb: None,
+            },
         );
 
         // Basic counts
@@ -942,14 +957,8 @@ mod tests {
 
         // add x0 (line 2) should depend on mov x8 (line 0) and mov x9 (line 1)
         let row2 = result.deps.row(2);
-        assert!(
-            row2.iter().any(|&d| d == 0),
-            "add should depend on mov x8 (line 0)"
-        );
-        assert!(
-            row2.iter().any(|&d| d == 1),
-            "add should depend on mov x9 (line 1)"
-        );
+        assert!(row2.contains(&0), "add should depend on mov x8 (line 0)");
+        assert!(row2.contains(&1), "add should depend on mov x9 (line 1)");
 
         // No unresolved items since all defs are local
         assert!(result.unresolved_reg_uses.is_empty());
@@ -958,7 +967,7 @@ mod tests {
 
     #[test]
     fn test_scan_chunk_memory_dependency() {
-        let lines = vec![
+        let lines = [
             mov_line("x8", 42),
             str_line("x8", "sp", 0xbffff010),
             ldr_line("x0", "sp", 0xbffff010),
@@ -968,22 +977,21 @@ mod tests {
 
         let result = scan_chunk(
             data,
-            0,
-            data.len(),
-            0,
-            TraceFormat::Unidbg,
-            true,
-            false,
-            true,
-            None,
+            ScanChunkConfig {
+                start_byte: 0,
+                end_byte: data.len(),
+                start_line: 0,
+                format: TraceFormat::Unidbg,
+                data_only: true,
+                no_prune: false,
+                skip_strings: true,
+                progress_cb: None,
+            },
         );
 
         // ldr (line 2) should depend on str (line 1) via memory
         let row2 = result.deps.row(2);
-        assert!(
-            row2.iter().any(|&d| d == 1),
-            "ldr should depend on str via memory"
-        );
+        assert!(row2.contains(&1), "ldr should depend on str via memory");
 
         // No unresolved loads
         assert!(result.unresolved_loads.is_empty());
@@ -992,20 +1000,22 @@ mod tests {
     #[test]
     fn test_scan_chunk_unresolved_register() {
         // Single line using x8 which was never defined in this chunk
-        let lines = vec![add_line("x0", "x8", "x9")];
+        let lines = [add_line("x0", "x8", "x9")];
         let trace = lines.join("\n");
         let data = trace.as_bytes();
 
         let result = scan_chunk(
             data,
-            0,
-            data.len(),
-            0,
-            TraceFormat::Unidbg,
-            true,
-            false,
-            true,
-            None,
+            ScanChunkConfig {
+                start_byte: 0,
+                end_byte: data.len(),
+                start_line: 0,
+                format: TraceFormat::Unidbg,
+                data_only: true,
+                no_prune: false,
+                skip_strings: true,
+                progress_cb: None,
+            },
         );
 
         // x8 and x9 have no local def → should be unresolved
@@ -1019,20 +1029,22 @@ mod tests {
     #[test]
     fn test_scan_chunk_unresolved_load() {
         // A load from memory that was never written in this chunk
-        let lines = vec![ldr_line("x0", "sp", 0xbffff010)];
+        let lines = [ldr_line("x0", "sp", 0xbffff010)];
         let trace = lines.join("\n");
         let data = trace.as_bytes();
 
         let result = scan_chunk(
             data,
-            0,
-            data.len(),
-            0,
-            TraceFormat::Unidbg,
-            true,
-            false,
-            true,
-            None,
+            ScanChunkConfig {
+                start_byte: 0,
+                end_byte: data.len(),
+                start_line: 0,
+                format: TraceFormat::Unidbg,
+                data_only: true,
+                no_prune: false,
+                skip_strings: true,
+                progress_cb: None,
+            },
         );
 
         // Fully unresolved load
@@ -1047,20 +1059,22 @@ mod tests {
     #[test]
     fn test_scan_chunk_with_start_line() {
         // Test that line numbering starts at start_line
-        let lines = vec![mov_line("x8", 5), mov_line("x9", 10)];
+        let lines = [mov_line("x8", 5), mov_line("x9", 10)];
         let trace = lines.join("\n");
         let data = trace.as_bytes();
 
         let result = scan_chunk(
             data,
-            0,
-            data.len(),
-            100,
-            TraceFormat::Unidbg,
-            false,
-            false,
-            true,
-            None,
+            ScanChunkConfig {
+                start_byte: 0,
+                end_byte: data.len(),
+                start_line: 100,
+                format: TraceFormat::Unidbg,
+                data_only: false,
+                no_prune: false,
+                skip_strings: true,
+                progress_cb: None,
+            },
         );
 
         assert_eq!(result.start_line, 100);
@@ -1080,7 +1094,7 @@ mod tests {
 
     #[test]
     fn test_scan_chunk_calltree_events() {
-        let lines = vec![
+        let lines = [
             r#"[00:00:00 001][lib.so 0x100] [94000000] 0x40000100: "bl #0x40000200" => x30=0x40000104"#.to_string(),
         ];
         let trace = lines.join("\n");
@@ -1088,14 +1102,16 @@ mod tests {
 
         let result = scan_chunk(
             data,
-            0,
-            data.len(),
-            0,
-            TraceFormat::Unidbg,
-            false,
-            false,
-            true,
-            None,
+            ScanChunkConfig {
+                start_byte: 0,
+                end_byte: data.len(),
+                start_line: 0,
+                format: TraceFormat::Unidbg,
+                data_only: false,
+                no_prune: false,
+                skip_strings: true,
+                progress_cb: None,
+            },
         );
 
         // Should have CallTreeEvent::SetRootAddr, LineAddr, and Call
@@ -1113,7 +1129,7 @@ mod tests {
 
     #[test]
     fn test_scan_chunk_control_dep_tracking() {
-        let lines = vec![
+        let lines = [
             r#"[00:00:00 001][lib.so 0x300] [6b09011f] 0x40000300: "cmp x8, x9" x8=0x5 x9=0xa => nzcv=0x80000000"#.to_string(),
             r#"[00:00:00 001][lib.so 0x304] [54000040] 0x40000304: "b.eq #0x4000030c" nzcv=0x40000000"#.to_string(),
             mov_line("x0", 42),
@@ -1123,14 +1139,16 @@ mod tests {
 
         let result = scan_chunk(
             data,
-            0,
-            data.len(),
-            0,
-            TraceFormat::Unidbg,
-            false,
-            false,
-            true,
-            None,
+            ScanChunkConfig {
+                start_byte: 0,
+                end_byte: data.len(),
+                start_line: 0,
+                format: TraceFormat::Unidbg,
+                data_only: false,
+                no_prune: false,
+                skip_strings: true,
+                progress_cb: None,
+            },
         );
 
         // b.eq sets first_local_cond_branch
@@ -1139,7 +1157,7 @@ mod tests {
         // mov x0 (line 2) should have control dep on b.eq (line 1)
         let row2 = result.deps.row(2);
         assert!(
-            row2.iter().any(|&d| d == (1 | CONTROL_DEP_BIT)),
+            row2.contains(&(1 | CONTROL_DEP_BIT)),
             "mov should have control dep on b.eq"
         );
     }
@@ -1159,14 +1177,16 @@ mod tests {
 
         let result = scan_chunk(
             data,
-            0,
-            data.len(),
-            0,
-            TraceFormat::Gumtrace,
-            true,
-            false,
-            true,
-            None,
+            ScanChunkConfig {
+                start_byte: 0,
+                end_byte: data.len(),
+                start_line: 0,
+                format: TraceFormat::Gumtrace,
+                data_only: true,
+                no_prune: false,
+                skip_strings: true,
+                progress_cb: None,
+            },
         );
         let deps = result.deps.row(6);
 
@@ -1177,7 +1197,19 @@ mod tests {
     #[test]
     fn test_scan_chunk_empty_trace() {
         let data = b"";
-        let result = scan_chunk(data, 0, 0, 0, TraceFormat::Unidbg, false, false, true, None);
+        let result = scan_chunk(
+            data,
+            ScanChunkConfig {
+                start_byte: 0,
+                end_byte: 0,
+                start_line: 0,
+                format: TraceFormat::Unidbg,
+                data_only: false,
+                no_prune: false,
+                skip_strings: true,
+                progress_cb: None,
+            },
+        );
         assert_eq!(result.start_line, 0);
         assert_eq!(result.end_line, 0);
         assert!(result.deps.is_empty());

@@ -156,14 +156,13 @@ fn rendered_search_text(
 /// 轻量搜索：只收集匹配的 seq 号，不解析行内容
 fn search_chunk_seqs(
     data: &[u8],
-    start_seq: u32,
-    end_seq: u32,
-    start_offset: usize,
+    chunk: (u32, u32, usize),
     mode: &SearchMode,
     consumed_seqs: &HashSet<u32>,
     call_search_texts: &HashMap<u32, String>,
     max_results_per_chunk: usize,
 ) -> (Vec<u32>, u32) {
+    let (start_seq, end_seq, start_offset) = chunk;
     let mut match_seqs = Vec::new();
     let mut total_matches = 0u32;
     let mut pos = start_offset;
@@ -250,7 +249,7 @@ impl TraceEngine {
                 state.line_index_view().map(|li| {
                     let data: &[u8] = &state.mmap;
                     let num_chunks = num_cpus.min(16);
-                    let lines_per_chunk = (total_lines as usize + num_chunks - 1) / num_chunks;
+                    let lines_per_chunk = (total_lines as usize).div_ceil(num_chunks);
                     let mut result = Vec::with_capacity(num_chunks);
                     for i in 0..num_chunks {
                         let start_seq = (i * lines_per_chunk) as u32;
@@ -284,12 +283,10 @@ impl TraceEngine {
         let (all_seqs, total_matches) = if let Some(chunks) = chunks {
             let chunk_results: Vec<(Vec<u32>, u32)> = chunks
                 .par_iter()
-                .map(|&(start_seq, end_seq, start_offset)| {
+                .map(|&chunk| {
                     search_chunk_seqs(
                         &data,
-                        start_seq,
-                        end_seq,
-                        start_offset,
+                        chunk,
                         &mode,
                         &consumed_seqs,
                         &call_search_texts,
@@ -313,9 +310,7 @@ impl TraceEngine {
         } else {
             let (match_seqs, total_matches) = search_chunk_seqs(
                 &data,
-                0,
-                total_lines,
-                0,
+                (0, total_lines, 0),
                 &mode,
                 &consumed_seqs,
                 &call_search_texts,
@@ -456,7 +451,7 @@ impl TraceEngine {
                     );
                     let annotation_match = call_search_texts
                         .get(&seq)
-                        .map_or(false, |text| matches_mode_str(&mode, text));
+                        .is_some_and(|text| matches_mode_str(&mode, text));
                     if annotation_match
                         && !matches_mode_str(&mode, &rendered_text)
                         && !tooltip.is_empty()

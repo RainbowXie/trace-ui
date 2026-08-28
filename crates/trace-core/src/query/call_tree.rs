@@ -22,6 +22,12 @@ pub struct CallTreeBuilder {
     current_id: u32,
 }
 
+impl Default for CallTreeBuilder {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl CallTreeBuilder {
     pub fn new() -> Self {
         let root = CallTreeNode {
