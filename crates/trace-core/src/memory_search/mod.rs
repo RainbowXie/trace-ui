@@ -37,7 +37,9 @@ const MAX_PATTERN_SIZE: usize = 64 * 1024 * 1024;
 const MAX_PUBLIC_RESPONSE_BYTES: usize = 8 * 1024 * 1024;
 pub(crate) const ANCHOR_SIZE: usize = 8;
 pub(crate) const CACHE_MAGIC: &[u8; 8] = b"TMSRCH01";
-pub(crate) const CACHE_COMPAT_VERSION: &[u8] = b"memory-search-v4";
+// v5：扫描语义变为 fail-closed（整份输入无可识别指令行即报错）。v4 及更早
+// 的缓存条目可能是由旧语义写下的“total=0”，必须整体作废重扫。
+pub(crate) const CACHE_COMPAT_VERSION: &[u8] = b"memory-search-v5";
 /// header 字段区长度；其后紧跟 32 字节的字段区 SHA-256 摘要。
 pub(crate) const CACHE_HEADER_LEN: usize = 120;
 /// 摘要长度；损坏的 count/格式位/过滤器若未同步重算摘要即被拒绝并重建。

@@ -117,6 +117,27 @@ impl CallAnnotation {
     }
 }
 
+/// 判断一行是否带有指定格式的指令行结构签名。
+/// detect_format 与扫描侧的可识别行统计必须使用同一条规则，防止两处
+/// 判定漂移（扫描侧用它把“带引号的普通文本行”排除在可识别行之外）。
+pub fn line_matches_format_signature(line: &[u8], format: TraceFormat) -> bool {
+    if line.is_empty() {
+        return false;
+    }
+    match format {
+        // unidbg: starts with [HH:MM:SS (timestamp)
+        TraceFormat::Unidbg => {
+            line.len() > 10
+                && line[0] == b'['
+                && line[1].is_ascii_digit()
+                && line[2].is_ascii_digit()
+                && line[3] == b':'
+        }
+        // gumtrace: starts with [module], has ! (address separator)
+        TraceFormat::Gumtrace => line[0] == b'[' && memchr::memchr(b'!', line).is_some(),
+    }
+}
+
 /// 从文件的前几行自动检测 trace 格式
 pub fn detect_format(data: &[u8]) -> TraceFormat {
     let mut pos = 0;
@@ -128,17 +149,10 @@ pub fn detect_format(data: &[u8]) -> TraceFormat {
         let line = &data[pos..end];
 
         if !line.is_empty() {
-            // unidbg: starts with [HH:MM:SS (timestamp)
-            if line.len() > 10
-                && line[0] == b'['
-                && line[1].is_ascii_digit()
-                && line[2].is_ascii_digit()
-                && line[3] == b':'
-            {
+            if line_matches_format_signature(line, TraceFormat::Unidbg) {
                 return TraceFormat::Unidbg;
             }
-            // gumtrace: starts with [module], has ! (address separator)
-            if line[0] == b'[' && memchr::memchr(b'!', line).is_some() {
+            if line_matches_format_signature(line, TraceFormat::Gumtrace) {
                 return TraceFormat::Gumtrace;
             }
         }
@@ -146,7 +160,34 @@ pub fn detect_format(data: &[u8]) -> TraceFormat {
         pos = end + 1;
         checked += 1;
     }
+    // 前 20 行窗口内没有格式特征时回退全扫：gumtrace 函数入口区可以连续出现
+    // 大量 call/args/ret 特殊行（不以 [ 开头），首条指令行可能在窗口之外。
+    // 回退只识别 gumtrace 指令行签名（[module] 0xABS!0xOFFSET），找不到再按
+    // Unidbg 默认处理；不可识别输入最终由扫描侧"无可识别指令行"拒绝。
+    if gumtrace_instruction_signature_in(data) {
+        return TraceFormat::Gumtrace;
+    }
     TraceFormat::Unidbg // default
+}
+
+/// 在整个输入中查找 gumtrace 指令行签名：以 [ 开头且包含 ! 地址分隔符。
+/// 只用于 detect_format 的窗口回退，不做逐行解析。
+fn gumtrace_instruction_signature_in(data: &[u8]) -> bool {
+    let mut pos = 0;
+    loop {
+        let end = match memchr::memchr(b'\n', &data[pos..]) {
+            Some(rel) => pos + rel,
+            None => data.len(),
+        };
+        let line = &data[pos..end];
+        if line_matches_format_signature(line, TraceFormat::Gumtrace) {
+            return true;
+        }
+        if end == data.len() {
+            return false;
+        }
+        pos = end + 1;
+    }
 }
 
 /// Returns true if line doesn't start with `[` (i.e., not an instruction line).
@@ -654,6 +695,31 @@ mod tests {
     fn test_detect_format_gumtrace() {
         let data = b"[libmetasec_ov.so] 0x7522e85ce0!0x82ce0 sub x0, x29, #0x80; x0=0x75150f2e20\n";
         assert_eq!(detect_format(data), TraceFormat::Gumtrace);
+    }
+
+    #[test]
+    fn test_detect_format_gumtrace_when_special_lines_exceed_the_window() {
+        // 函数入口区可以连续出现大量 call/args/ret 特殊行，首条指令行可能在
+        // 前 20 行窗口之外。检测必须扫到第一条指令行，否则会误判为 Unidbg，
+        // 整份合法 trace 被当作不可识别输入拒绝。
+        let mut data = String::new();
+        for i in 0..25 {
+            data.push_str(&format!(
+                "call func: f{i}(0x1000)\nargs0: 0x1000\nret: 0x1\n"
+            ));
+        }
+        data.push_str(
+            "[lib.so] 0x7522f46438!0x143438 str w0, [x1]; w0=0x04030201 x1=0x2000 mem_w=0x2000\n",
+        );
+        assert_eq!(detect_format(data.as_bytes()), TraceFormat::Gumtrace);
+    }
+
+    #[test]
+    fn test_detect_format_special_lines_only_falls_back_to_unidbg() {
+        // 全特殊行（无任何指令）没有可搜索内容：检测结果不重要，扫描侧
+        // 必须按"无可识别指令行"拒绝，而不是返回空结果。
+        let data = b"call func: f0(0x1000)\nargs0: 0x1000\nret: 0x1\n";
+        assert_eq!(detect_format(data), TraceFormat::Unidbg);
     }
 
     #[test]

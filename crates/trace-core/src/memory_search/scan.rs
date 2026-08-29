@@ -256,6 +256,12 @@ pub(crate) fn scan_memory_with_sink(
     mut sink: impl FnMut(MemoryOccurrence) -> Result<()>,
 ) -> Result<()> {
     let mut state = SearchState::new(&options.pattern);
+    // fail-closed：整份输入必须有至少一条可识别指令行。任意普通文本
+    // （如误传的 Cargo.toml）在 detect_format 默认回退下每行都解析失败、
+    // 会被静默跳过；若因此返回 total=0，下游会把“输入不是 trace”误判为
+    // “trace 中没有目标”并持久化空结果。指令行为 0 必须报错而不是返回
+    // 空结果（合法 trace 有指令行但 0 匹配不受影响）。
+    let mut recognized_instruction_lines = 0u64;
 
     for (seq_index, line_bytes) in data.split(|byte| *byte == b'\n').enumerate() {
         let seq = u32::try_from(seq_index).map_err(|_| TraceError::ParseError {
@@ -288,6 +294,13 @@ pub(crate) fn scan_memory_with_sink(
             }
             continue;
         };
+        // 光解析成功不够：unidbg 解析器会抽取任意引号文本当反汇编，
+        // 普通文本（如 TOML 的 members = ["..."]）也能“解析成功”。
+        // 可识别指令行必须同时带该格式的行首结构签名（与 detect_format
+        // 同一条规则，见 line_matches_format_signature）。
+        if trace_parser::gumtrace::line_matches_format_signature(line_bytes, format) {
+            recognized_instruction_lines = recognized_instruction_lines.saturating_add(1);
+        }
         let Some(mem) = parsed.mem_op.as_ref() else {
             if contains_memory_event {
                 return Err(TraceError::ParseError {
@@ -312,6 +325,13 @@ pub(crate) fn scan_memory_with_sink(
             options.memory_range,
             &mut sink,
         )?;
+    }
+    if recognized_instruction_lines == 0 {
+        return Err(TraceError::ParseError {
+            line: None,
+            detail: "no recognizable instruction lines: input is not a supported instruction trace"
+                .to_string(),
+        });
     }
     Ok(())
 }

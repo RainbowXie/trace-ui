@@ -63,6 +63,86 @@ fn search_both(uni_trace: &str, gum_trace: &str, pattern: &[u8]) -> (u32, u32) {
 }
 
 #[test]
+fn garbage_input_fails_closed_instead_of_returning_empty_total() {
+    // 任意普通文本（如 Cargo.toml）不是 trace：必须失败，而不是把它当成
+    // "trace 中没有目标"返回 total=0（下游会持久化空结果，误判输入语义）。
+    let garbage =
+        b"[package]\nname = \"example\"\nversion = \"0.1.0\"\n[dependencies]\nfoo = \"1\"\n";
+    let err = search_memory(garbage, TraceFormat::Unidbg, options(&[1, 2, 3, 4]))
+        .expect_err("garbage input must fail closed");
+    assert!(
+        err.to_string().contains("no recognizable instruction"),
+        "unexpected error: {err}"
+    );
+}
+
+#[test]
+fn empty_input_fails_closed() {
+    let err = search_memory(b"", TraceFormat::Unidbg, options(&[1, 2, 3, 4]))
+        .expect_err("empty input must fail closed");
+    assert!(
+        err.to_string().contains("no recognizable instruction"),
+        "unexpected error: {err}"
+    );
+}
+
+#[test]
+fn valid_trace_without_matches_still_returns_zero_total() {
+    // 合法 trace（有指令行）但没有任何匹配：total=0 是合法结果，必须保持。
+    let trace = write_line(0, "0x04030201");
+    let result = search_memory(
+        format!("{trace}\n").as_bytes(),
+        TraceFormat::Unidbg,
+        options(&[9, 9, 9, 9]),
+    )
+    .expect("valid trace without matches");
+    assert_eq!(result.total, 0);
+}
+
+#[test]
+fn gumtrace_with_many_leading_special_lines_still_finds_matches() {
+    // 函数入口区的特殊行（call/args/ret）数量超过 detect_format 的窗口后，
+    // 检测必须回退全扫到首条指令行，扫描按 Gumtrace 解析并找到匹配。
+    let mut trace = String::new();
+    for i in 0..25 {
+        trace.push_str(&format!(
+            "call func: f{i}(0x1000)\nargs0: 0x1000\nret: 0x1\n"
+        ));
+    }
+    trace.push_str(&gum_write_insn(
+        "str w0, [x1]",
+        "w0=0x04030201 x1=0x2000",
+        0x2000,
+    ));
+    let result = search_memory(
+        format!("{trace}\n").as_bytes(),
+        TraceFormat::Gumtrace,
+        options(&[1, 2, 3, 4]),
+    )
+    .expect("gumtrace with many leading special lines");
+    assert_eq!(result.total, 1);
+    assert_eq!(result.matches[0].address, 0x2000);
+}
+
+#[test]
+fn unidbg_trace_with_leading_special_lines_still_works() {
+    // Unidbg 侧对照：即使检测到的是 Unidbg，普通日志/空行混在指令行中间
+    // 不影响识别（有指令行即合法）。
+    let mut trace = String::new();
+    for i in 0..25 {
+        trace.push_str(&format!("call func: f{i}(0x1000)\n"));
+    }
+    trace.push_str(&write_line(0, "0x04030201"));
+    let result = search_memory(
+        format!("{trace}\n").as_bytes(),
+        TraceFormat::Unidbg,
+        options(&[1, 2, 3, 4]),
+    )
+    .expect("unidbg trace with special lines");
+    assert_eq!(result.total, 1);
+}
+
+#[test]
 fn exclusive_scalar_store_writes_data_register_not_status() {
     for insn in ["stxr w0, w1, [x2]", "stlxr w0, w1, [x2]"] {
         let (uni, gum) = search_both(

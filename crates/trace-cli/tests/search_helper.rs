@@ -386,3 +386,165 @@ fn helper_reuses_verified_fingerprint_on_the_second_page() {
 
     let _ = std::fs::remove_dir_all(root);
 }
+
+#[test]
+fn helper_fails_closed_on_garbage_trace_instead_of_empty_total() {
+    let root = std::env::temp_dir().join(format!(
+        "trace-ui-helper-garbage-{}-{}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .expect("clock")
+            .as_nanos()
+    ));
+    std::fs::create_dir_all(&root).expect("temp root");
+    let trace_path = root.join("trace.log");
+    let pattern_path = root.join("pattern.bin");
+    // 普通文本（模拟误把 Cargo.toml 之类的文件当 trace）：不得返回 total=0。
+    std::fs::write(
+        &trace_path,
+        "[package]\nname = \"example\"\nversion = \"0.1.0\"\n",
+    )
+    .expect("trace");
+    std::fs::write(&pattern_path, [1u8, 2, 3, 4]).expect("pattern");
+    let trace = std::fs::File::open(&trace_path).expect("open trace");
+    let pattern = std::fs::File::open(&pattern_path).expect("open pattern");
+
+    let output = run_helper(
+        trace.as_raw_fd(),
+        pattern.as_raw_fd(),
+        b"{\"offset\":0,\"limit\":1}\n",
+    );
+    assert!(
+        !output.status.success(),
+        "garbage trace must fail: {:?}",
+        String::from_utf8_lossy(&output.stdout)
+    );
+    assert!(
+        String::from_utf8_lossy(&output.stderr).contains("recognizable instruction"),
+        "stderr must explain the failure: {:?}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let _ = std::fs::remove_dir_all(root);
+}
+
+#[test]
+fn helper_fails_closed_on_empty_trace() {
+    let root = std::env::temp_dir().join(format!(
+        "trace-ui-helper-empty-{}-{}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .expect("clock")
+            .as_nanos()
+    ));
+    std::fs::create_dir_all(&root).expect("temp root");
+    let trace_path = root.join("trace.log");
+    let pattern_path = root.join("pattern.bin");
+    std::fs::write(&trace_path, "").expect("trace");
+    std::fs::write(&pattern_path, [1u8, 2, 3, 4]).expect("pattern");
+    let trace = std::fs::File::open(&trace_path).expect("open trace");
+    let pattern = std::fs::File::open(&pattern_path).expect("open pattern");
+
+    let output = run_helper(
+        trace.as_raw_fd(),
+        pattern.as_raw_fd(),
+        b"{\"offset\":0,\"limit\":1}\n",
+    );
+    assert!(
+        !output.status.success(),
+        "empty trace must fail: {:?}",
+        String::from_utf8_lossy(&output.stdout)
+    );
+
+    let _ = std::fs::remove_dir_all(root);
+}
+
+#[test]
+fn helper_returns_zero_total_for_valid_trace_without_matches() {
+    let root = std::env::temp_dir().join(format!(
+        "trace-ui-helper-nomatch-{}-{}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .expect("clock")
+            .as_nanos()
+    ));
+    std::fs::create_dir_all(&root).expect("temp root");
+    let trace_path = root.join("trace.log");
+    let pattern_path = root.join("pattern.bin");
+    // 合法 Unidbg trace（有指令行）但没有匹配：total=0 是合法结果。
+    std::fs::write(
+        &trace_path,
+        "[00:00:00 000][lib.so 0x100] [00000000] 0x40000100: \"str w0, [x1]\" ; mem[WRITE] abs=0x2000 w0=0x04030201 x1=0x3000 => w0=0x04030201\n",
+    )
+    .expect("trace");
+    std::fs::write(&pattern_path, [9u8, 9, 9, 9]).expect("pattern");
+    let trace = std::fs::File::open(&trace_path).expect("open trace");
+    let pattern = std::fs::File::open(&pattern_path).expect("open pattern");
+
+    let output = run_helper(
+        trace.as_raw_fd(),
+        pattern.as_raw_fd(),
+        b"{\"offset\":0,\"limit\":1}\n",
+    );
+    assert!(
+        output.status.success(),
+        "valid trace without matches must succeed: {:?}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let body = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        body.contains("\"matches\":[]") && body.contains("\"total\":0"),
+        "valid trace without matches must report total=0: {body}"
+    );
+
+    let _ = std::fs::remove_dir_all(root);
+}
+
+#[test]
+fn helper_finds_matches_in_gumtrace_with_many_leading_special_lines() {
+    let root = std::env::temp_dir().join(format!(
+        "trace-ui-helper-gum-special-{}-{}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .expect("clock")
+            .as_nanos()
+    ));
+    std::fs::create_dir_all(&root).expect("temp root");
+    let trace_path = root.join("trace.log");
+    let pattern_path = root.join("pattern.bin");
+    let mut trace = String::new();
+    for i in 0..25 {
+        trace.push_str(&format!(
+            "call func: f{i}(0x1000)\nargs0: 0x1000\nret: 0x1\n"
+        ));
+    }
+    trace.push_str(
+        "[lib.so] 0x7522f46438!0x143438 str w0, [x1]; w0=0x04030201 x1=0x2000 mem_w=0x2000\n",
+    );
+    std::fs::write(&trace_path, trace).expect("trace");
+    std::fs::write(&pattern_path, [1u8, 2, 3, 4]).expect("pattern");
+    let trace = std::fs::File::open(&trace_path).expect("open trace");
+    let pattern = std::fs::File::open(&pattern_path).expect("open pattern");
+
+    let output = run_helper(
+        trace.as_raw_fd(),
+        pattern.as_raw_fd(),
+        b"{\"offset\":0,\"limit\":1}\n",
+    );
+    assert!(
+        output.status.success(),
+        "gumtrace with leading special lines must work: {:?}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let body = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        body.contains("\"total\":1") && body.contains("\"seq\":75"),
+        "gumtrace match must be found after special lines: {body}"
+    );
+
+    let _ = std::fs::remove_dir_all(root);
+}
