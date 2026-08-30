@@ -1,3 +1,7 @@
+/// 从 SIMD 向量指令的排列说明符推导每个寄存器的访问宽度。
+/// - 128-bit 排列 (16b/8h/4s/2d) → 16
+/// - 64-bit 排列 (8b/4h/2s/1d) → 8
+/// - 其他（lane 说明符如 .s、.d 等）→ None
 pub(crate) fn simd_arrangement_total_width(operand_text: &str) -> Option<u8> {
     let first_tok = operand_text.split(',').next()?.trim();
     // 先剥 lane 下标再剥闭括号：单 lane 形式的首 token 形如 `{v0.16b}[2]`。

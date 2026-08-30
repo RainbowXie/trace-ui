@@ -1,5 +1,7 @@
 use memchr::memchr;
 use memchr::memmem;
+/// 从行中提取引号内的反汇编文本，同时返回第二个引号的位置。
+/// 返回 (disasm_str, quote2_position) 以便后续搜索从 quote2 之后继续。
 pub(crate) fn find_disasm_with_pos(line: &[u8]) -> Option<(&str, usize)> {
     // unidbg 格式前 ~40 字节是固定格式（时间戳+模块名+地址），引号不会出现在这里
     let skip = 40.min(line.len());
