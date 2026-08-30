@@ -87,6 +87,21 @@ fn empty_input_fails_closed() {
 }
 
 #[test]
+fn gumtrace_lookalike_text_fails_closed() {
+    // 审查回归：`[x] ! "mov x0, x1"` 此前同时通过 Gumtrace 签名与宽松解析，
+    // 会被当成合法 trace 返回 total=0。收紧后的结构前缀必须拒绝它。
+    let lookalike = b"[x] ! \"mov x0, x1\"\n[x] ! \"str w0, [x1]\"\n";
+    for format in [TraceFormat::Gumtrace, TraceFormat::Unidbg] {
+        let err = search_memory(lookalike, format, options(&[1, 2, 3, 4]))
+            .expect_err("gumtrace-lookalike text must fail closed");
+        assert!(
+            err.to_string().contains("no recognizable instruction"),
+            "unexpected error: {err}"
+        );
+    }
+}
+
+#[test]
 fn valid_trace_without_matches_still_returns_zero_total() {
     // 合法 trace（有指令行）但没有任何匹配：total=0 是合法结果，必须保持。
     let trace = write_line(0, "0x04030201");

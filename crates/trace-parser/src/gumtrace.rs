@@ -117,6 +117,37 @@ impl CallAnnotation {
     }
 }
 
+/// gumtrace 指令行的结构前缀：`[module] 0xABS!0xOFFSET `（模块名、空格、
+/// 十六进制绝对地址、`!`、十六进制 offset、空格）。detect_format、扫描侧
+/// 可识别行统计与行解析共用这一条规则，防止普通文本（如 `[x] ! "mov x0"`）
+/// 被误识别为指令行。返回指令文本的起始下标。
+pub(crate) fn gumtrace_instruction_prefix(line: &[u8]) -> Option<usize> {
+    if line.first() != Some(&b'[') {
+        return None;
+    }
+    let close = memchr::memchr(b']', line)?;
+    // 模块名与绝对地址之间必须是 "] "。
+    if line.get(close + 1) != Some(&b' ') {
+        return None;
+    }
+    let abs_start = close + 2;
+    let bang = memchr::memchr(b'!', &line[abs_start..])? + abs_start;
+    if !is_hex_prefixed(&line[abs_start..bang]) {
+        return None;
+    }
+    let offset_start = bang + 1;
+    let space = memchr::memchr(b' ', &line[offset_start..])? + offset_start;
+    if !is_hex_prefixed(&line[offset_start..space]) {
+        return None;
+    }
+    Some(space + 1)
+}
+
+/// `0x` 前缀 + 至少一位、且全部是十六进制数字。
+fn is_hex_prefixed(text: &[u8]) -> bool {
+    text.len() > 2 && text.starts_with(b"0x") && text[2..].iter().all(u8::is_ascii_hexdigit)
+}
+
 /// 判断一行是否带有指定格式的指令行结构签名。
 /// detect_format 与扫描侧的可识别行统计必须使用同一条规则，防止两处
 /// 判定漂移（扫描侧用它把“带引号的普通文本行”排除在可识别行之外）。
@@ -133,8 +164,8 @@ pub fn line_matches_format_signature(line: &[u8], format: TraceFormat) -> bool {
                 && line[2].is_ascii_digit()
                 && line[3] == b':'
         }
-        // gumtrace: starts with [module], has ! (address separator)
-        TraceFormat::Gumtrace => line[0] == b'[' && memchr::memchr(b'!', line).is_some(),
+        // gumtrace: [module] 0xABS!0xOFFSET <insn>
+        TraceFormat::Gumtrace => gumtrace_instruction_prefix(line).is_some(),
     }
 }
 
@@ -276,28 +307,9 @@ fn parse_line_gumtrace_inner(raw: &str, extract_regs: bool) -> Option<ParsedLine
         return None;
     }
 
-    // 1. Extract module name from [module_name]
-    let close_bracket = memchr::memchr(b']', bytes)?;
-    // After "] " we expect the address
-    let after_module = close_bracket + 2; // skip "] "
-    if after_module >= bytes.len() {
-        return None;
-    }
-
-    // 2. Extract absolute address and offset: 0xABS!0xOFFSET
-    // Find the '!' separator
-    let rest = &bytes[after_module..];
-    let excl_pos = memchr::memchr(b'!', rest)?;
-    let abs_excl = after_module + excl_pos;
-
-    // Find the space after offset
-    let after_excl = abs_excl + 1;
-    let space_after_offset = memchr::memchr(b' ', &bytes[after_excl..])
-        .map(|p| after_excl + p)
-        .unwrap_or(bytes.len());
-
-    // 3. Extract instruction text: from after offset space to ';' (or end of line)
-    let insn_start = space_after_offset + 1;
+    // 1-3. 结构前缀 `[module] 0xABS!0xOFFSET `（模块名/空格/十六进制绝对
+    // 地址/!/十六进制 offset/空格）由共用规则验证，返回指令文本起始位置。
+    let insn_start = gumtrace_instruction_prefix(bytes)?;
     if insn_start >= bytes.len() {
         return None;
     }
@@ -720,6 +732,37 @@ mod tests {
         // 必须按"无可识别指令行"拒绝，而不是返回空结果。
         let data = b"call func: f0(0x1000)\nargs0: 0x1000\nret: 0x1\n";
         assert_eq!(detect_format(data), TraceFormat::Unidbg);
+    }
+
+    #[test]
+    fn test_gumtrace_signature_rejects_text_with_a_bare_bang() {
+        // 审查回归：`[x] ! "mov x0, x1"` 这类普通文本此前同时通过签名
+        // （`[` + `!`）与宽松解析，会被误识别为合法 Gumtrace 指令行。
+        // 结构前缀必须是 `[module] 0xABS!0xOFFSET `（模块、空格、十六进制
+        // 绝对地址、!、十六进制 offset、空格）。
+        let garbage = b"[x] ! \"mov x0, x1\"";
+        assert!(parse_line_gumtrace(std::str::from_utf8(garbage).unwrap()).is_none());
+        assert!(!line_matches_format_signature(
+            garbage,
+            TraceFormat::Gumtrace
+        ));
+        // 缺空格 / 非十六进制地址 / 非十六进制 offset 同样拒绝
+        assert!(!line_matches_format_signature(
+            b"[mod]0x1!0x2 nop",
+            TraceFormat::Gumtrace
+        ));
+        assert!(!line_matches_format_signature(
+            b"[mod] zz!0x2 nop",
+            TraceFormat::Gumtrace
+        ));
+        assert!(!line_matches_format_signature(
+            b"[mod] 0x1!yy nop",
+            TraceFormat::Gumtrace
+        ));
+        // 合法行保持识别
+        let good = b"[lib.so] 0x7522f46438!0x143438 str w0, [x1]";
+        assert!(line_matches_format_signature(good, TraceFormat::Gumtrace));
+        assert!(parse_line_gumtrace(std::str::from_utf8(good).unwrap()).is_some());
     }
 
     #[test]
