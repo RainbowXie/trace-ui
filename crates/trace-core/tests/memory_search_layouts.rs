@@ -2,7 +2,7 @@
 //! 零寄存器、SIMD structure/lane/replicate、atomic RMW 与畸形输入 fail-closed。
 
 use trace_core::memory_search::{
-    search_memory, search_memory_cached_occurrences, MemorySearchOptions,
+    search_memory, search_memory_cached_occurrences, MemorySearchOptions, MemorySearchRw,
 };
 use trace_parser::types::TraceFormat;
 
@@ -84,6 +84,20 @@ fn empty_input_fails_closed() {
         err.to_string().contains("no recognizable instruction"),
         "unexpected error: {err}"
     );
+}
+
+#[test]
+fn unidbg_module_less_instruction_lines_are_searchable() {
+    // 审查回归：unidbg 只在地址属于模块/SVC 区时输出模块括号，匿名/JIT
+    // 代码的指令行直接是线程括号（[07:17:13 488][e00300b9] 0x…: "…"）。
+    // 此前严格前缀要求模块括号，这类合法行解析失败并在带 mem 标记时
+    // 让整份搜索报错。
+    let trace = b"[07:17:13 488][e00300b9] 0x40000100: \"str w0, [x1]\" ; mem[WRITE] abs=0x2000 w0=0x04030201 x1=0x2000 => w0=0x04030201\n";
+    let result = search_memory(trace, TraceFormat::Unidbg, options(&[1, 2, 3, 4]))
+        .expect("module-less unidbg line must parse");
+    assert_eq!(result.total, 1);
+    assert_eq!(result.matches[0].address, 0x2000);
+    assert_eq!(result.matches[0].rw, MemorySearchRw::Write);
 }
 
 #[test]

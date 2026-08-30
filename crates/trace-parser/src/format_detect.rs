@@ -38,9 +38,10 @@ fn is_hex_prefixed(text: &[u8]) -> bool {
 }
 
 /// unidbg 指令行的结构前缀：
-/// `[HH:MM:SS NNN][module …] [thread-hex] 0xADDR: "`（时间戳括号、模块括号、
-/// 空格+线程/上下文十六进制括号、空格+十六进制地址+冒号+空格+引号）。
-/// 时间戳与毫秒/序号段之间接受空格或点（两种真实 unidbg 输出都存在）。
+/// `[HH:MM:SS NNN][module …] [thread-hex] 0xADDR: "` 或无模块形态
+/// `[HH:MM:SS NNN][thread-hex] 0xADDR: "`。模块括号只在地址属于模块/SVC
+/// 区时输出（unidbg ARM.java 的行为）；匿名/JIT/动态解包代码的指令行
+/// 直接是线程括号。时间戳与毫秒/序号段之间接受空格或点。
 /// 返回反汇编文本引号的位置。detect_format、扫描侧可识别行统计与行解析
 /// 共用这一条规则，防止 `[12:……] "任意文本"` 这类普通日志被误识别。
 pub(crate) fn unidbg_instruction_prefix(line: &[u8]) -> Option<usize> {
@@ -61,27 +62,34 @@ pub(crate) fn unidbg_instruction_prefix(line: &[u8]) -> Option<usize> {
     {
         return None;
     }
-    // [module …]（紧跟时间戳括号，内容不限但非空）
+    // 时间戳后一至两个括号：有模块形态 `[module] [thread]`，无模块形态
+    // `[thread]`。线程括号内容必须是十六进制；后随 ` [` 时第一括号是模块，
+    // 否则第一括号就是线程。
     if line.get(14) != Some(&b'[') {
         return None;
     }
-    let module_close = memchr::memchr(b']', &line[15..])? + 15;
-    if module_close == 15 {
+    let close1 = memchr::memchr(b']', &line[15..])? + 15;
+    if close1 == 15 {
         return None;
     }
-    // ` [<hex>]`（线程/上下文括号）
-    let thread_open = module_close + 1;
-    if line.get(thread_open) != Some(&b' ') || line.get(thread_open + 1) != Some(&b'[') {
-        return None;
-    }
-    let thread_close = memchr::memchr(b']', &line[thread_open + 2..])? + thread_open + 2;
-    if thread_close == thread_open + 2
-        || !line[thread_open + 2..thread_close]
-            .iter()
-            .all(|b: &u8| b.is_ascii_hexdigit())
+    let thread_close = if line.get(close1 + 1) == Some(&b' ') && line.get(close1 + 2) == Some(&b'[')
     {
-        return None;
-    }
+        let open2 = close1 + 2;
+        let close2 = memchr::memchr(b']', &line[open2 + 1..])? + open2 + 1;
+        if close2 == open2 + 1
+            || !line[open2 + 1..close2]
+                .iter()
+                .all(|b: &u8| b.is_ascii_hexdigit())
+        {
+            return None;
+        }
+        close2
+    } else {
+        if !line[15..close1].iter().all(|b: &u8| b.is_ascii_hexdigit()) {
+            return None;
+        }
+        close1
+    };
     // ` 0xADDR: "`（地址括号外、冒号、空格、引号）
     let rest = line.get(thread_close + 1..)?.strip_prefix(b" 0x")?;
     let colon = memchr::memchr(b':', rest)?;
@@ -261,6 +269,16 @@ mod tests {
         ));
         assert!(line_matches_format_signature(
             b"[22:39:18.210][lib.so 0x100] [8b090108] 0x40000108: \"add x8, x8, x9\"",
+            TraceFormat::Unidbg
+        ));
+        // 无模块形态（匿名/JIT 代码段，unidbg 只在地址属于模块时输出模块括号）
+        assert!(line_matches_format_signature(
+            b"[07:17:13 488][e00300b9] 0x40000100: \"str w0, [x1]\"",
+            TraceFormat::Unidbg
+        ));
+        // 单括号但内容非十六进制（不是线程括号）仍拒绝
+        assert!(!line_matches_format_signature(
+            b"[07:17:13 488][not-hex] 0x40000100: \"nop\"",
             TraceFormat::Unidbg
         ));
     }
