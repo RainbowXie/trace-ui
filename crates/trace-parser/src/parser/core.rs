@@ -24,10 +24,14 @@ pub fn parse_line_full(raw: &str) -> Option<ParsedLine> {
 }
 
 fn parse_line_inner(raw: &str, extract_regs: bool) -> Option<ParsedLine> {
+    // 1. 结构前缀（[HH:MM:SS NNN][module] [thread] 0xADDR: "）由与
+    // detect_format/扫描统计共用的规则验证，直接给出反汇编引号位置；
+    // 带引号的普通日志行（如 [12:…] "hello"）在这里被拒绝。
     let bytes = raw.as_bytes();
-
-    // 1. Extract disassembly inside quotes + cursor position after quote2
-    let (disasm, q2) = find_disasm_with_pos(bytes)?;
+    let q1 = crate::gumtrace::unidbg_instruction_prefix(bytes)?;
+    let q2 = memchr(b'"', &bytes[q1 + 1..]).map(|p| q1 + 1 + p)?;
+    // SAFETY: trace lines are ASCII (ARM64 disassembly text)
+    let disasm = unsafe { std::str::from_utf8_unchecked(&bytes[q1 + 1..q2]) };
 
     // 2. Split mnemonic and operand text
     let (mnemonic, operand_text) = match disasm.find(' ') {

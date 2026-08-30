@@ -1,16 +1,4 @@
-use memchr::memchr;
 use memchr::memmem;
-/// 从行中提取引号内的反汇编文本，同时返回第二个引号的位置。
-/// 返回 (disasm_str, quote2_position) 以便后续搜索从 quote2 之后继续。
-pub(crate) fn find_disasm_with_pos(line: &[u8]) -> Option<(&str, usize)> {
-    // unidbg 格式前 ~40 字节是固定格式（时间戳+模块名+地址），引号不会出现在这里
-    let skip = 40.min(line.len());
-    let q1 = memchr(b'"', &line[skip..])? + skip;
-    let q2 = memchr(b'"', &line[q1 + 1..])? + q1 + 1;
-    // SAFETY: trace lines are ASCII (ARM64 disassembly text)
-    let s = unsafe { std::str::from_utf8_unchecked(&line[q1 + 1..q2]) };
-    Some((s, q2))
-}
 
 /// 手动解析十六进制字节序列到 u64。
 pub(crate) fn parse_hex_u64(bytes: &[u8]) -> Option<u64> {

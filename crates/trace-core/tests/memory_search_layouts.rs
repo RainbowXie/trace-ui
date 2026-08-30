@@ -87,6 +87,23 @@ fn empty_input_fails_closed() {
 }
 
 #[test]
+fn unidbg_lookalike_text_fails_closed() {
+    // 审查回归：`[12:this is ordinary application log text …] "hello world"`
+    // 此前同时通过 unidbg 签名（只查前四字符近似 [12:）与宽松解析（第 40
+    // 字节后提取任意引号文本），被当成合法 trace 返回 total=0。
+    let lookalike =
+        b"[12:this is ordinary application log text padded past forty bytes] \"hello world\"\n";
+    for format in [TraceFormat::Unidbg, TraceFormat::Gumtrace] {
+        let err = search_memory(lookalike, format, options(&[1, 2, 3, 4]))
+            .expect_err("unidbg-lookalike text must fail closed");
+        assert!(
+            err.to_string().contains("no recognizable instruction"),
+            "unexpected error: {err}"
+        );
+    }
+}
+
+#[test]
 fn gumtrace_lookalike_text_fails_closed() {
     // 审查回归：`[x] ! "mov x0, x1"` 此前同时通过 Gumtrace 签名与宽松解析，
     // 会被当成合法 trace 返回 total=0。收紧后的结构前缀必须拒绝它。

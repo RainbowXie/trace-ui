@@ -37,9 +37,9 @@ const MAX_PATTERN_SIZE: usize = 64 * 1024 * 1024;
 const MAX_PUBLIC_RESPONSE_BYTES: usize = 8 * 1024 * 1024;
 pub(crate) const ANCHOR_SIZE: usize = 8;
 pub(crate) const CACHE_MAGIC: &[u8; 8] = b"TMSRCH01";
-// v6：gumtrace 指令行签名/解析收紧为 `[module] 0xABS!0xOFFSET ` 结构前缀；
-// v5 及更早条目可能由宽松识别写下，整体作废重扫。
-pub(crate) const CACHE_COMPAT_VERSION: &[u8] = b"memory-search-v6";
+// v7：unidbg 指令行签名/解析收紧为完整结构前缀（[HH:MM:SS NNN][module]
+// [thread] 0xADDR: "）；v6 及更早条目可能由宽松识别写下，整体作废重扫。
+pub(crate) const CACHE_COMPAT_VERSION: &[u8] = b"memory-search-v7";
 /// header 字段区长度；其后紧跟 32 字节的字段区 SHA-256 摘要。
 pub(crate) const CACHE_HEADER_LEN: usize = 120;
 /// 摘要长度；损坏的 count/格式位/过滤器若未同步重算摘要即被拒绝并重建。
