@@ -178,7 +178,9 @@ pub struct CallTreeNodeDto {
 #[derive(Serialize)]
 pub struct ConfirmedActivationDto {
     pub id: u32,
-    /// 已确认入口 PC（call 后第一条实际执行的 callee 指令）
+    /// 展示身份：session + call anchor（function-boundaries.md §1）
+    pub activation: String,
+    /// 函数稳定身份（module+offset）；无法解析时为 runtime:PC
     pub func_addr: String,
     pub func_name: Option<String>,
     pub call_seq: u32,
@@ -205,11 +207,20 @@ pub struct BypassedCallDto {
     pub parent_id: Option<u32>,
 }
 
-/// ActivationTree 查询结果：确认激活 + bypassed 调用。
+/// ActivationTree 分页查询结果：确认激活窗口 + bypassed 调用窗口 + 全量计数。
 #[derive(Serialize)]
 pub struct ActivationTreeDto {
+    /// 分页窗口内的 activation（含 root，index 0）
     pub activations: Vec<ConfirmedActivationDto>,
+    /// 分页窗口内的 bypassed 调用（按 call_seq 顺序）
     pub bypassed_calls: Vec<BypassedCallDto>,
+    /// 全量计数（不受分页影响）
+    pub total_activations: u32,
+    pub total_bypassed: u32,
+    /// 排除 root 的 confirmed/unresolved 计数（root 是 trace 上下文，不是调用）
+    pub confirmed_count: u32,
+    pub unresolved_count: u32,
+    pub offset: u32,
 }
 
 /// 指令归属（agent-api.md §2）：seq → 所属 Activation / 函数 / 边界状态。
@@ -218,11 +229,14 @@ pub struct InstructionOwnerDto {
     pub seq: u32,
     /// 无归属（root / trace_root 上下文）时为 None
     pub activation: Option<ConfirmedActivationDto>,
-    /// 序列中的边界位置：entry/exit/resume/call 或 body/root
+    /// 边界位置：entry/exit/resume/call/body/root/not_an_instruction
     pub position: String,
-    /// position == "call" 时指向被调用的 child activation id（BL 行归属 caller）
+    /// position 为 call/resume 时指向相关 child activation id（call 行归属 caller）
     #[serde(skip_serializing_if = "Option::is_none")]
     pub callee_id: Option<u32>,
+    /// 补充说明（not_an_instruction 原因、bypassed 提示等；可为空）
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub detail: String,
 }
 
 // ── Strings ──

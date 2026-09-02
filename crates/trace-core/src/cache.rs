@@ -15,12 +15,22 @@ static CACHE_DIR_OVERRIDE: RwLock<Option<PathBuf>> = RwLock::new(None);
 #[cfg(test)]
 static CACHE_DIR_OVERRIDE_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
-/// 单元测试中使用 `set_cache_dir_override` 时必须持有此锁，防止并行测试覆盖全局 override。
-#[cfg(test)]
-pub(crate) fn cache_dir_override_test_lock() -> std::sync::MutexGuard<'static, ()> {
-    CACHE_DIR_OVERRIDE_LOCK
-        .lock()
-        .unwrap_or_else(|e| e.into_inner())
+/// 测试中使用 `set_cache_dir_override` 时必须持有此锁，防止并行测试覆盖全局 override。
+/// pub：trace-mcp 集成测试同样需要隔离 cache 目录。
+pub fn cache_dir_override_test_lock() -> std::sync::MutexGuard<'static, ()> {
+    #[cfg(test)]
+    {
+        CACHE_DIR_OVERRIDE_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+    }
+    #[cfg(not(test))]
+    {
+        // 非 test 构建（外部集成测试编译 trace-core 时不带 cfg(test)）：
+        // 用独立的进程级锁，语义一致
+        static EXTERNAL_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+        EXTERNAL_LOCK.lock().unwrap_or_else(|e| e.into_inner())
+    }
 }
 
 pub fn set_cache_dir_override(path: Option<PathBuf>) {
@@ -34,6 +44,18 @@ pub fn cache_dir() -> Option<PathBuf> {
         }
     }
     dirs::data_dir().map(|d| d.join("trace-ui").join("cache"))
+}
+
+/// 测试辅助：当前 cache 目录。集成测试用直接操作缓存文件（如构造旧格式）。
+pub fn cache_dir_for_test() -> PathBuf {
+    cache_dir().expect("cache dir must be resolvable in tests")
+}
+
+/// 测试辅助：trace 路径对应的缓存哈希前缀。
+pub fn path_hash_for_test(file_path: &str) -> String {
+    let mut hasher = Sha256::new();
+    hasher.update(file_path.as_bytes());
+    format!("{:x}", hasher.finalize())
 }
 
 fn cache_path(file_path: &str, suffix: &str) -> Option<PathBuf> {

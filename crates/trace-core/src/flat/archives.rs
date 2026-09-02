@@ -52,8 +52,9 @@ impl Phase2Archive {
     /// `data` = &mmap[HEADER_LEN..] (after 64-byte cache header)
     pub fn views_from_sections(data: &[u8]) -> Option<Phase2Views<'_>> {
         let r = SectionReader::new(data)?;
-        // 6 sections：旧缓存（无 ActivationTree）；7 sections：当前缓存
-        if r.num_sections() < 6 {
+        // sections 0..=6 是旧格式（无 ActivationTree）；恰好 8 个是当前格式。
+        // 检查必须拒绝 <7（旧格式 7 个：0..=6），否则 r.bytes(6) 越界 panic。
+        if r.num_sections() < 7 {
             return None;
         }
         Some(Phase2Views {

@@ -183,6 +183,18 @@ fn default_depth() -> u32 {
 pub struct GetActivationTreeRequest {
     #[schemars(description = "Session ID (optional if only one session is open)")]
     pub session_id: Option<String>,
+    #[schemars(description = "Pagination offset into the activations array (default 0)")]
+    #[serde(default)]
+    pub offset: u32,
+    #[schemars(
+        description = "Max activations to return (default 200, max 1000). Use offset+limit to page through large trees"
+    )]
+    #[serde(default = "default_activation_limit")]
+    pub limit: u32,
+}
+
+fn default_activation_limit() -> u32 {
+    200
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]

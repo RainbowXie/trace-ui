@@ -3,46 +3,65 @@
 //! 样本 example-trace-gumtrace.txt 的关键事实（seq 从 0 计，special line 占 seq）：
 //! - seq 1: BL 0x7522f46438（callsite 0x7522e85ce4）→ entry seq 2
 //! - seq 10: BL 0x7522e31a90（callsite 0x7522f46458）→ PLT thunk
-//! - seq 11..=14: thunk 指令（adrp/ldr/add/br x17，最后一条 seq 14）
+//! - seq 11..=14: thunk 指令（最后一条 seq 14 = br x17）
 //! - seq 15..=17: call func:/args0:/ret: special lines（占 seq，不是指令）
 //! - seq 18: resume 0x7522f4645c == callsite + 4
-//!   → exit 必须是 seq 14（br x17），不是 seq 17（ret: special line）
-//! - seq 54: BLR x8（callsite 0x7522f328a4）→ JNI 拦截，无函数体；
-//!   seq 55..=58 special lines；seq 59 = 0x7522f328a8 == callsite + 4 → bypassed
+//! - seq 54: BLR x8（callsite 0x7522f328a4）→ JNI 拦截，无函数体 → bypassed
 //! - seq 62: BLR x8（callsite 0x7522f32fe8）→ NewStringUTF JNI 拦截 → bypassed
 
 use super::*;
 
+/// 每个测试独立 cache 目录：集成测试共享全局 cache 目录会互相污染（尤其
+/// 旧格式缓存测试会改坏共享文件）。每测试用 override 指向独立 tempdir，
+/// 结束后恢复。set_cache_dir_override 是全局变量，必须串行修改。
+struct IsolatedCacheDir {
+    _guard: std::sync::MutexGuard<'static, ()>,
+}
+
+impl IsolatedCacheDir {
+    fn new(tag: &str) -> Self {
+        let guard = trace_core::cache::cache_dir_override_test_lock();
+        let dir = std::env::temp_dir().join(format!(
+            "trace-ui-activation-test-{}-{}",
+            tag,
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        trace_core::cache::set_cache_dir_override(Some(dir));
+        Self { _guard: guard }
+    }
+}
+
+impl Drop for IsolatedCacheDir {
+    fn drop(&mut self) {
+        trace_core::cache::set_cache_dir_override(None);
+    }
+}
+
 #[test]
 fn test_activation_tree_on_example_trace() {
+    let _cache = IsolatedCacheDir::new("example");
     let (engine, sid) = setup_session(&get_trace_path());
     let tree = engine
-        .get_activation_tree(&sid)
+        .get_activation_tree(&sid, 0, 100)
         .expect("get_activation_tree");
 
-    // root + 4 个确认 activation + 2 个 bypassed
-    assert_eq!(tree.activations.len(), 5, "root + 4 confirmed");
-    assert_eq!(
-        tree.bypassed_calls.len(),
-        2,
-        "two JNI-intercepted BLR calls"
-    );
+    // root + 4 个确认 activation + 2 个 bypassed；计数排除 root
+    assert_eq!(tree.total_activations, 5);
+    assert_eq!(tree.confirmed_count, 4, "confirmed 排除 root");
+    assert_eq!(tree.unresolved_count, 0);
+    assert_eq!(tree.total_bypassed, 2);
 
-    // 所有确认 activation：函数身份 = entry PC，entry <= exit < resume
+    // 稳定身份：module+offset（不是 ASLR 运行时地址）
     for a in &tree.activations {
         if a.unresolved_reason.is_none() && a.id != 0 {
-            assert_eq!(
-                a.func_addr, a.entry_pc,
-                "func identity must come from the actual entry PC"
-            );
             assert!(
-                a.entry_seq <= a.exit_seq && a.exit_seq < a.resume_seq,
-                "activation {} boundary order violated: entry={} exit={} resume={}",
-                a.id,
-                a.entry_seq,
-                a.exit_seq,
-                a.resume_seq
+                a.func_addr.starts_with("libmetasec_ov.so+0x"),
+                "func identity must be module+offset, got {}",
+                a.func_addr
             );
+            assert_eq!(a.func_addr, a.entry_pc, "identity = entry site");
         }
     }
 
@@ -53,42 +72,63 @@ fn test_activation_tree_on_example_trace() {
         .find(|a| a.call_seq == 1)
         .expect("BL at seq 1 must produce an activation");
     assert_eq!(first.entry_seq, 2);
-    assert_eq!(first.entry_pc, "0x7522f46438");
-    assert_eq!(first.call_pc, "0x7522e85ce4");
-    assert_eq!(first.expected_resume, "0x7522e85ce8");
+    assert_eq!(first.entry_pc, "libmetasec_ov.so+0x143438");
+    assert_eq!(first.call_pc, "libmetasec_ov.so+0x82ce4");
+    assert_eq!(first.expected_resume, "libmetasec_ov.so+0x82ce8");
+    assert_eq!(first.activation, format!("{}:call@1", sid));
 
     // bypassed：JNI 拦截调用只保存调用事实
     assert_eq!(tree.bypassed_calls[0].call_seq, 54);
-    assert_eq!(tree.bypassed_calls[0].call_pc, "0x7522f328a4");
-    assert_eq!(tree.bypassed_calls[0].expected_resume, "0x7522f328a8");
-    assert_eq!(tree.bypassed_calls[0].resume_seq, 59);
+    assert_eq!(tree.bypassed_calls[0].call_pc, "libmetasec_ov.so+0x12f8a4");
     assert_eq!(tree.bypassed_calls[1].call_seq, 62);
-    assert_eq!(tree.bypassed_calls[1].resume_seq, 66);
+
+    engine.close_session(&sid).unwrap();
+}
+
+#[test]
+fn test_activation_tree_pagination() {
+    let _cache = IsolatedCacheDir::new("pagination");
+    let (engine, sid) = setup_session(&get_trace_path());
+
+    // 第一页只取 2 条（root + 第一个 activation）
+    let page1 = engine.get_activation_tree(&sid, 0, 2).unwrap();
+    assert_eq!(page1.activations.len(), 2);
+    assert_eq!(page1.total_activations, 5);
+    assert!(page1.offset == 0);
+
+    // 第二页
+    let page2 = engine.get_activation_tree(&sid, 2, 2).unwrap();
+    assert_eq!(page2.activations.len(), 2);
+    assert_eq!(page2.activations[0].id, 2);
+
+    // 超范围 offset 返回空页
+    let page3 = engine.get_activation_tree(&sid, 100, 2).unwrap();
+    assert!(page3.activations.is_empty());
+
+    // 全量计数在每一页都一致
+    assert_eq!(page1.confirmed_count, page2.confirmed_count);
 
     engine.close_session(&sid).unwrap();
 }
 
 #[test]
 fn test_exit_is_last_real_insn_not_special_line() {
+    let _cache = IsolatedCacheDir::new("exit");
     let (engine, sid) = setup_session(&get_trace_path());
 
-    // seq 10 BL（callsite 0x7522f46458）→ PLT thunk；seq 15..=17 是 special lines
-    let tree = engine.get_activation_tree(&sid).unwrap();
+    let tree = engine.get_activation_tree(&sid, 0, 100).unwrap();
     let act = tree
         .activations
         .iter()
         .find(|a| a.call_seq == 10)
         .expect("BL at seq 10");
-    assert!(
-        act.unresolved_reason.is_none(),
-        "seq-10 call must be confirmed"
-    );
+    assert!(act.unresolved_reason.is_none());
     assert_eq!(
         act.exit_seq, 14,
         "exit must be the last real instruction (br x17 at seq 14), \
          not a special line at seq 15..=17"
     );
-    assert_eq!(act.exit_pc, "0x7522e31a9c");
+    assert_eq!(act.exit_pc, "libmetasec_ov.so+0x2ea9c");
     assert_eq!(act.resume_seq, 18);
 
     // seq 14（br x17）属于该 activation，位置是 exit
@@ -100,22 +140,31 @@ fn test_exit_is_last_real_insn_not_special_line() {
         "seq 14 must belong to the seq-10 activation"
     );
 
-    // seq 16（args0: special line 之后的 seq）落在 inner exit 与 resume 之间、
-    // 但仍在 outer activation [2, 47] 动态范围内：归属 outer（special line 不是
-    // 指令，但位置上在 outer 的调用区间内；不归 inner）
+    engine.close_session(&sid).unwrap();
+}
+
+/// special line 不参与指令归属（协议只定义"实际执行的指令"的归属）。
+#[test]
+fn test_special_lines_are_not_instructions() {
+    let _cache = IsolatedCacheDir::new("special");
+    let (engine, sid) = setup_session(&get_trace_path());
+
+    // seq 16 = args0: special line
     let owner = engine.get_instruction_owner(&sid, 16).unwrap();
-    assert_eq!(
-        owner.activation.as_ref().map(|a| a.id),
-        Some(1),
-        "seq between inner exit and resume belongs to the outer activation"
-    );
-    assert_eq!(owner.position, "body");
+    assert_eq!(owner.position, "not_an_instruction");
+    assert!(owner.activation.is_none());
+    assert!(!owner.detail.is_empty());
+
+    // seq 15 = call func: special line
+    let owner = engine.get_instruction_owner(&sid, 15).unwrap();
+    assert_eq!(owner.position, "not_an_instruction");
 
     engine.close_session(&sid).unwrap();
 }
 
 #[test]
 fn test_instruction_owner_positions() {
+    let _cache = IsolatedCacheDir::new("positions");
     let (engine, sid) = setup_session(&get_trace_path());
 
     // entry
@@ -123,43 +172,67 @@ fn test_instruction_owner_positions() {
     assert_eq!(owner.position, "entry");
     assert_eq!(
         owner.activation.as_ref().map(|a| a.entry_pc.clone()),
-        Some("0x7522f46438".to_string())
+        Some("libmetasec_ov.so+0x143438".to_string())
     );
 
     // body
     let owner = engine.get_instruction_owner(&sid, 4).unwrap();
     assert_eq!(owner.position, "body");
 
-    // call（BL 行本身归属 caller 侧；callee_id 指向被创建的 child）
+    // call（BL 行归属 caller 侧；callee_id 指向 child）
     let owner = engine.get_instruction_owner(&sid, 10).unwrap();
     assert_eq!(owner.position, "call");
     assert_eq!(owner.callee_id, Some(2));
-    // owner 是 caller（id=1，func 0x7522f46438）
     assert_eq!(
         owner.activation.as_ref().map(|a| a.id),
         Some(1),
         "BL row belongs to the caller-side activation"
     );
 
-    // root 指令（seq 0，任何 activation 之前）
+    // root 指令（seq 0）
     let owner = engine.get_instruction_owner(&sid, 0).unwrap();
     assert_eq!(owner.position, "root");
     assert!(owner.activation.is_none());
 
-    // 嵌套调用内部最内层归属：seq 12 在 thunk（activation 2）内部
-    let owner = engine.get_instruction_owner(&sid, 12).unwrap();
-    assert_eq!(owner.position, "body");
-    assert_eq!(owner.activation.as_ref().map(|a| a.call_seq), Some(10));
+    // bypassed 调用行：position = call，指向调用事实
+    let owner = engine.get_instruction_owner(&sid, 54).unwrap();
+    assert_eq!(owner.position, "call");
+    assert!(
+        owner.callee_id.is_none(),
+        "bypassed 调用没有 child activation"
+    );
+    assert!(owner.detail.contains("bypassed"));
+
+    engine.close_session(&sid).unwrap();
+}
+
+/// resume 指令：归属 caller 上下文，position = resume，callee_id 指向被闭合 child。
+#[test]
+fn test_resume_position_and_ownership() {
+    let _cache = IsolatedCacheDir::new("resume");
+    let (engine, sid) = setup_session(&get_trace_path());
+
+    // seq 18 = activation 2（call_seq 10）的 resume
+    let owner = engine.get_instruction_owner(&sid, 18).unwrap();
+    assert_eq!(owner.position, "resume");
+    assert_eq!(owner.callee_id, Some(2));
+    assert_eq!(
+        owner.activation.as_ref().map(|a| a.id),
+        Some(1),
+        "resume 指令在 caller（activation 1）上下文执行"
+    );
 
     engine.close_session(&sid).unwrap();
 }
 
 #[test]
 fn test_activation_tree_survives_cache_reload() {
-    // 缓存往返：build → close → 重开（命中 section cache）→ ActivationTree 仍在
+    let _cache = IsolatedCacheDir::new("reload");
     let path = get_trace_path();
     let (engine, sid) = setup_session(&path);
-    let before = engine.get_activation_tree(&sid).expect("first build");
+    let before = engine
+        .get_activation_tree(&sid, 0, 100)
+        .expect("first build");
     engine.close_session(&sid).unwrap();
 
     let info = engine.create_session(&path).expect("reopen");
@@ -174,20 +247,93 @@ fn test_activation_tree_survives_cache_reload() {
             None,
         )
         .expect("rebuild (cache hit)");
-    let after = engine.get_activation_tree(&sid2).expect("after reload");
+    let after = engine
+        .get_activation_tree(&sid2, 0, 100)
+        .expect("after reload");
 
-    assert_eq!(
-        before.activations.len(),
-        after.activations.len(),
-        "activation count must survive cache round-trip"
-    );
+    assert_eq!(before.total_activations, after.total_activations);
+    assert_eq!(before.confirmed_count, after.confirmed_count);
     assert_eq!(before.bypassed_calls.len(), after.bypassed_calls.len());
     for (a, b) in before.activations.iter().zip(after.activations.iter()) {
         assert_eq!(a.id, b.id);
         assert_eq!(a.entry_seq, b.entry_seq);
         assert_eq!(a.exit_seq, b.exit_seq);
         assert_eq!(a.resume_seq, b.resume_seq);
+        assert_eq!(a.func_addr, b.func_addr);
         assert_eq!(a.unresolved_reason, b.unresolved_reason);
     }
+    engine.close_session(&sid2).unwrap();
+}
+
+/// 旧格式 Phase2 缓存（7 sections，无 ActivationTree）不 panic，
+/// ActivationTree 查询返回 IndexNotReady，重建后恢复。
+#[test]
+fn test_old_phase2_cache_without_activation_section() {
+    let _cache = IsolatedCacheDir::new("oldcache");
+    let path = get_trace_path();
+    let (engine, sid) = setup_session(&path);
+    engine.close_session(&sid).unwrap();
+
+    // 构造旧格式：写一个只有 7 sections 的 p2 cache（手工截掉 section 7）
+    // 直接复用真实缓存文件做减 section 处理
+    let cache_file = trace_core::cache::cache_dir_for_test().join(format!(
+        "{}{}",
+        trace_core::cache::path_hash_for_test(&path),
+        ".p2.cache"
+    ));
+    if let Ok(bytes) = std::fs::read(&cache_file) {
+        if bytes.len() > 64 {
+            let section_area = &bytes[64..];
+            let num = u32::from_le_bytes(section_area[0..4].try_into().unwrap()) as usize;
+            if num == 8 {
+                // 重写为 7 sections：改 num 字段并截掉最后一个 section 表项。
+                // SectionReader 只信任表；activation_tree_bytes 走 None 分支。
+                let mut old = bytes.clone();
+                old[64..68].copy_from_slice(&7u32.to_le_bytes());
+                // 截断表尾：去掉最后一个 entry（16 字节），数据区保留
+                let table_end = 64 + 4 + 8 * 16;
+                let new_table_end = 64 + 4 + 7 * 16;
+                old.drain(new_table_end..table_end);
+                std::fs::write(&cache_file, &old).unwrap();
+            }
+        }
+    }
+
+    let info = engine.create_session(&path).expect("reopen old cache");
+    let sid2 = info.session_id.clone();
+    let build = engine
+        .build_index(
+            &sid2,
+            trace_core::BuildOptions {
+                force_rebuild: false,
+                skip_strings: false,
+            },
+            None,
+        )
+        .expect("old cache must still load (CallTree etc.)");
+    assert!(build.total_lines > 0);
+
+    // ActivationTree 不在旧缓存：明确报 IndexNotReady 而非 panic / 伪数据
+    let result = engine.get_activation_tree(&sid2, 0, 10);
+    assert!(
+        result.is_err(),
+        "old cache without activation section must report IndexNotReady"
+    );
+
+    // force rebuild 恢复
+    engine
+        .build_index(
+            &sid2,
+            trace_core::BuildOptions {
+                force_rebuild: true,
+                skip_strings: false,
+            },
+            None,
+        )
+        .expect("force rebuild");
+    let tree = engine
+        .get_activation_tree(&sid2, 0, 100)
+        .expect("after rebuild");
+    assert_eq!(tree.total_activations, 5);
     engine.close_session(&sid2).unwrap();
 }

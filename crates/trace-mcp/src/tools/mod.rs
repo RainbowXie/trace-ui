@@ -526,35 +526,36 @@ impl TraceToolHandler {
 
     #[tool(
         name = "get_activation_tree",
-        description = "Get the Confirmed Activation tree: every call confirmed by the \
+        description = "Get the Confirmed Activation tree (paged): every call confirmed by the \
             call → entry → exit → resume boundary, plus bypassed calls (calls that resumed at \
-            callsite+4 without a recorded function body). Confirmed activations carry the \
-            actual entry/exit/resume PCs; unconfirmed ones carry an unresolved_reason. \
-            Each activation: id, func_addr (entry PC), call_seq/call_pc, entry/exit seq+pc, \
-            expected_resume, resume_seq, parent/children ids."
+            callsite+4 without a recorded function body). Returns offset/limit windowed \
+            activations + bypassed_calls, plus total/confirmed/unresolved counts (root excluded \
+            from confirmed/unresolved). Use offset+limit to page; max 1000 per call. \
+            Confirmed activations carry the actual entry/exit/resume PCs and stable module+offset \
+            identities; unconfirmed ones carry an unresolved_reason."
     )]
     fn get_activation_tree(
         &self,
         Parameters(req): Parameters<GetActivationTreeRequest>,
     ) -> Result<String, String> {
         let sid = self.resolve_session(req.session_id)?;
+        let limit = req.limit.clamp(1, 1000);
         let tree = self
             .engine
-            .get_activation_tree(&sid)
+            .get_activation_tree(&sid, req.offset, limit)
             .map_err(|e| e.to_string())?;
-        let confirmed = tree
-            .activations
-            .iter()
-            .filter(|a| a.unresolved_reason.is_none())
-            .count();
-        let unresolved = tree.activations.len() - confirmed;
+        let has_more =
+            (tree.offset as usize + tree.activations.len()) < tree.total_activations as usize;
         Ok(json(&serde_json::json!({
             "activations": tree.activations,
-            "activation_count": tree.activations.len(),
-            "confirmed_count": confirmed,
-            "unresolved_count": unresolved,
             "bypassed_calls": tree.bypassed_calls,
-            "bypassed_count": tree.bypassed_calls.len(),
+            "total_activations": tree.total_activations,
+            "confirmed_count": tree.confirmed_count,
+            "unresolved_count": tree.unresolved_count,
+            "total_bypassed": tree.total_bypassed,
+            "offset": tree.offset,
+            "limit": limit,
+            "has_more": has_more,
             "hint": "Use get_instruction_owner with a seq to attribute a specific instruction.",
         })))
     }
