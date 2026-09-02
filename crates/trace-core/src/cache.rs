@@ -52,11 +52,6 @@ pub fn cache_dir() -> Option<PathBuf> {
     dirs::data_dir().map(|d| d.join("trace-ui").join("cache"))
 }
 
-/// 测试辅助：当前 cache 目录。集成测试用直接操作缓存文件（如构造旧格式）。
-pub fn cache_dir_for_test() -> PathBuf {
-    cache_dir().expect("cache dir must be resolvable in tests")
-}
-
 /// 测试辅助：trace 路径对应的缓存哈希前缀。
 pub fn path_hash_for_test(file_path: &str) -> String {
     let mut hasher = Sha256::new();

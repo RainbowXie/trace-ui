@@ -31,12 +31,15 @@ pub(crate) fn stable_site(line: &str) -> Option<String> {
             let module = &line[module_start + 1..bracket_end];
             let rest = &line[bracket_end + 4..];
             if let Some(bang) = rest.find('!') {
-                let after = &rest[bang + 3..]; // skip "!0x"
-                let end = after
-                    .find(|c: char| !c.is_ascii_hexdigit())
-                    .unwrap_or(after.len());
-                if end > 0 && !module.is_empty() {
-                    return Some(format!("{}+0x{}", module, &after[..end]));
+                // 校验 `!` 后确实是 0x 前缀（畸形行会产生错位 hex）
+                if rest[bang..].starts_with("!0x") {
+                    let after = &rest[bang + 3..]; // skip "!0x"
+                    let end = after
+                        .find(|c: char| !c.is_ascii_hexdigit())
+                        .unwrap_or(after.len());
+                    if end > 0 && !module.is_empty() {
+                        return Some(format!("{}+0x{}", module, &after[..end]));
+                    }
                 }
             }
         }
@@ -96,11 +99,12 @@ fn activation_to_dto(
     }
 }
 
-/// 行读取辅助：把 LineIndex + mmap 打包（借用安全）。
+/// 行读取辅助：把 LineIndex + mmap + trace 格式打包（借用安全）。
 struct LineReader<'a> {
     data: &'a [u8],
     index: Option<crate::flat::line_index::LineIndexView<'a>>,
     total_lines: u32,
+    format: trace_parser::types::TraceFormat,
 }
 
 impl<'a> LineReader<'a> {
@@ -197,11 +201,23 @@ impl crate::engine::TraceEngine {
                 )));
             }
 
-            // 实际指令判定：special line 与无法解析行不参与归属（协议只定义
+            // 实际指令判定：直接用扫描侧同一个解析函数判定成功与否——
+            // builder 只在 parse 成功后收到 InsnFact，归属查询必须同一口径。
+            // 不用格式签名（签名比完整解析宽松：如 `[lib.so] 0x1!0x2 ` 签名
+            // 通过但无指令文本 parse 拒绝）；也不自写启发式（畸形行会误报）。
+            // special line 与无法解析行不参与归属（协议只定义
             // "实际执行的指令"的归属）
             let raw = reader.get(seq);
-            let is_instruction =
-                raw.is_some_and(|b| std::str::from_utf8(b).map(is_insn_line).unwrap_or(false));
+            let is_instruction = raw.is_some_and(|b| match reader.format {
+                trace_parser::types::TraceFormat::Gumtrace => std::str::from_utf8(b)
+                    .ok()
+                    .and_then(trace_parser::gumtrace::parse_line_gumtrace)
+                    .is_some(),
+                trace_parser::types::TraceFormat::Unidbg => std::str::from_utf8(b)
+                    .ok()
+                    .and_then(trace_parser::parser::parse_line)
+                    .is_some(),
+            });
             if !is_instruction {
                 return Ok(InstructionOwnerDto {
                     seq,
@@ -276,22 +292,68 @@ impl crate::engine::TraceEngine {
             data: &state.mmap,
             index: state.line_index_view(),
             total_lines: state.total_lines,
+            format: state.trace_format,
         };
         f(tree, &reader)
     }
 }
 
-/// 行是否为实际指令行（与解析器的指令判定一致）。
-///
-/// gumtrace 指令行：`[module] 0xADDR!0xOFFSET mnemonic ...`
-/// unidbg 指令行：`[ts][module offset] [encoding] 0xADDR: "mnemonic"`
-/// special line（call func:/args:/ret:/hexdump/call jni func:）与空行都不匹配。
-fn is_insn_line(line: &str) -> bool {
-    if let Some(pos) = line.find("] 0x") {
-        return line[pos..].contains('!') || line[pos..].contains(": \"");
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// 审查反例回归：畸形/垃圾行不得误报为指令（此前手写启发式仅看
+    /// `] 0x`+`!`/`: "` 会把解析器拒绝的行判为指令，position 错标 body/root）。
+    /// 判定必须与扫描侧喂 builder 的 parse 完全同口径。
+    #[test]
+    fn malformed_lines_are_not_instructions() {
+        let cases = [
+            "[mod] 0x1!yy nop",         // 审查反例一：offset 非 hex，签名与 parse 均拒
+            "[lib.so] 0x1!0x2 ",        // 反例二：截断行（签名过但 parse 拒）
+            "[WARN] [x] log: \"oops\"", // 反例三：带引号日志（签名过但 parse 拒）
+            "call func: a(0x1)",        // special line
+            "ret: 0x13",
+            "",
+        ];
+        for line in cases {
+            assert!(
+                trace_parser::gumtrace::parse_line_gumtrace(line).is_none(),
+                "gumtrace parse 不得把 {line:?} 判为指令"
+            );
+            assert!(
+                trace_parser::parser::parse_line(line).is_none(),
+                "unidbg parse 不得把 {line:?} 判为指令"
+            );
+        }
+        // 正常指令行仍判为指令
+        assert!(trace_parser::gumtrace::parse_line_gumtrace(
+            "[libmetasec_ov.so] 0x7522e85ce0!0x82ce0 sub x0, x29, #0x80; x0=0x1"
+        )
+        .is_some());
+        assert!(trace_parser::parser::parse_line(
+            "[07:17:13 488][libtiny.so 0x174250] [fd7bbaa9] 0x40174250: \"stp x29, x30, [sp, #-0x60]!\""
+        )
+        .is_some());
     }
-    if line.contains("] [") {
-        return line.contains(": \"");
+
+    /// stable_site：畸形行回退 None（不产生错误拼接的身份）。
+    #[test]
+    fn stable_site_rejects_malformed_lines() {
+        assert_eq!(stable_site("[mod] 0x1!yy nop"), None, "! 后无 0x 前缀");
+        assert_eq!(stable_site("[lib.so] 0x1!"), None, "截断");
+        assert_eq!(
+            stable_site("[libmetasec_ov.so] 0x7522e85ce0!0x82ce0 sub x0"),
+            Some("libmetasec_ov.so+0x82ce0".to_string())
+        );
+        // unidbg：[ts][module offset] [encoding]
+        assert_eq!(
+            stable_site("[07:17:13 488][libtiny.so 0x174250] [fd7bbaa9] 0x40174250: \"stp\""),
+            Some("libtiny.so+0x174250".to_string())
+        );
+        // 无模块形态回退 None
+        assert_eq!(
+            stable_site("[00:00:00 000][e00300b9] 0x40174250: \"add\""),
+            None
+        );
     }
-    false
 }

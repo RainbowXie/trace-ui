@@ -11,37 +11,14 @@
 
 use super::*;
 
-/// 每个测试独立 cache 目录：集成测试共享全局 cache 目录会互相污染（尤其
-/// 旧格式缓存测试会改坏共享文件）。每测试用 override 指向独立 tempdir，
-/// 结束后恢复。set_cache_dir_override 是全局变量，必须串行修改。
-struct IsolatedCacheDir {
-    _guard: std::sync::MutexGuard<'static, ()>,
-}
-
-impl IsolatedCacheDir {
-    fn new(tag: &str) -> Self {
-        let guard = trace_core::cache::cache_dir_override_test_lock();
-        let dir = std::env::temp_dir().join(format!(
-            "trace-ui-activation-test-{}-{}",
-            tag,
-            std::process::id()
-        ));
-        let _ = std::fs::remove_dir_all(&dir);
-        std::fs::create_dir_all(&dir).unwrap();
-        trace_core::cache::set_cache_dir_override(Some(dir));
-        Self { _guard: guard }
-    }
-}
-
-impl Drop for IsolatedCacheDir {
-    fn drop(&mut self) {
-        trace_core::cache::set_cache_dir_override(None);
-    }
+/// 当前隔离缓存目录（setup_session 已为每次调用分配独立目录；
+/// 旧格式测试用它直接操作缓存文件）。
+fn current_cache_dir() -> std::path::PathBuf {
+    trace_core::cache::cache_dir().expect("setup_session 已设置隔离目录")
 }
 
 #[test]
 fn test_activation_tree_on_example_trace() {
-    let _cache = IsolatedCacheDir::new("example");
     let (engine, sid) = setup_session(&get_trace_path());
     let tree = engine
         .get_activation_tree(&sid, 0, 100)
@@ -87,7 +64,6 @@ fn test_activation_tree_on_example_trace() {
 
 #[test]
 fn test_activation_tree_pagination() {
-    let _cache = IsolatedCacheDir::new("pagination");
     let (engine, sid) = setup_session(&get_trace_path());
 
     // 第一页只取 2 条（root + 第一个 activation）
@@ -113,7 +89,6 @@ fn test_activation_tree_pagination() {
 
 #[test]
 fn test_exit_is_last_real_insn_not_special_line() {
-    let _cache = IsolatedCacheDir::new("exit");
     let (engine, sid) = setup_session(&get_trace_path());
 
     let tree = engine.get_activation_tree(&sid, 0, 100).unwrap();
@@ -146,7 +121,6 @@ fn test_exit_is_last_real_insn_not_special_line() {
 /// special line 不参与指令归属（协议只定义"实际执行的指令"的归属）。
 #[test]
 fn test_special_lines_are_not_instructions() {
-    let _cache = IsolatedCacheDir::new("special");
     let (engine, sid) = setup_session(&get_trace_path());
 
     // seq 16 = args0: special line
@@ -164,7 +138,6 @@ fn test_special_lines_are_not_instructions() {
 
 #[test]
 fn test_instruction_owner_positions() {
-    let _cache = IsolatedCacheDir::new("positions");
     let (engine, sid) = setup_session(&get_trace_path());
 
     // entry
@@ -209,7 +182,6 @@ fn test_instruction_owner_positions() {
 /// resume 指令：归属 caller 上下文，position = resume，callee_id 指向被闭合 child。
 #[test]
 fn test_resume_position_and_ownership() {
-    let _cache = IsolatedCacheDir::new("resume");
     let (engine, sid) = setup_session(&get_trace_path());
 
     // seq 18 = activation 2（call_seq 10）的 resume
@@ -227,9 +199,10 @@ fn test_resume_position_and_ownership() {
 
 #[test]
 fn test_activation_tree_survives_cache_reload() {
-    let _cache = IsolatedCacheDir::new("reload");
+    // 多阶段（build→close→reopen）全程持锁：reopen 的缓存命中必须落在
+    // 第一次 build 的同一目录，中途不得被其他测试的 setup_session 切走。
     let path = get_trace_path();
-    let (engine, sid) = setup_session(&path);
+    let (engine, sid, _guard) = setup_session_locked(&path);
     let before = engine
         .get_activation_tree(&sid, 0, 100)
         .expect("first build");
@@ -269,14 +242,14 @@ fn test_activation_tree_survives_cache_reload() {
 /// ActivationTree 查询返回 IndexNotReady，重建后恢复。
 #[test]
 fn test_old_phase2_cache_without_activation_section() {
-    let _cache = IsolatedCacheDir::new("oldcache");
-    let path = get_trace_path();
-    let (engine, sid) = setup_session(&path);
+    // 多阶段（build→改缓存→reopen）全程持锁自控目录
+    let (engine, sid, _guard) = setup_session_locked(&get_trace_path());
     engine.close_session(&sid).unwrap();
+    let path = get_trace_path();
+    let dir = current_cache_dir();
 
     // 构造旧格式：写一个只有 7 sections 的 p2 cache（手工截掉 section 7）
-    // 直接复用真实缓存文件做减 section 处理
-    let cache_file = trace_core::cache::cache_dir_for_test().join(format!(
+    let cache_file = dir.join(format!(
         "{}{}",
         trace_core::cache::path_hash_for_test(&path),
         ".p2.cache"
