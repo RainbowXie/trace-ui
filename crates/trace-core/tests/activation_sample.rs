@@ -76,8 +76,8 @@ fn confirmed_activation_with_real_sample() {
         }
 
         line_count += 1;
-        if line_count >= 10000 {
-            break; // 只用前 10000 行做快速验证
+        if line_count >= 500000 {
+            break; // 用前 500000 行做验证
         }
     }
 
@@ -113,4 +113,21 @@ fn confirmed_activation_with_real_sample() {
         "Resolved: {}",
         tree.activations.iter().filter(|a| !a.unresolved).count()
     );
+
+    // 验证：已确认的 activation 数量应该接近 BL + BLR 数量
+    let resolved_count = tree.activations.iter().filter(|a| !a.unresolved).count();
+    println!(
+        "Resolved / (BL + BLR): {} / {}",
+        resolved_count,
+        bl_count + blr_count
+    );
+
+    // 验证：应该有嵌套调用（parent_id != 0）
+    let nested_count = tree
+        .activations
+        .iter()
+        .filter(|a| a.parent_id.is_some() && a.parent_id != Some(0))
+        .count();
+    println!("Nested calls: {}", nested_count);
+    assert!(nested_count > 0, "must have nested calls");
 }
