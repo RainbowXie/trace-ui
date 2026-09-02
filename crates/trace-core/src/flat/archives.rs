@@ -225,11 +225,13 @@ impl CachedStore<Phase2Archive> {
         match self {
             Self::Owned(a) => Some(a.activation_tree.clone()),
             Self::Mapped(mmap) => {
-                let views = Phase2Archive::views_from_sections(&mmap[HEADER_LEN..]).unwrap();
-                views.activation_tree_bytes.map(|b| {
-                    bincode::deserialize(b)
-                        .expect("failed to deserialize ActivationTree from cache")
-                })
+                let views = Phase2Archive::views_from_sections(&mmap[HEADER_LEN..])?;
+                // 结构变更后旧缓存反序列化失败时不 panic：返回 None 让 session
+                // 进入 IndexNotReady；缓存版本号（MAGIC_V5）机制在下次重建时
+                // 自然修复。
+                views
+                    .activation_tree_bytes
+                    .and_then(|b| bincode::deserialize(b).ok())
             }
         }
     }

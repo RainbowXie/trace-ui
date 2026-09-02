@@ -5,8 +5,14 @@ use std::io::{BufReader, BufWriter, Read, Write};
 use std::path::PathBuf;
 use std::sync::{Arc, RwLock};
 
+// MAGIC 版本即缓存布局版本：布局变更（如 .p2.cache 增加 ActivationTree section）
+// 时必须递增，否则旧布局缓存仍判有效——升级后老 session 会静默缺失新能力
+// （ActivationTree 永远 IndexNotReady 且 CacheHit 不触发重扫）。
+// V5：p2.cache 增加 section 7（ActivationTree bincode）；旧 V4/更早缓存
+// magic 不匹配自动 miss → 触发重扫 → 写新缓存。
+// MAGIC（无后缀常量）服务于 48 字节旧 bincode 路径，与 section 缓存互不影响。
+const MAGIC_V5: &[u8; 8] = b"TCACHE05";
 const MAGIC: &[u8; 8] = b"TCACHE03";
-const MAGIC_V4: &[u8; 8] = b"TCACHE04";
 const HEAD_SIZE: usize = 1024 * 1024; // 1MB
 const HEADER_LEN_V4: usize = 64;
 
@@ -188,9 +194,9 @@ pub fn save_sections_raw(file_path: &str, data: &[u8], suffix: &str, section_byt
     };
     let mut writer = BufWriter::new(file);
 
-    // Write 64-byte V4 header
+    // Write 64-byte header（V5：见顶部版本注释）
     let mut header = Vec::with_capacity(HEADER_LEN_V4);
-    header.extend_from_slice(MAGIC_V4);
+    header.extend_from_slice(MAGIC_V5);
     header.extend_from_slice(&(data.len() as u64).to_le_bytes());
     header.extend_from_slice(&head_hash(data));
     header.resize(HEADER_LEN_V4, 0); // pad to 64 bytes
@@ -226,7 +232,7 @@ fn load_cache_mmap(file_path: &str, data: &[u8], suffix: &str) -> Option<Arc<Mma
         eprintln!("[cache] {} too small: {} bytes", suffix, mmap.len());
         return None;
     }
-    if &mmap[0..8] != MAGIC_V4 {
+    if &mmap[0..8] != MAGIC_V5 {
         eprintln!("[cache] {} magic mismatch: {:?}", suffix, &mmap[0..8]);
         return None;
     }

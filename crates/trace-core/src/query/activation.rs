@@ -136,6 +136,9 @@ pub struct ActivationBuilder {
     active_stack: Vec<u32>,
     /// 最近一条实际指令。exit 取这里，不用 seq-1（special line 不算指令）。
     last_insn: Option<InsnFact>,
+    /// 每层入栈时快照：caller 在本次进入 child 前的最后一条指令。
+    /// finish 处理截断时用它回退逐层 exit（见 finish 注释）。
+    stack_prev_insn: Vec<Option<InsnFact>>,
     pending: Option<ActivationCandidate>,
     next_id: u32,
 }
@@ -170,6 +173,7 @@ impl ActivationBuilder {
             activations: vec![root],
             bypassed_calls: Vec::new(),
             active_stack: vec![0],
+            stack_prev_insn: vec![None],
             last_insn: None,
             pending: None,
             next_id: 1,
@@ -191,7 +195,8 @@ impl ActivationBuilder {
                     call_pc: candidate.call_pc,
                     expected_resume: candidate.expected_resume,
                     resume_seq: fact.seq,
-                    parent_id: (candidate.parent_id != 0).then_some(candidate.parent_id),
+                    // 与 ConfirmedActivation.parent_id 同一编码：Some(0) = root 上下文
+                    parent_id: Some(candidate.parent_id),
                 });
             } else {
                 // 下一条指令不等于 expected_resume → 进入 active Activation，
@@ -252,6 +257,7 @@ impl ActivationBuilder {
         activation.exit_pc = exit.pc;
         activation.resume_seq = current_seq;
         self.active_stack.pop();
+        self.stack_prev_insn.pop();
         Some(active_id)
     }
 
@@ -279,6 +285,10 @@ impl ActivationBuilder {
         self.activations[candidate.parent_id as usize]
             .children_ids
             .push(id);
+        // 快照：本层截断时的回退 exit = 进入 child 前 caller 的最后一条指令。
+        // 不快照的话 finish 会把全局 last_insn（最内层的指令）当成所有层的 exit，
+        // 外层 exit_pc 会指向别的函数的指令（违反字段契约）。
+        self.stack_prev_insn.push(self.last_insn);
         self.active_stack.push(id);
     }
 
@@ -320,16 +330,24 @@ impl ActivationBuilder {
             self.push_unresolved(candidate, UnresolvedReason::NoNextInsn);
         }
 
-        // 栈上未闭合的非 root activation：trace 截断
+        // 栈上未闭合的非 root activation：trace 截断。从最内层逐层弹出：
+        // 最内层的 exit 是自己的最后一条指令（当前 last_insn）；弹出后把
+        // last_insn 回退到该层入栈时的快照（= 外层被中断前的最后一条指令），
+        // 下一层用它作为 exit。这样每层 exit 都指向自己体内的指令，
+        // 不会把别的函数的指令当作本层 exit（字段契约：最后一条属于 child 的指令）。
         while let Some(active_id) = self.active_stack.pop() {
+            let prev = self.stack_prev_insn.pop().unwrap_or(None);
             if active_id == 0 {
                 continue;
             }
-            let exit = self.last_insn.expect("active activation must have an insn");
+            let exit = self
+                .last_insn
+                .expect("active activation must have had at least its entry insn");
             let activation = &mut self.activations[active_id as usize];
             activation.exit_seq = exit.seq;
             activation.exit_pc = exit.pc;
             activation.unresolved_reason = Some(UnresolvedReason::TraceEndStillActive);
+            self.last_insn = prev;
         }
 
         self.activations[0].exit_seq = total_lines;

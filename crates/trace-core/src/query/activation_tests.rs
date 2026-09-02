@@ -47,7 +47,7 @@ fn call_without_recorded_body_is_bypassed_not_fake_activation() {
     assert_eq!(c.call_pc, 0x1004);
     assert_eq!(c.expected_resume, 0x1008);
     assert_eq!(c.resume_seq, 2);
-    assert_eq!(c.parent_id, None);
+    assert_eq!(c.parent_id, Some(0), "root 上下文统一编码为 Some(0)");
 }
 
 /// 审查 CRITICAL 4 反例：递归调用复用同一 callsite，最内层被拦截。
@@ -292,6 +292,49 @@ fn activation_for_seq_binary_search_on_many_activations() {
         None,
         "无嵌套时 resume 归 root"
     );
+}
+
+/// 多层嵌套同时截断：每层 exit 必须指向自己体内的指令。
+///
+/// 三层 root→A→B→C 同时截断时，旧实现用全局 last_insn 给所有层设 exit，
+/// B/A 的 exit_pc 会指向 C 体内的指令，违反字段契约。
+#[test]
+fn multi_level_truncation_gives_each_layer_its_own_exit() {
+    let mut b = ActivationBuilder::new();
+    // root: seq 0
+    b.on_insn(fact(0, 0x1000));
+    // A: call seq1 → entry seq2，A 体到 seq3
+    b.on_call(1, 0x1004);
+    let a_id = b.on_insn(fact(2, 0x2000));
+    b.on_insn(fact(3, 0x2004));
+    // B: call seq4 → entry seq5，B 体到 seq6
+    b.on_call(4, 0x2008);
+    let b_id = b.on_insn(fact(5, 0x3000));
+    b.on_insn(fact(6, 0x3004));
+    // C: call seq7 → entry seq8，C 体到 seq9（截断）
+    b.on_call(7, 0x3008);
+    let c_id = b.on_insn(fact(8, 0x4000));
+    b.on_insn(fact(9, 0x4004));
+    let tree = b.finish(10);
+
+    let a = &tree.activations[a_id as usize];
+    let bb = &tree.activations[b_id as usize];
+    let c = &tree.activations[c_id as usize];
+    for x in [a, bb, c] {
+        assert_eq!(
+            x.unresolved_reason,
+            Some(UnresolvedReason::TraceEndStillActive)
+        );
+    }
+    // 最内层 C：自己的最后一条指令
+    assert_eq!(c.exit_seq, 9);
+    assert_eq!(c.exit_pc, 0x4004);
+    // B：进入 C 前自己的最后一条指令（不是 C 的 0x4004）
+    assert_eq!(bb.exit_seq, 6);
+    assert_eq!(bb.exit_pc, 0x3004);
+    // A：进入 B 前自己的最后一条指令
+    assert_eq!(a.exit_seq, 3);
+    assert_eq!(a.exit_pc, 0x2004);
 }
 
 /// bypassed 二分查找。
