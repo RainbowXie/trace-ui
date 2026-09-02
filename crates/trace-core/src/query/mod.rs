@@ -1,3 +1,4 @@
+pub mod activation;
 pub mod call_tree;
 pub mod crypto;
 pub mod dep_tree;
