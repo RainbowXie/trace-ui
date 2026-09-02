@@ -223,9 +223,7 @@ impl ActivationBuilder {
         while let Some(active_id) = self.active_stack.pop() {
             self.activations[active_id as usize].unresolved = true;
             self.activations[active_id as usize].exit_seq = total_lines.saturating_sub(1);
-            self.current_id = self.activations[active_id as usize]
-                .parent_id
-                .unwrap_or(0);
+            self.current_id = self.activations[active_id as usize].parent_id.unwrap_or(0);
         }
 
         self.activations[0].exit_seq = total_lines.saturating_sub(1);
@@ -286,7 +284,7 @@ mod tests {
         // BL at seq=5, callsite=0x1000, target=0x2000
         b.on_call(5, 0x1000, 0x2000);
         b.check_resume(0x2000, 6); // entry to first function
-        // BL at seq=10, callsite=0x2000, target=0x3000
+                                   // BL at seq=10, callsite=0x2000, target=0x3000
         b.on_call(10, 0x2000, 0x3000);
         b.check_resume(0x3000, 11); // entry to second function
         b.on_ret(15);
@@ -306,7 +304,7 @@ mod tests {
         let mut b = ActivationBuilder::new();
         b.on_call(5, 0x1000, 0x2000);
         b.check_resume(0x2000, 6); // entry to function
-        // trace ends without resume
+                                   // trace ends without resume
         let tree = b.finish(10);
         assert_eq!(tree.activations.len(), 2);
         assert!(tree.activations[1].unresolved);
