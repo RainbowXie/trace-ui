@@ -11,7 +11,10 @@ pub mod orchestrator;
 mod tests;
 
 pub use deps::{rebuild_compact_deps, resolve_control_deps};
-pub use events::{fix_reg_checkpoints, replay_call_tree_events, replay_gumtrace_annotations};
+pub use events::{
+    fix_reg_checkpoints, replay_activation_events, replay_call_tree_events,
+    replay_gumtrace_annotations,
+};
 pub use indices::{
     merge_init_mem_loads, merge_line_indices, merge_mem_access_indices, merge_pair_splits,
     merge_string_indices,

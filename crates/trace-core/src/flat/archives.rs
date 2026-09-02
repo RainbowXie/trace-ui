@@ -1,3 +1,4 @@
+use crate::query::activation::ActivationTree;
 use crate::query::call_tree::CallTree;
 use crate::scanner::RegLastDef;
 use memmap2::Mmap;
@@ -22,6 +23,8 @@ pub struct Phase2Archive {
     pub mem_accesses: FlatMemAccess,
     pub reg_checkpoints: FlatRegCheckpoints,
     pub call_tree: CallTree,
+    /// Confirmed Activation 树（含 bypassed 调用集合），与 CallTree 同模式缓存
+    pub activation_tree: ActivationTree,
 }
 
 impl Phase2Archive {
@@ -39,6 +42,9 @@ impl Phase2Archive {
                                                    // CallTree: section 6 (bincode, eagerly deserialized on load)
         let ct_bytes = bincode::serialize(&self.call_tree).unwrap();
         w.write_bytes(&ct_bytes); // 6
+                                  // ActivationTree: section 7 (bincode, eagerly deserialized on load)
+        let at_bytes = bincode::serialize(&self.activation_tree).unwrap();
+        w.write_bytes(&at_bytes); // 7
         w.finish()
     }
 
@@ -46,13 +52,19 @@ impl Phase2Archive {
     /// `data` = &mmap[HEADER_LEN..] (after 64-byte cache header)
     pub fn views_from_sections(data: &[u8]) -> Option<Phase2Views<'_>> {
         let r = SectionReader::new(data)?;
-        if r.num_sections() < 7 {
+        // 6 sections：旧缓存（无 ActivationTree）；7 sections：当前缓存
+        if r.num_sections() < 6 {
             return None;
         }
         Some(Phase2Views {
             mem_accesses: MemAccessView::from_raw(r.slice(0), r.slice(1), r.slice(2)),
             reg_checkpoints: RegCheckpointsView::from_raw(r.u32_val(3), r.u32_val(4), r.slice(5)),
             call_tree_bytes: r.bytes(6),
+            activation_tree_bytes: if r.num_sections() >= 8 {
+                Some(r.bytes(7))
+            } else {
+                None
+            },
         })
     }
 }
@@ -61,6 +73,8 @@ pub struct Phase2Views<'a> {
     pub mem_accesses: MemAccessView<'a>,
     pub reg_checkpoints: RegCheckpointsView<'a>,
     pub call_tree_bytes: &'a [u8], // bincode bytes, deserialize on demand
+    /// 新缓存才携带；旧缓存没有 ActivationTree（重建索引后可用）
+    pub activation_tree_bytes: Option<&'a [u8]>,
 }
 
 // ── ScanArchive ──────────────────────────────────────────────────────────────
@@ -202,6 +216,19 @@ impl CachedStore<Phase2Archive> {
                 let views = Phase2Archive::views_from_sections(&mmap[HEADER_LEN..]).unwrap();
                 bincode::deserialize(views.call_tree_bytes)
                     .expect("failed to deserialize CallTree from cache")
+            }
+        }
+    }
+
+    pub fn deserialize_activation_tree(&self) -> Option<ActivationTree> {
+        match self {
+            Self::Owned(a) => Some(a.activation_tree.clone()),
+            Self::Mapped(mmap) => {
+                let views = Phase2Archive::views_from_sections(&mmap[HEADER_LEN..]).unwrap();
+                views.activation_tree_bytes.map(|b| {
+                    bincode::deserialize(b)
+                        .expect("failed to deserialize ActivationTree from cache")
+                })
             }
         }
     }

@@ -172,6 +172,59 @@ pub struct CallTreeNodeDto {
     pub line_count: u32,
 }
 
+// ── Confirmed Activation ──
+
+/// 一次已确认函数调用激活的 DTO。边界字段全部来自实际指令（非 seq 猜测）。
+#[derive(Serialize)]
+pub struct ConfirmedActivationDto {
+    pub id: u32,
+    /// 已确认入口 PC（call 后第一条实际执行的 callee 指令）
+    pub func_addr: String,
+    pub func_name: Option<String>,
+    pub call_seq: u32,
+    pub call_pc: String,
+    pub entry_seq: u32,
+    pub entry_pc: String,
+    pub exit_seq: u32,
+    pub exit_pc: String,
+    pub expected_resume: String,
+    pub resume_seq: u32,
+    pub parent_id: Option<u32>,
+    pub children_ids: Vec<u32>,
+    /// None = 已确认；Some = 未闭合原因
+    pub unresolved_reason: Option<String>,
+}
+
+/// 没有记录函数体的调用事实（不生成 ConfirmedActivation）。
+#[derive(Serialize)]
+pub struct BypassedCallDto {
+    pub call_seq: u32,
+    pub call_pc: String,
+    pub expected_resume: String,
+    pub resume_seq: u32,
+    pub parent_id: Option<u32>,
+}
+
+/// ActivationTree 查询结果：确认激活 + bypassed 调用。
+#[derive(Serialize)]
+pub struct ActivationTreeDto {
+    pub activations: Vec<ConfirmedActivationDto>,
+    pub bypassed_calls: Vec<BypassedCallDto>,
+}
+
+/// 指令归属（agent-api.md §2）：seq → 所属 Activation / 函数 / 边界状态。
+#[derive(Serialize)]
+pub struct InstructionOwnerDto {
+    pub seq: u32,
+    /// 无归属（root / trace_root 上下文）时为 None
+    pub activation: Option<ConfirmedActivationDto>,
+    /// 序列中的边界位置：entry/exit/resume/call 或 body/root
+    pub position: String,
+    /// position == "call" 时指向被调用的 child activation id（BL 行归属 caller）
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub callee_id: Option<u32>,
+}
+
 // ── Strings ──
 
 pub struct StringQueryOptions {

@@ -5,7 +5,7 @@ use std::collections::HashMap;
 use rustc_hash::FxHashMap;
 use smallvec::SmallVec;
 
-use crate::parallel_types::{CallTreeEvent, ChunkResult, GumtraceAnnotEvent};
+use crate::parallel_types::{ActivationEvent, CallTreeEvent, ChunkResult, GumtraceAnnotEvent};
 use crate::query::mem_access::MemAccessIndex;
 use crate::query::registers::RegCheckpoints;
 use crate::query::strings::StringRw;
@@ -15,9 +15,9 @@ use trace_parser::types::{RegId, TraceFormat};
 
 use super::{
     fix_reg_checkpoints, merge_init_mem_loads, merge_line_indices, merge_pair_splits,
-    replay_call_tree_events, replay_gumtrace_annotations, resolve_control_deps,
-    resolve_partial_unresolved_loads, resolve_unresolved_load, resolve_unresolved_pair_load,
-    resolve_unresolved_reg_uses,
+    replay_activation_events, replay_call_tree_events, replay_gumtrace_annotations,
+    resolve_control_deps, resolve_partial_unresolved_loads, resolve_unresolved_load,
+    resolve_unresolved_pair_load, resolve_unresolved_reg_uses,
 };
 
 /// Phase 2 orchestrator: merge all chunk results into a single ScanResult.
@@ -38,6 +38,7 @@ pub fn merge_all_chunks(
     let mut init_corrections: Vec<(u32, bool)> = Vec::new();
     let mut all_call_events: Vec<CallTreeEvent> = Vec::new();
     let mut all_gumtrace_events: Vec<GumtraceAnnotEvent> = Vec::new();
+    let mut all_activation_events: Vec<ActivationEvent> = Vec::new();
 
     // Sequential forward propagation of global state
     let mut global_mem_last_def: FxHashMap<u64, (u32, u64)> = FxHashMap::default();
@@ -232,6 +233,7 @@ pub fn merge_all_chunks(
         // Move events (not clone) — saves ~20GB for large files
         all_call_events.extend(chunk.call_tree_events);
         all_gumtrace_events.extend(chunk.gumtrace_annot_events);
+        all_activation_events.extend(chunk.activation_events);
         total_parsed_count += chunk.boundary.final_parsed_count;
         total_mem_op_count += chunk.boundary.final_mem_op_count;
 
@@ -308,6 +310,8 @@ pub fn merge_all_chunks(
     let t = std::time::Instant::now();
     // CallTree
     let call_tree = replay_call_tree_events(&all_call_events, total_lines);
+    // Confirmed Activation 树（每条实际指令 + BL/BLR 事件重放）
+    let activation_tree = replay_activation_events(&all_activation_events, total_lines);
 
     // Gumtrace annotations
     let (call_annotations, extra_consumed) = if format == TraceFormat::Gumtrace {
@@ -465,6 +469,7 @@ pub fn merge_all_chunks(
         mem_accesses,
         reg_checkpoints: merged_ckpts,
         string_index,
+        activation_tree,
     };
 
     if let Some(ref cb) = progress_fn {

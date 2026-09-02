@@ -62,6 +62,7 @@ impl TraceEngine {
             trace_metadata: metadata.clone(),
             trace_format: TraceFormat::Unidbg,
             call_tree: None,
+            activation_tree: None,
             phase2_store: None,
             string_index: None,
             scan_store: None,

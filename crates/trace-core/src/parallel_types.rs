@@ -75,6 +75,21 @@ pub enum CallTreeEvent {
     SetRootAddr { addr: u64 },
 }
 
+// === Activation event log ===
+
+/// Confirmed Activation 边界事件。chunk 阶段只记录，merge 阶段重放到 ActivationBuilder。
+///
+/// `Insn` 每条解析成功的指令行一条（special line / 无法解析行不发）；`Call` 在
+/// 分类出 BL/BLR 时紧跟在当条 Insn 之后。不携带目标提示：函数身份只来自 entry
+/// 实际 PC，BL 立即数/BLR 寄存器值不进入模型。
+#[derive(Clone)]
+pub enum ActivationEvent {
+    /// 一条实际指令（seq + PC）
+    Insn { seq: u32, pc: u64 },
+    /// BL/BLR 调用（seq + callsite PC）
+    Call { seq: u32, pc: u64 },
+}
+
 // === Gumtrace annotation event log ===
 
 /// Events recorded during chunk scanning for later replay of Gumtrace annotations.
@@ -149,6 +164,8 @@ pub struct ChunkResult {
     // Event logs
     pub call_tree_events: Vec<CallTreeEvent>,
     pub gumtrace_annot_events: Vec<GumtraceAnnotEvent>,
+    /// Confirmed Activation 边界事件（每条实际指令 + BL/BLR）
+    pub activation_events: Vec<ActivationEvent>,
     pub consumed_seqs: Vec<u32>,
 
     // Boundary state for next chunk's fixup

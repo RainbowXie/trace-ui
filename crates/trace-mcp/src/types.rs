@@ -177,6 +177,24 @@ fn default_depth() -> u32 {
     1
 }
 
+// ── Confirmed Activation ──
+
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct GetActivationTreeRequest {
+    #[schemars(description = "Session ID (optional if only one session is open)")]
+    pub session_id: Option<String>,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct GetInstructionOwnerRequest {
+    #[schemars(description = "Session ID (optional if only one session is open)")]
+    pub session_id: Option<String>,
+    #[schemars(
+        description = "Instruction line number in the trace (0-based). Returns the unique owning Confirmed Activation"
+    )]
+    pub seq: u32,
+}
+
 fn default_func_list_limit() -> u32 {
     30
 }

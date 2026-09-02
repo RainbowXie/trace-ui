@@ -254,6 +254,7 @@ impl super::TraceEngine {
                 state.rebuild_call_search_texts();
 
                 state.call_tree = Some(call_tree);
+                state.activation_tree = phase2_store.deserialize_activation_tree();
                 state.string_index = string_index;
                 state.reg_last_def = Some(reg_last_def);
                 state.phase2_store = Some(phase2_store);
@@ -273,12 +274,14 @@ impl super::TraceEngine {
                 // 1. 在 write lock 外构建 archives
                 let phase2 = scan_result.phase2;
                 let call_tree = phase2.call_tree.clone();
+                let activation_tree = phase2.activation_tree.clone();
                 let string_index = phase2.string_index;
 
                 let phase2_archive = Phase2Archive {
                     mem_accesses: convert::mem_access_to_flat(&phase2.mem_accesses),
                     reg_checkpoints: convert::reg_checkpoints_to_flat(&phase2.reg_checkpoints),
                     call_tree: phase2.call_tree,
+                    activation_tree: phase2.activation_tree,
                 };
 
                 // fill_xref_counts：Phase2Archive 构建完成后，使用 flat view 计算 xref
@@ -337,6 +340,7 @@ impl super::TraceEngine {
                     state.trace_format = scan_result.format;
 
                     state.call_tree = Some(call_tree);
+                    state.activation_tree = Some(activation_tree);
                     state.string_index = Some(string_index);
                     state.reg_last_def = Some(reg_last_def);
                     state.phase2_store = Some(CachedStore::Owned(phase2_archive));

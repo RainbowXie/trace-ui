@@ -16,6 +16,7 @@ pub fn build_phase2(
     progress_fn: Option<Box<dyn Fn(usize, usize) + Send>>,
 ) -> Phase2State {
     let mut ct_builder = CallTreeBuilder::new();
+    let mut act_builder = crate::query::activation::ActivationBuilder::new();
     let mut mem_idx = MemAccessIndex::new();
     let mut reg_ckpts = RegCheckpoints::new(CHECKPOINT_INTERVAL);
     let mut reg_values = [u64::MAX; RegId::COUNT];
@@ -69,6 +70,10 @@ pub fn build_phase2(
                 let first_reg = parsed.operands.first().and_then(|op| op.as_reg());
                 let cls = insn_class::classify(parsed.mnemonic.as_str(), first_reg);
 
+                // Activation：每条实际指令先喂边界状态机
+                let insn_addr = extract_insn_addr(line_str);
+                act_builder.on_insn(crate::query::activation::InsnFact::new(seq, insn_addr));
+
                 // CallTree: BL/BLR → on_call, RET → on_ret
                 match cls {
                     InsnClass::BranchLink => {
@@ -82,13 +87,14 @@ pub fn build_phase2(
                             })
                             .unwrap_or(0);
                         ct_builder.on_call(seq, target);
+                        act_builder.on_call(seq, insn_addr);
                     }
                     InsnClass::BranchLinkReg => {
                         // BLR: 记录 PC 地址，下一行判断是否为 unidbg 拦截调用
                         let target = extract_blr_target(&parsed, line_str);
-                        let blr_pc = extract_insn_addr(line_str);
                         ct_builder.on_call(seq, target);
-                        blr_pending_pc = Some(blr_pc);
+                        act_builder.on_call(seq, insn_addr);
+                        blr_pending_pc = Some(insn_addr);
                     }
                     InsnClass::Return => {
                         ct_builder.on_ret(seq);
@@ -207,12 +213,14 @@ pub fn build_phase2(
     }
 
     let call_tree = ct_builder.finish(seq);
+    let activation_tree = act_builder.finish(seq);
 
     Phase2State {
         call_tree,
         mem_accesses: mem_idx,
         reg_checkpoints: reg_ckpts,
         string_index: Default::default(),
+        activation_tree,
     }
 }
 

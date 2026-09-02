@@ -7,6 +7,7 @@ use crate::flat::mem_last_def::MemLastDefView;
 use crate::flat::pair_split::PairSplitView;
 use crate::flat::reg_checkpoints::RegCheckpointsView;
 use crate::flat::scan_view::ScanView;
+use crate::query::activation::ActivationTree;
 use crate::query::call_tree::CallTree;
 use crate::query::crypto::CryptoScanResult;
 use crate::query::strings::StringIndex;
@@ -42,6 +43,9 @@ pub struct SessionState {
 
     // Phase2
     pub call_tree: Option<CallTree>,
+    /// Confirmed Activation 树（call → entry → exit → resume 确认边界 + bypassed 调用）。
+    /// 旧缓存（无 section 7）重建前为 None。
+    pub activation_tree: Option<ActivationTree>,
     pub phase2_store: Option<CachedStore<Phase2Archive>>,
     pub string_index: Option<StringIndex>,
 

@@ -525,6 +525,62 @@ impl TraceToolHandler {
     }
 
     #[tool(
+        name = "get_activation_tree",
+        description = "Get the Confirmed Activation tree: every call confirmed by the \
+            call → entry → exit → resume boundary, plus bypassed calls (calls that resumed at \
+            callsite+4 without a recorded function body). Confirmed activations carry the \
+            actual entry/exit/resume PCs; unconfirmed ones carry an unresolved_reason. \
+            Each activation: id, func_addr (entry PC), call_seq/call_pc, entry/exit seq+pc, \
+            expected_resume, resume_seq, parent/children ids."
+    )]
+    fn get_activation_tree(
+        &self,
+        Parameters(req): Parameters<GetActivationTreeRequest>,
+    ) -> Result<String, String> {
+        let sid = self.resolve_session(req.session_id)?;
+        let tree = self
+            .engine
+            .get_activation_tree(&sid)
+            .map_err(|e| e.to_string())?;
+        let confirmed = tree
+            .activations
+            .iter()
+            .filter(|a| a.unresolved_reason.is_none())
+            .count();
+        let unresolved = tree.activations.len() - confirmed;
+        Ok(json(&serde_json::json!({
+            "activations": tree.activations,
+            "activation_count": tree.activations.len(),
+            "confirmed_count": confirmed,
+            "unresolved_count": unresolved,
+            "bypassed_calls": tree.bypassed_calls,
+            "bypassed_count": tree.bypassed_calls.len(),
+            "hint": "Use get_instruction_owner with a seq to attribute a specific instruction.",
+        })))
+    }
+
+    #[tool(
+        name = "get_instruction_owner",
+        description = "Attribute one executed instruction (by trace seq) to its unique owning \
+            Confirmed Activation: the innermost activation whose [entry_seq, exit_seq] range \
+            contains the seq. Returns the activation (entry PC identity, boundaries) and the \
+            position within it: call/entry/exit/resume/body, or root when no activation owns it."
+    )]
+    fn get_instruction_owner(
+        &self,
+        Parameters(req): Parameters<GetInstructionOwnerRequest>,
+    ) -> Result<String, String> {
+        let sid = self.resolve_session(req.session_id)?;
+        let owner = self
+            .engine
+            .get_instruction_owner(&sid, req.seq)
+            .map_err(|e| e.to_string())?;
+        Ok(json(
+            &serde_json::to_value(&owner).map_err(|e| e.to_string())?,
+        ))
+    }
+
+    #[tool(
         name = "get_strings",
         description = "List runtime strings found in the trace. \
             These are strings observed in memory during execution. \

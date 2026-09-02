@@ -107,6 +107,7 @@ pub fn scan_chunk(data: &[u8], config: ScanChunkConfig) -> ChunkResult {
     // ── Event logs ──
     let mut call_tree_events: Vec<CallTreeEvent> = Vec::new();
     let mut gumtrace_annot_events: Vec<GumtraceAnnotEvent> = Vec::new();
+    let mut activation_events: Vec<ActivationEvent> = Vec::new();
     let mut consumed_seqs: Vec<u32> = Vec::new();
 
     // ── LineIndex builder ──
@@ -254,6 +255,13 @@ pub fn scan_chunk(data: &[u8], config: ScanChunkConfig) -> ChunkResult {
 
         // ── Classification + DEF/USE ──
         let class = insn_class::classify_and_refine(&line);
+
+        // ── Activation 事件：每条实际指令一条（special line 不发） ──
+        let insn_addr_act = phase2::extract_insn_addr(raw_line);
+        activation_events.push(ActivationEvent::Insn {
+            seq: i,
+            pc: insn_addr_act,
+        });
 
         // Collect unknown mnemonics
         if class == InsnClass::Nop && !insn_class::is_known_nop(line.mnemonic.as_str()) {
@@ -644,6 +652,10 @@ pub fn scan_chunk(data: &[u8], config: ScanChunkConfig) -> ChunkResult {
                     })
                     .unwrap_or(0);
                 call_tree_events.push(CallTreeEvent::Call { seq: i, target });
+                activation_events.push(ActivationEvent::Call {
+                    seq: i,
+                    pc: insn_addr_act,
+                });
                 if format == TraceFormat::Gumtrace {
                     gumtrace_annot_events.push(GumtraceAnnotEvent::BranchInstr { seq: i });
                 }
@@ -653,6 +665,10 @@ pub fn scan_chunk(data: &[u8], config: ScanChunkConfig) -> ChunkResult {
                 let blr_pc = phase2::extract_insn_addr(raw_line);
                 call_tree_events.push(CallTreeEvent::Call { seq: i, target });
                 call_tree_events.push(CallTreeEvent::BlrPending { seq: i, pc: blr_pc });
+                activation_events.push(ActivationEvent::Call {
+                    seq: i,
+                    pc: insn_addr_act,
+                });
                 if format == TraceFormat::Gumtrace {
                     gumtrace_annot_events.push(GumtraceAnnotEvent::BranchInstr { seq: i });
                 }
@@ -876,6 +892,7 @@ pub fn scan_chunk(data: &[u8], config: ScanChunkConfig) -> ChunkResult {
 
         call_tree_events,
         gumtrace_annot_events,
+        activation_events,
         consumed_seqs,
 
         boundary: ChunkBoundaryState {

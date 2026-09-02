@@ -10,6 +10,7 @@ use trace_core::TraceEngine;
 // Instead, we test by calling TraceEngine methods the same way tools.rs does,
 // verifying the actual logic paths that MCP tools exercise.
 
+mod activation;
 mod analysis;
 mod export;
 mod misc;

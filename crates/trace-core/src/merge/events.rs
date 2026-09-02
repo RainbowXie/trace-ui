@@ -2,7 +2,8 @@
 
 use std::collections::HashMap;
 
-use crate::parallel_types::{CallTreeEvent, GumtraceAnnotEvent, SpecialLineData};
+use crate::parallel_types::{ActivationEvent, CallTreeEvent, GumtraceAnnotEvent, SpecialLineData};
+use crate::query::activation::{ActivationBuilder, ActivationTree, InsnFact};
 use crate::query::call_tree::{CallTree, CallTreeBuilder};
 use crate::query::registers::RegCheckpoints;
 use trace_parser::gumtrace::CallAnnotation;
@@ -53,6 +54,26 @@ pub fn replay_call_tree_events(events: &[CallTreeEvent], total_lines: u32) -> Ca
         }
     }
 
+    builder.finish(total_lines)
+}
+
+/// Replay Activation events sequentially through a single ActivationBuilder.
+///
+/// 事件按全局 seq 顺序（chunk 顺序拼接，每个 chunk 内部 seq 递增）。`Insn` 每条
+/// 实际指令一条，`Call` 紧跟在 BL/BLR 那条 Insn 之后，与单线程 scan_unified 的
+/// 喂入顺序一致。
+pub fn replay_activation_events(events: &[ActivationEvent], total_lines: u32) -> ActivationTree {
+    let mut builder = ActivationBuilder::new();
+    for event in events {
+        match event {
+            ActivationEvent::Insn { seq, pc } => {
+                builder.on_insn(InsnFact::new(*seq, *pc));
+            }
+            ActivationEvent::Call { seq, pc } => {
+                builder.on_call(*seq, *pc);
+            }
+        }
+    }
     builder.finish(total_lines)
 }
 

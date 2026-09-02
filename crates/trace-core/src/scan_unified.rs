@@ -3,6 +3,7 @@ use rustc_hash::FxHashMap;
 
 use crate::line_index::LineIndexBuilder;
 use crate::phase2;
+use crate::query::activation::ActivationBuilder;
 use crate::query::call_tree::CallTreeBuilder;
 use crate::query::mem_access::{MemAccessIndex, MemAccessRecord, MemRw};
 use crate::query::registers::RegCheckpoints;
@@ -22,12 +23,14 @@ pub type ProgressFn = Box<dyn Fn(usize, usize) + Send + Sync>;
 
 const CHECKPOINT_INTERVAL: u32 = 1000;
 
-/// Phase 2 索引数据（CallTree + MemAccessIndex + RegCheckpoints + StringIndex）
+/// Phase 2 索引数据（CallTree + MemAccessIndex + RegCheckpoints + StringIndex + ActivationTree）
 pub struct Phase2State {
     pub call_tree: crate::query::call_tree::CallTree,
     pub mem_accesses: crate::query::mem_access::MemAccessIndex,
     pub reg_checkpoints: crate::query::registers::RegCheckpoints,
     pub string_index: crate::query::strings::StringIndex,
+    /// Confirmed Activation 树（call → entry → exit → resume 确认边界）
+    pub activation_tree: crate::query::activation::ActivationTree,
 }
 
 /// scan_unified 的返回结果
@@ -102,6 +105,7 @@ pub fn scan_unified(
 
     // ── Phase2 初始化（来自 phase2.rs） ──
     let mut ct_builder = CallTreeBuilder::new();
+    let mut act_builder = ActivationBuilder::new();
     let mut mem_idx = MemAccessIndex::new();
     let mut string_builder = if skip_strings {
         None
@@ -274,6 +278,10 @@ pub fn scan_unified(
 
         // ── 分类 + DEF/USE（scanner 逻辑） ──
         let class = insn_class::classify_and_refine(&line);
+
+        // ── Activation：每条实际指令先喂边界状态机（special line 不喂） ──
+        let insn_addr = phase2::extract_insn_addr(raw_line);
+        act_builder.on_insn(crate::query::activation::InsnFact::new(i, insn_addr));
 
         // 收集未知助记符
         if class == InsnClass::Nop && !insn_class::is_known_nop(line.mnemonic.as_str()) {
@@ -509,6 +517,7 @@ pub fn scan_unified(
                     })
                     .unwrap_or(0);
                 ct_builder.on_call(i, target);
+                act_builder.on_call(i, insn_addr);
                 if format == types::TraceFormat::Gumtrace {
                     pending_call_seq = Some(i);
                 }
@@ -516,9 +525,9 @@ pub fn scan_unified(
             InsnClass::BranchLinkReg => {
                 // BLR: 记录 PC 地址，下一行判断是否为 unidbg 拦截调用
                 let target = phase2::extract_blr_target(&line, raw_line);
-                let blr_pc = phase2::extract_insn_addr(raw_line);
                 ct_builder.on_call(i, target);
-                blr_pending_pc = Some(blr_pc);
+                act_builder.on_call(i, insn_addr);
+                blr_pending_pc = Some(insn_addr);
                 if format == types::TraceFormat::Gumtrace {
                     pending_call_seq = Some(i);
                 }
@@ -670,6 +679,7 @@ pub fn scan_unified(
     }
 
     let call_tree = ct_builder.finish(state.line_count);
+    let activation_tree = act_builder.finish(state.line_count);
     let string_index = match string_builder {
         Some(sb) => {
             let mut si = sb.finish();
@@ -683,6 +693,7 @@ pub fn scan_unified(
         mem_accesses: mem_idx,
         reg_checkpoints: reg_ckpts,
         string_index,
+        activation_tree,
     };
     let line_index = li_builder.finish();
 
