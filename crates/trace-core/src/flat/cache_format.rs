@@ -105,6 +105,13 @@ impl<'a> SectionReader<'a> {
             let base = 4 + i * 16;
             let offset = u64::from_le_bytes(data[base..base + 8].try_into().ok()?);
             let length = u64::from_le_bytes(data[base + 8..base + 16].try_into().ok()?);
+            // 损坏/截断缓存防御：section 范围必须落在数据区内。
+            // 不校验的话后续 slice 索引会越界 panic（mmap 缓存没有分配器捕获）。
+            let offset_us = usize::try_from(offset).ok()?;
+            let length_us = usize::try_from(length).ok()?;
+            if offset_us.checked_add(length_us)? > data.len() {
+                return None;
+            }
             sections.push((offset, length));
         }
         Some(Self { data, sections })

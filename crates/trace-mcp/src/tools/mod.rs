@@ -544,8 +544,6 @@ impl TraceToolHandler {
             .engine
             .get_activation_tree(&sid, req.offset, limit)
             .map_err(|e| e.to_string())?;
-        let has_more =
-            (tree.offset as usize + tree.activations.len()) < tree.total_activations as usize;
         Ok(json(&serde_json::json!({
             "activations": tree.activations,
             "bypassed_calls": tree.bypassed_calls,
@@ -555,8 +553,10 @@ impl TraceToolHandler {
             "total_bypassed": tree.total_bypassed,
             "offset": tree.offset,
             "limit": limit,
-            "has_more": has_more,
-            "hint": "Use get_instruction_owner with a seq to attribute a specific instruction.",
+            "has_more": tree.activations_has_more || tree.bypassed_has_more,
+            "activations_has_more": tree.activations_has_more,
+            "bypassed_has_more": tree.bypassed_has_more,
+            "hint": "两个数组独立分页（同一 offset/limit 窗口）；继续用 offset += limit 翻页，两个 *_has_more 分别指示剩余。",
         })))
     }
 

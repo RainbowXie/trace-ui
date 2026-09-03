@@ -30,15 +30,24 @@ fn test_activation_tree_on_example_trace() {
     assert_eq!(tree.unresolved_count, 0);
     assert_eq!(tree.total_bypassed, 2);
 
-    // 稳定身份：module+offset（不是 ASLR 运行时地址）
+    // 稳定身份：module+offset（不是 ASLR 运行时地址），且符合 common-types.md
+    // 语法（无法规范化的模块名 → None，不输出非法值）
     for a in &tree.activations {
         if a.unresolved_reason.is_none() && a.id != 0 {
+            let ident = a
+                .func_addr
+                .as_deref()
+                .expect("sample module is normalizable");
             assert!(
-                a.func_addr.starts_with("libmetasec_ov.so+0x"),
+                ident.starts_with("libmetasec_ov.so+0x"),
                 "func identity must be module+offset, got {}",
-                a.func_addr
+                ident
             );
             assert_eq!(a.func_addr, a.entry_pc, "identity = entry site");
+        }
+        // root 展示身份 = trace_root（不是 call@哨兵）
+        if a.id == 0 {
+            assert_eq!(a.activation, "trace_root");
         }
     }
 
@@ -49,14 +58,22 @@ fn test_activation_tree_on_example_trace() {
         .find(|a| a.call_seq == 1)
         .expect("BL at seq 1 must produce an activation");
     assert_eq!(first.entry_seq, 2);
-    assert_eq!(first.entry_pc, "libmetasec_ov.so+0x143438");
-    assert_eq!(first.call_pc, "libmetasec_ov.so+0x82ce4");
-    assert_eq!(first.expected_resume, "libmetasec_ov.so+0x82ce8");
+    assert_eq!(first.entry_pc.as_deref(), Some("libmetasec_ov.so+0x143438"));
+    assert_eq!(first.call_pc.as_deref(), Some("libmetasec_ov.so+0x82ce4"));
+    assert_eq!(
+        first.expected_resume.as_deref(),
+        Some("libmetasec_ov.so+0x82ce8")
+    );
     assert_eq!(first.activation, format!("{}:call@1", sid));
 
-    // bypassed：JNI 拦截调用只保存调用事实
+    // bypassed：JNI 拦截调用只保存调用事实；expected_resume = resume 行的
+    // 稳定身份（不再是 ASLR 运行时地址）
     assert_eq!(tree.bypassed_calls[0].call_seq, 54);
     assert_eq!(tree.bypassed_calls[0].call_pc, "libmetasec_ov.so+0x12f8a4");
+    assert_eq!(
+        tree.bypassed_calls[0].expected_resume,
+        "libmetasec_ov.so+0x12f8a8"
+    );
     assert_eq!(tree.bypassed_calls[1].call_seq, 62);
 
     engine.close_session(&sid).unwrap();
@@ -103,7 +120,7 @@ fn test_exit_is_last_real_insn_not_special_line() {
         "exit must be the last real instruction (br x17 at seq 14), \
          not a special line at seq 15..=17"
     );
-    assert_eq!(act.exit_pc, "libmetasec_ov.so+0x2ea9c");
+    assert_eq!(act.exit_pc.as_deref(), Some("libmetasec_ov.so+0x2ea9c"));
     assert_eq!(act.resume_seq, 18);
 
     // seq 14（br x17）属于该 activation，位置是 exit
@@ -144,7 +161,7 @@ fn test_instruction_owner_positions() {
     let owner = engine.get_instruction_owner(&sid, 2).unwrap();
     assert_eq!(owner.position, "entry");
     assert_eq!(
-        owner.activation.as_ref().map(|a| a.entry_pc.clone()),
+        owner.activation.as_ref().and_then(|a| a.entry_pc.clone()),
         Some("libmetasec_ov.so+0x143438".to_string())
     );
 
@@ -152,10 +169,10 @@ fn test_instruction_owner_positions() {
     let owner = engine.get_instruction_owner(&sid, 4).unwrap();
     assert_eq!(owner.position, "body");
 
-    // call（BL 行归属 caller 侧；callee_id 指向 child）
+    // call（BL 行归属 caller 侧；opens 指向 child）
     let owner = engine.get_instruction_owner(&sid, 10).unwrap();
     assert_eq!(owner.position, "call");
-    assert_eq!(owner.callee_id, Some(2));
+    assert_eq!(owner.opens.as_deref(), Some("activation:2"));
     assert_eq!(
         owner.activation.as_ref().map(|a| a.id),
         Some(1),
@@ -167,19 +184,19 @@ fn test_instruction_owner_positions() {
     assert_eq!(owner.position, "root");
     assert!(owner.activation.is_none());
 
-    // bypassed 调用行：position = call，指向调用事实
+    // bypassed 调用行：position = call，opens 指向调用事实（无 activation）
     let owner = engine.get_instruction_owner(&sid, 54).unwrap();
     assert_eq!(owner.position, "call");
-    assert!(
-        owner.callee_id.is_none(),
-        "bypassed 调用没有 child activation"
-    );
+    assert!(owner
+        .opens
+        .as_deref()
+        .is_some_and(|o| o.starts_with("bypassed:")));
     assert!(owner.detail.contains("bypassed"));
 
     engine.close_session(&sid).unwrap();
 }
 
-/// resume 指令：归属 caller 上下文，position = resume，callee_id 指向被闭合 child。
+/// resume 指令：归属 caller 上下文，position = resume，closes 指向被闭合 child。
 #[test]
 fn test_resume_position_and_ownership() {
     let (engine, sid) = setup_session(&get_trace_path());
@@ -187,11 +204,26 @@ fn test_resume_position_and_ownership() {
     // seq 18 = activation 2（call_seq 10）的 resume
     let owner = engine.get_instruction_owner(&sid, 18).unwrap();
     assert_eq!(owner.position, "resume");
-    assert_eq!(owner.callee_id, Some(2));
+    assert_eq!(owner.closes.as_deref(), Some("activation:2"));
     assert_eq!(
         owner.activation.as_ref().map(|a| a.id),
         Some(1),
         "resume 指令在 caller（activation 1）上下文执行"
+    );
+
+    // seq 59 = bypassed 调用（call_seq 54）的直接 resume：closes 指向 bypassed
+    let owner = engine.get_instruction_owner(&sid, 59).unwrap();
+    assert_eq!(owner.position, "resume");
+    assert!(
+        owner
+            .closes
+            .as_deref()
+            .is_some_and(|c| c.starts_with("bypassed:")),
+        "bypassed 调用的 resume 也必须报告 resume（不是 body）"
+    );
+    assert!(
+        owner.activation.is_none(),
+        "bypassed resume（call_seq 54 在 root 上下文）归属 root"
     );
 
     engine.close_session(&sid).unwrap();
@@ -241,38 +273,40 @@ fn test_activation_tree_survives_cache_reload() {
 /// 旧格式 Phase2 缓存（7 sections，无 ActivationTree）不 panic，
 /// ActivationTree 查询返回 IndexNotReady，重建后恢复。
 #[test]
-fn test_old_phase2_cache_without_activation_section() {
-    // 多阶段（build→改缓存→reopen）全程持锁自控目录
+fn test_corrupted_v5_cache_triggers_rescan_not_stale_load() {
+    // V5 缓存布局固定 8 sections：7-section 的 V5 缓存 = 损坏/截断，
+    // 必须整体判 miss（重扫重建），不能部分加载留下永久缺失的能力。
+    // 多阶段（build→改缓存→reopen）全程持锁自控目录。
     let (engine, sid, _guard) = setup_session_locked(&get_trace_path());
+    let total = engine
+        .get_activation_tree(&sid, 0, 100)
+        .unwrap()
+        .total_activations;
     engine.close_session(&sid).unwrap();
     let path = get_trace_path();
     let dir = current_cache_dir();
 
-    // 构造旧格式：写一个只有 7 sections 的 p2 cache（手工截掉 section 7）
+    // 构造损坏缓存：截掉最后一个 section 表项（不调整后续 offset——
+    // 真实截断正是这种不一致形态；SectionReader 的范围校验也在此覆盖）
     let cache_file = dir.join(format!(
         "{}{}",
         trace_core::cache::path_hash_for_test(&path),
         ".p2.cache"
     ));
-    if let Ok(bytes) = std::fs::read(&cache_file) {
-        if bytes.len() > 64 {
-            let section_area = &bytes[64..];
-            let num = u32::from_le_bytes(section_area[0..4].try_into().unwrap()) as usize;
-            if num == 8 {
-                // 重写为 7 sections：改 num 字段并截掉最后一个 section 表项。
-                // SectionReader 只信任表；activation_tree_bytes 走 None 分支。
-                let mut old = bytes.clone();
-                old[64..68].copy_from_slice(&7u32.to_le_bytes());
-                // 截断表尾：去掉最后一个 entry（16 字节），数据区保留
-                let table_end = 64 + 4 + 8 * 16;
-                let new_table_end = 64 + 4 + 7 * 16;
-                old.drain(new_table_end..table_end);
-                std::fs::write(&cache_file, &old).unwrap();
-            }
-        }
-    }
+    let bytes = std::fs::read(&cache_file).expect("cache written by first build");
+    assert!(bytes.len() > 64);
+    let num = u32::from_le_bytes(bytes[64..68].try_into().unwrap()) as usize;
+    assert_eq!(num, 8, "V5 p2 cache must have exactly 8 sections");
+    let mut corrupted = bytes.clone();
+    corrupted[64..68].copy_from_slice(&7u32.to_le_bytes());
+    let table_end = 64 + 4 + 8 * 16;
+    let new_table_end = 64 + 4 + 7 * 16;
+    corrupted.drain(new_table_end..table_end);
+    std::fs::write(&cache_file, &corrupted).unwrap();
 
-    let info = engine.create_session(&path).expect("reopen old cache");
+    let info = engine
+        .create_session(&path)
+        .expect("reopen corrupted cache");
     let sid2 = info.session_id.clone();
     let build = engine
         .build_index(
@@ -283,30 +317,14 @@ fn test_old_phase2_cache_without_activation_section() {
             },
             None,
         )
-        .expect("old cache must still load (CallTree etc.)");
+        .expect("corrupted cache must miss and rescan (not partial load)");
     assert!(build.total_lines > 0);
+    assert!(!build.from_cache, "损坏缓存不得命中 cache");
 
-    // ActivationTree 不在旧缓存：明确报 IndexNotReady 而非 panic / 伪数据
-    let result = engine.get_activation_tree(&sid2, 0, 10);
-    assert!(
-        result.is_err(),
-        "old cache without activation section must report IndexNotReady"
-    );
-
-    // force rebuild 恢复
-    engine
-        .build_index(
-            &sid2,
-            trace_core::BuildOptions {
-                force_rebuild: true,
-                skip_strings: false,
-            },
-            None,
-        )
-        .expect("force rebuild");
+    // 重扫后 ActivationTree 完整可用（不是 IndexNotReady）
     let tree = engine
         .get_activation_tree(&sid2, 0, 100)
-        .expect("after rebuild");
-    assert_eq!(tree.total_activations, 5);
+        .expect("rescan must produce ActivationTree");
+    assert_eq!(tree.total_activations, total);
     engine.close_session(&sid2).unwrap();
 }

@@ -52,20 +52,18 @@ impl Phase2Archive {
     /// `data` = &mmap[HEADER_LEN..] (after 64-byte cache header)
     pub fn views_from_sections(data: &[u8]) -> Option<Phase2Views<'_>> {
         let r = SectionReader::new(data)?;
-        // sections 0..=6 是旧格式（无 ActivationTree）；恰好 8 个是当前格式。
-        // 检查必须拒绝 <7（旧格式 7 个：0..=6），否则 r.bytes(6) 越界 panic。
-        if r.num_sections() < 7 {
+        // V5 缓存（magic TCACHE05）布局固定为恰好 8 个 section；
+        // 不等于 8 = 损坏/截断缓存，整体判 miss 触发重扫重建，
+        // fail-closed：不能接受半新半旧布局（ActivationTree 永久缺失）。
+        // 旧 V4/更早缓存在 cache.rs 的 magic 校验处已 miss，不会到达这里。
+        if r.num_sections() != 8 {
             return None;
         }
         Some(Phase2Views {
             mem_accesses: MemAccessView::from_raw(r.slice(0), r.slice(1), r.slice(2)),
             reg_checkpoints: RegCheckpointsView::from_raw(r.u32_val(3), r.u32_val(4), r.slice(5)),
             call_tree_bytes: r.bytes(6),
-            activation_tree_bytes: if r.num_sections() >= 8 {
-                Some(r.bytes(7))
-            } else {
-                None
-            },
+            activation_tree_bytes: Some(r.bytes(7)),
         })
     }
 }

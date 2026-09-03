@@ -22,8 +22,13 @@ fn reason_str(r: &UnresolvedReason) -> &'static str {
 /// gumtrace：`[libmetasec_ov.so] 0x7522e85ce0!0x82ce0 ...` → `libmetasec_ov.so+0x82ce0`
 /// unidbg：`[ts][libtiny.so 0x174250] ... 0x40174250: "..."` → `libtiny.so+0x174250`
 ///
-/// 提取失败返回 None——调用方回退到运行时地址表示（并标注 `runtime:` 前缀，
-/// 不冒充稳定身份）。
+/// 从一行 trace 文本解析稳定身份（module+offset），输出规范化到
+/// common-types.md 的稳定模块位置语法：`<module>+0x<offset>`，offset 为
+/// 小写十六进制且无前导零（零写 0）。
+///
+/// 不满足语法（模块名含非 `[A-Za-z0-9._-]` 字符/过长/为 . 或 ..、
+/// offset 非十六进制、行结构不匹配）时返回 None——调用方必须把该边界
+/// 的稳定身份置空，禁止输出原始路径片段或运行时地址冒充稳定身份。
 pub(crate) fn stable_site(line: &str) -> Option<String> {
     // gumtrace: 模块名在行首 [..] 内，offset 在 `!0x` 之后
     if let Some(bracket_end) = line.find("] 0x") {
@@ -37,8 +42,9 @@ pub(crate) fn stable_site(line: &str) -> Option<String> {
                     let end = after
                         .find(|c: char| !c.is_ascii_hexdigit())
                         .unwrap_or(after.len());
-                    if end > 0 && !module.is_empty() {
-                        return Some(format!("{}+0x{}", module, &after[..end]));
+                    let offset = &after[..end];
+                    if !offset.is_empty() {
+                        return build_site(module, offset);
                     }
                 }
             }
@@ -51,8 +57,8 @@ pub(crate) fn stable_site(line: &str) -> Option<String> {
             if let Some(space_pos) = module_info.rfind(" 0x") {
                 let module = &module_info[..space_pos];
                 let hex = &module_info[space_pos + 3..];
-                if !module.is_empty() && hex.chars().all(|c| c.is_ascii_hexdigit()) {
-                    return Some(format!("{}+0x{}", module, hex));
+                if !hex.is_empty() && hex.chars().all(|c| c.is_ascii_hexdigit()) {
+                    return build_site(module, hex);
                 }
             }
         }
@@ -60,15 +66,38 @@ pub(crate) fn stable_site(line: &str) -> Option<String> {
     None
 }
 
-/// 边界点的稳定身份：优先 module+offset，回退 runtime:PC（明确标注非稳定）。
-fn site_or_runtime(line: Option<&[u8]>, pc: u64) -> String {
-    match line
-        .and_then(|b| std::str::from_utf8(b).ok())
-        .and_then(stable_site)
-    {
-        Some(s) => s,
-        None => format!("runtime:0x{:x}", pc),
+/// 按稳定模块位置语法拼装身份；模块名或 offset 不合法时返回 None。
+fn build_site(module: &str, offset_hex: &str) -> Option<String> {
+    if !is_valid_module(module) {
+        return None;
     }
+    // 规范化：小写、去前导零（零固定写 0）
+    let lower = offset_hex.to_ascii_lowercase();
+    let trimmed = lower.trim_start_matches('0');
+    let normalized = if trimmed.is_empty() { "0" } else { trimmed };
+    Some(format!("{}+0x{}", module, normalized))
+}
+
+/// common-types.md 模块名语法：`[A-Za-z0-9][A-Za-z0-9._-]{0,127}`，
+/// 不能是 `.`、`..`。无法规范化的模块名（含 /、反斜杠、+、空白、Unicode）
+/// 不写入稳定身份。
+fn is_valid_module(module: &str) -> bool {
+    if module.is_empty() || module == "." || module == ".." {
+        return false;
+    }
+    let bytes = module.as_bytes();
+    let first_ok = bytes[0].is_ascii_alphanumeric();
+    let rest_ok = bytes.len() <= 128
+        && bytes[1..]
+            .iter()
+            .all(|&b| b.is_ascii_alphanumeric() || b == b'.' || b == b'_' || b == b'-');
+    first_ok && rest_ok
+}
+
+/// 边界点的稳定身份；无法规范化时 None（调用方置空，不冒充）。
+fn site_or_none(line: Option<&[u8]>) -> Option<String> {
+    line.and_then(|b| std::str::from_utf8(b).ok())
+        .and_then(stable_site)
 }
 
 fn activation_to_dto(
@@ -76,19 +105,51 @@ fn activation_to_dto(
     session_id: &str,
     reader: &LineReader<'_>,
 ) -> ConfirmedActivationDto {
+    // 哨兵语义（query/activation.rs）：
+    // - resolved：entry/exit/resume 全真实；
+    // - TraceEndStillActive：entry/exit 真实，resume_seq=0（未到达）；
+    // - NoNextInsn/DisplacedByAnotherCall：entry/exit/resume 全 0。
+    // 哨兵 0 不读 trace 第 0 行伪造身份，对应边界字段置 None；
+    // call/callsite 在所有状态下都是真实观察到的。
+    let resolved = a.unresolved_reason.is_none();
+    let truncated = matches!(
+        a.unresolved_reason,
+        Some(UnresolvedReason::TraceEndStillActive)
+    );
     ConfirmedActivationDto {
         id: a.id,
-        // Activation 展示身份：session + call anchor（function-boundaries.md §1）
-        activation: format!("{}:call@{}", session_id, a.call_seq),
-        func_addr: site_or_runtime(reader.get(a.entry_seq), a.func_addr),
+        // 展示身份：root 是 trace_root（协议定义），其余 = session + call anchor
+        activation: if a.id == 0 {
+            "trace_root".to_string()
+        } else {
+            format!("{}:call@{}", session_id, a.call_seq)
+        },
+        func_addr: if resolved {
+            site_or_none(reader.get(a.entry_seq))
+        } else {
+            None
+        },
         func_name: a.func_name.clone(),
         call_seq: a.call_seq,
-        call_pc: site_or_runtime(reader.get(a.call_seq), a.call_pc),
+        call_pc: site_or_none(reader.get(a.call_seq)),
         entry_seq: a.entry_seq,
-        entry_pc: site_or_runtime(reader.get(a.entry_seq), a.entry_pc),
+        entry_pc: if resolved {
+            site_or_none(reader.get(a.entry_seq))
+        } else {
+            None
+        },
         exit_seq: a.exit_seq,
-        exit_pc: site_or_runtime(reader.get(a.exit_seq), a.exit_pc),
-        expected_resume: site_or_runtime(reader.get(a.resume_seq), a.expected_resume),
+        exit_pc: if resolved || truncated {
+            site_or_none(reader.get(a.exit_seq))
+        } else {
+            None
+        },
+        // resume：resolved 才有；truncated 时未到达；其余哨兵 0
+        expected_resume: if resolved {
+            site_or_none(reader.get(a.resume_seq))
+        } else {
+            None
+        },
         resume_seq: a.resume_seq,
         parent_id: a.parent_id,
         children_ids: a.children_ids.clone(),
@@ -153,8 +214,9 @@ impl crate::engine::TraceEngine {
                     .iter()
                     .map(|c| BypassedCallDto {
                         call_seq: c.call_seq,
-                        call_pc: site_or_runtime(reader.get(c.call_seq), c.call_pc),
-                        expected_resume: format!("0x{:x}", c.expected_resume),
+                        call_pc: site_or_none(reader.get(c.call_seq)).unwrap_or_default(),
+                        // expected_resume 位置的稳定身份 = resume 行本身
+                        expected_resume: site_or_none(reader.get(c.resume_seq)).unwrap_or_default(),
                         resume_seq: c.resume_seq,
                         parent_id: c.parent_id,
                     })
@@ -164,6 +226,10 @@ impl crate::engine::TraceEngine {
                 confirmed_count: confirmed,
                 unresolved_count: unresolved,
                 offset,
+                // 两数组独立分页：各自标记是否还有剩余（单一 has_more 会把
+                // activations 取尽但 bypassed 未尽的页误报为完成，静默丢失）
+                activations_has_more: (skip + take) < activations.len(),
+                bypassed_has_more: (b_skip + b_take) < tree.bypassed_calls.len(),
             })
         })
     }
@@ -223,31 +289,39 @@ impl crate::engine::TraceEngine {
                     seq,
                     activation: None,
                     position: "not_an_instruction".to_string(),
-                    callee_id: None,
+                    closes: None,
+                    opens: None,
                     detail: "special line 或无法解析行：不参与指令归属".to_string(),
                 });
             }
 
             let owner = tree.activation_for_seq(seq);
 
-            // call 行：owner 是 caller；callee 可能是 child activation 或 bypassed 调用
-            let callee_id = tree.find_child_call(owner, seq);
-            let bypassed = callee_id.is_none() && tree.find_bypassed_by_call_seq(seq).is_some();
+            // 无损边界事实（可叠加）：一条指令可同时闭合一个调用并开启
+            // 另一个调用（连续 BL / bypassed 直接 resume 到下一条 BL）。
+            // - closes：本指令是某个调用的 resume（confirmed child 闭合，
+            //   或 bypassed 调用的直接 resume——后者不在 activations 中，
+            //   用 bypassed:N 引用）。
+            // - opens：本指令是某个调用的 call 行。
+            let closes = if let Some(child) = tree.find_child_resume(owner, seq) {
+                Some(format!("activation:{}", child))
+            } else {
+                tree.find_bypassed_resume_by_seq(seq)
+                    .map(|i| format!("bypassed:{}", i))
+            };
+            let opens = if let Some(child) = tree.find_child_call(owner, seq) {
+                Some(format!("activation:{}", child))
+            } else {
+                tree.find_bypassed_by_call_seq(seq)
+                    .map(|i| format!("bypassed:{}", i))
+            };
 
-            // resume 行：owner 是 caller；callee 是被闭合的 child
-            if callee_id.is_none() && !bypassed {
-                if let Some(child) = tree.find_child_resume(owner, seq) {
-                    return Ok(InstructionOwnerDto {
-                        seq,
-                        activation: owner.map(|a| activation_to_dto(a, session_id, reader)),
-                        position: "resume".to_string(),
-                        callee_id: Some(child),
-                        detail: "expected resume 指令：caller 上下文执行，闭合 callee".to_string(),
-                    });
-                }
-            }
-
-            let position = if callee_id.is_some() || bypassed {
+            // position 摘要：叠加时优先 resume > call > entry > exit > body > root。
+            // entry 指令自身是 BL/BLR 时同时有 entry+opens 两个事实，
+            // 摘要报 call 但 opens/owner 保留完整信息。
+            let position = if closes.is_some() {
+                "resume".to_string()
+            } else if opens.is_some() {
                 "call".to_string()
             } else {
                 match owner {
@@ -258,16 +332,24 @@ impl crate::engine::TraceEngine {
                 }
             };
 
+            let detail = match &closes {
+                Some(c) if c.starts_with("bypassed:") => {
+                    "bypassed 调用的直接 resume：caller 上下文执行，无函数体".to_string()
+                }
+                Some(_) => "expected resume 指令：caller 上下文执行，闭合 callee".to_string(),
+                None if opens.as_deref().is_some_and(|o| o.starts_with("bypassed:")) => {
+                    "调用指令：callee 无记录函数体（bypassed）".to_string()
+                }
+                None => String::new(),
+            };
+
             Ok(InstructionOwnerDto {
                 seq,
                 activation: owner.map(|a| activation_to_dto(a, session_id, reader)),
                 position,
-                callee_id,
-                detail: if bypassed {
-                    "调用指令：callee 无记录函数体（bypassed）".to_string()
-                } else {
-                    String::new()
-                },
+                closes,
+                opens,
+                detail,
             })
         })
     }

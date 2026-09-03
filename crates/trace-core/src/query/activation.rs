@@ -380,10 +380,11 @@ impl ActivationBuilder {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ActivationTree {
     pub activations: Vec<ConfirmedActivation>,
-    /// confirmed activation 的 id 索引，按 entry_seq 严格递增（二分查找用）
+    /// confirmed activation 的 id 索引，按 entry_seq 严格递增（二分查找用）。
+    /// 查询沿 parent 链向上，链长 = 嵌套深度。
     pub confirmed_ids: Vec<u32>,
     /// 没有记录函数体的调用（不参与 Confirmed Function 聚合）。
-    /// 按 call_seq 严格递增（确认顺序 = 调用顺序）。
+    /// 按 call_seq 严格递增（确认顺序 = 调用顺序），resume_seq 同样递增。
     pub bypassed_calls: Vec<BypassedCall>,
 }
 
@@ -398,8 +399,11 @@ impl ActivationTree {
     /// resume 指令不属于 child 区间（exit < resume），归属 caller——这是设计：
     /// resume 在 caller 上下文执行。
     pub fn activation_for_seq(&self, seq: u32) -> Option<&ConfirmedActivation> {
-        // 二分：最后一个 entry_seq <= seq 的 confirmed 位置
+        // 二分（entry 索引）：最后一个 entry_seq <= seq
         let ids = &self.confirmed_ids;
+        if ids.is_empty() {
+            return None;
+        }
         let mut lo = 0usize;
         let mut hi = ids.len();
         while lo < hi {
@@ -410,16 +414,27 @@ impl ActivationTree {
                 hi = mid;
             }
         }
-        // 向前找第一个 exit_seq >= seq（最内层包含者）
-        let mut i = lo;
-        while i > 0 {
-            i -= 1;
-            let a = &self.activations[ids[i] as usize];
-            if a.exit_seq >= seq {
-                return Some(a);
+        if lo == 0 {
+            return None; // 所有 entry > seq，无包含者
+        }
+
+        // 从候选（entry 最大且 <= seq）沿嵌套树 parent 链向上：
+        // 区间 laminar → 包含者 = 祖先链上 exit >= seq 的最深层。
+        // exit < seq 的区间不是包含者（已闭合在 seq 前）；其 parent 的
+        // exit 单调不减，第一次遇到 exit >= seq 即最内层包含者。
+        // 链长 = 嵌套深度（典型 <10，不会出现回扫全部兄弟的退化——
+        // root 在 N 次顺序调用后的查询是链长 1 的场景）。
+        let mut cur = &self.activations[ids[lo - 1] as usize];
+        loop {
+            if cur.exit_seq >= seq {
+                return Some(cur);
+            }
+            match cur.parent_id {
+                // root（id 0）或链尽：无包含者
+                Some(p) if p != 0 => cur = &self.activations[p as usize],
+                _ => return None,
             }
         }
-        None
     }
 
     /// 按 call_seq 二分查找 bypassed 调用（call_seq 严格递增）。
@@ -438,31 +453,76 @@ impl ActivationTree {
         calls.get(lo).filter(|c| c.call_seq == call_seq).map(|_| lo)
     }
 
+    /// 按 resume_seq 二分查找 bypassed 调用（resume_seq 严格递增：调用按
+    /// 时间确认，resume 按时间发生且区间互不重叠）。
+    pub fn find_bypassed_resume_by_seq(&self, resume_seq: u32) -> Option<usize> {
+        let calls = &self.bypassed_calls;
+        let mut lo = 0usize;
+        let mut hi = calls.len();
+        while lo < hi {
+            let mid = lo + (hi - lo) / 2;
+            if calls[mid].resume_seq < resume_seq {
+                lo = mid + 1;
+            } else {
+                hi = mid;
+            }
+        }
+        calls
+            .get(lo)
+            .filter(|c| c.resume_seq == resume_seq)
+            .map(|_| lo)
+    }
+
     /// 在 owner（None = root 上下文）的直接 children 中找 call_seq == seq 的调用。
     ///
-    /// children 数量 = 该函数的直接调用数（典型很小）；unresolved 子记录也算
-    ///（其 call 行仍是调用指令）。
+    /// children 按 push 顺序即时间序，call_seq 严格递增 → 二分。
+    /// unresolved 子记录也算（其 call 行仍是调用指令）。
     pub fn find_child_call(&self, owner: Option<&ConfirmedActivation>, seq: u32) -> Option<u32> {
         let children = match owner {
             Some(a) => &a.children_ids,
             None => &self.activations[0].children_ids,
         };
+        let mut lo = 0usize;
+        let mut hi = children.len();
+        while lo < hi {
+            let mid = lo + (hi - lo) / 2;
+            if self.activations[children[mid] as usize].call_seq < seq {
+                lo = mid + 1;
+            } else {
+                hi = mid;
+            }
+        }
         children
-            .iter()
+            .get(lo)
             .copied()
-            .find(|&id| self.activations[id as usize].call_seq == seq)
+            .filter(|&id| self.activations[id as usize].call_seq == seq)
     }
 
     /// 在 owner 的直接 children 中找 resume_seq == seq 的 confirmed 调用
     ///（该 seq 是 caller 上下文内执行的 resume 指令）。
+    ///
+    /// resume 必然晚于 call：二分 call_seq <= seq 的上限位置，只需检查该位置
+    /// 的 child——后续 child 的 call_seq > seq，其 resume 只能更大；前面的
+    /// child 的 resume < 本 child 的 call（时间序），不可能等于 seq。
     pub fn find_child_resume(&self, owner: Option<&ConfirmedActivation>, seq: u32) -> Option<u32> {
         let children = match owner {
             Some(a) => &a.children_ids,
             None => &self.activations[0].children_ids,
         };
-        children.iter().copied().find(|&id| {
+        let mut lo = 0usize;
+        let mut hi = children.len();
+        while lo < hi {
+            let mid = lo + (hi - lo) / 2;
+            if self.activations[children[mid] as usize].call_seq <= seq {
+                lo = mid + 1;
+            } else {
+                hi = mid;
+            }
+        }
+        lo.checked_sub(1).and_then(|i| {
+            let id = children[i];
             let a = &self.activations[id as usize];
-            a.unresolved_reason.is_none() && a.resume_seq == seq
+            (a.unresolved_reason.is_none() && a.resume_seq == seq).then_some(id)
         })
     }
 }

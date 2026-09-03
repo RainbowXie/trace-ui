@@ -178,18 +178,20 @@ pub struct CallTreeNodeDto {
 #[derive(Serialize)]
 pub struct ConfirmedActivationDto {
     pub id: u32,
-    /// 展示身份：session + call anchor（function-boundaries.md §1）
+    /// 展示身份：session + call anchor（function-boundaries.md §1）；
+    /// root 是 "trace_root"
     pub activation: String,
-    /// 函数稳定身份（module+offset）；无法解析时为 runtime:PC
-    pub func_addr: String,
+    /// 函数稳定身份（module+offset，common-types.md 语法）；无稳定来源时 None
+    pub func_addr: Option<String>,
     pub func_name: Option<String>,
     pub call_seq: u32,
-    pub call_pc: String,
+    /// callsite 稳定身份（所有状态下都是真实观察）
+    pub call_pc: Option<String>,
     pub entry_seq: u32,
-    pub entry_pc: String,
+    pub entry_pc: Option<String>,
     pub exit_seq: u32,
-    pub exit_pc: String,
-    pub expected_resume: String,
+    pub exit_pc: Option<String>,
+    pub expected_resume: Option<String>,
     pub resume_seq: u32,
     pub parent_id: Option<u32>,
     pub children_ids: Vec<u32>,
@@ -221,20 +223,34 @@ pub struct ActivationTreeDto {
     pub confirmed_count: u32,
     pub unresolved_count: u32,
     pub offset: u32,
+    /// 两数组独立分页，各自标记剩余
+    pub activations_has_more: bool,
+    pub bypassed_has_more: bool,
 }
 
 /// 指令归属（agent-api.md §2）：seq → 所属 Activation / 函数 / 边界状态。
+///
+/// 边界无损表达：一条指令可同时闭合一个调用（resume 或 bypassed 直接
+/// resume）并开启另一个调用（连续两条 BL 的第二条既是前一调用的 resume
+/// 又是新调用）。`closes`/`opens` 并列表达，Basic Block 切分据此判定
+/// "resume 开始新块、call 结束当前块"的叠加。
 #[derive(Serialize)]
 pub struct InstructionOwnerDto {
     pub seq: u32,
     /// 无归属（root / trace_root 上下文）时为 None
     pub activation: Option<ConfirmedActivationDto>,
-    /// 边界位置：entry/exit/resume/call/body/root/not_an_instruction
+    /// 边界位置摘要：entry/exit/resume/call/body/root/not_an_instruction。
+    /// 多条件叠加时优先级 resume > call > entry > exit > body > root。
     pub position: String,
-    /// position 为 call/resume 时指向相关 child activation id（call 行归属 caller）
+    /// 本指令闭合的调用（position == "resume"时指向被闭合 child）：
+    /// activation id 或 bypassed 序号（"bypassed:N"）。
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub callee_id: Option<u32>,
-    /// 补充说明（not_an_instruction 原因、bypassed 提示等；可为空）
+    pub closes: Option<String>,
+    /// 本指令开启的调用（position == "call"）：activation id 或
+    /// bypassed 序号（"bypassed:N"）；entry 即 call 的 callee_id。
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub opens: Option<String>,
+    /// 补充说明（not_an_instruction 原因等；可为空）
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub detail: String,
 }

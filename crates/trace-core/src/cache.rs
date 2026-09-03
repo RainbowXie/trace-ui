@@ -247,6 +247,18 @@ fn load_cache_mmap(file_path: &str, data: &[u8], suffix: &str) -> Option<Arc<Mma
         return None;
     }
 
+    // 布局预检：p2 缓存的 section 数量固定为 8（V5）；不匹配 = 损坏/截断，
+    // 整体判 miss 触发重扫，而不是 mmap 命中后在 view getter 里 unwrap panic
+    // 或留下半新半旧的 session。其他后缀（scan/lidx）布局由各自的读取路径
+    // 按段数防御（SectionReader 的 offset/length 范围校验兜底越界）。
+    if suffix == ".p2.cache"
+        && crate::flat::archives::Phase2Archive::views_from_sections(&mmap[HEADER_LEN_V4..])
+            .is_none()
+    {
+        eprintln!("[cache] {} section layout invalid (corrupted)", suffix);
+        return None;
+    }
+
     eprintln!("[cache] {} loaded: {} bytes", suffix, mmap.len());
     Some(Arc::new(mmap))
 }
