@@ -339,6 +339,53 @@ fn test_corrupted_v5_cache_triggers_rescan_not_stale_load() {
     engine.close_session(&sid2).unwrap();
 }
 
+/// V6 缓存位损坏（ActivationTree bincode 损坏）必须整体 miss 重扫
+///——不能带着 None 进入 CacheHit 让查询永远 IndexNotReady。
+#[test]
+fn test_bit_corrupted_v6_activation_section_triggers_rescan() {
+    let (engine, sid, _guard) = setup_session_locked(&get_trace_path());
+    let total = engine
+        .get_activation_tree(&sid, 0, 100)
+        .unwrap()
+        .total_activations;
+    engine.close_session(&sid).unwrap();
+    let path = get_trace_path();
+    let dir = current_cache_dir();
+
+    // 只翻转 ActivationTree bincode 尾部一个字节（magic/布局/其他 section 完好）
+    let cache_file = dir.join(format!(
+        "{}{}",
+        trace_core::cache::path_hash_for_test(&path),
+        ".p2.cache"
+    ));
+    let mut bytes = std::fs::read(&cache_file).expect("cache written by first build");
+    let last = bytes.len() - 1;
+    bytes[last] ^= 0xFF;
+    std::fs::write(&cache_file, &bytes).unwrap();
+
+    let info = engine
+        .create_session(&path)
+        .expect("reopen corrupted cache");
+    let sid2 = info.session_id.clone();
+    let build = engine
+        .build_index(
+            &sid2,
+            trace_core::BuildOptions {
+                force_rebuild: false,
+                skip_strings: false,
+            },
+            None,
+        )
+        .expect("bit-corrupted cache must miss and rescan");
+    assert!(!build.from_cache, "位损坏缓存不得命中");
+
+    let tree = engine
+        .get_activation_tree(&sid2, 0, 100)
+        .expect("rescan must produce ActivationTree");
+    assert_eq!(tree.total_activations, total);
+    engine.close_session(&sid2).unwrap();
+}
+
 /// V5→V6 升版回归：旧 V5 布局（ActivationTree 无 all_by_call/resolved_by_resume
 /// 字段）的缓存不得被当作命中——magic 不匹配必须触发重扫，而不是误命中后
 /// bincode 反序列化失败进入永久 IndexNotReady。

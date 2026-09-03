@@ -22,6 +22,9 @@ enum IndexResult {
 struct CacheHitData {
     phase2_store: CachedStore<Phase2Archive>,
     call_tree: crate::query::call_tree::CallTree,
+    /// V6 缓存必携带（build 时已验反序列化成功）；此处 Option 仅匹配
+    /// 反序列化接口签名，None 不可能出现（出现即上层已判 miss）。
+    activation_tree: crate::query::activation::ActivationTree,
     string_index: Option<crate::query::strings::StringIndex>,
     scan_store: CachedStore<ScanArchive>,
     reg_last_def: crate::scanner::RegLastDef,
@@ -117,6 +120,13 @@ impl super::TraceEngine {
                 let call_tree = phase2_store
                     .deserialize_call_tree()
                     .ok_or_else(|| TraceError::Internal("p2 cache corrupt: CallTree".into()))?;
+                // ActivationTree 同样：V6 缓存携带它，反序列化失败（位损坏）
+                // 不能带 None 进入 CacheHit——那会让查询永远 IndexNotReady
+                // 且下次 build 仍 cache hit（不重扫）。同判损坏，整体 miss。
+                let activation_tree =
+                    phase2_store.deserialize_activation_tree().ok_or_else(|| {
+                        TraceError::Internal("p2 cache corrupt: ActivationTree".into())
+                    })?;
 
                 let scan_store = CachedStore::Mapped(scan_mmap);
                 let reg_last_def = scan_store.deserialize_reg_last_def();
@@ -132,6 +142,7 @@ impl super::TraceEngine {
                 let result = IndexResult::CacheHit(Box::new(CacheHitData {
                     phase2_store,
                     call_tree,
+                    activation_tree,
                     string_index,
                     scan_store,
                     reg_last_def,
@@ -233,6 +244,7 @@ impl super::TraceEngine {
                 let CacheHitData {
                     phase2_store,
                     call_tree,
+                    activation_tree,
                     string_index,
                     scan_store,
                     reg_last_def,
@@ -258,7 +270,7 @@ impl super::TraceEngine {
                 state.rebuild_call_search_texts();
 
                 state.call_tree = Some(call_tree);
-                state.activation_tree = phase2_store.deserialize_activation_tree();
+                state.activation_tree = Some(activation_tree);
                 state.string_index = string_index;
                 state.reg_last_def = Some(reg_last_def);
                 state.phase2_store = Some(phase2_store);
