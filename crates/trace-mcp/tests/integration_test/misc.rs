@@ -23,11 +23,21 @@ fn test_unidbg_format_basic() {
 #[tokio::test]
 async fn test_spawn_blocking_helper() {
     // Verify the blocking() helper works correctly
+    // 持锁 + 独立目录：不取锁直接 build 会与其他测试的隔离目录切换竞争，
+    // 在同一缓存文件上双写（File::create 截断可让已 mmap 的会话 SIGBUS）。
+    // 锁在 spawn_blocking 闭包内持有（MutexGuard 不能跨 await；目录设置
+    // 也必须在锁内，否则与锁内切目录的测试竞争）。
+    let dir = std::env::temp_dir().join(format!("trace-ui-itest-spawn-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).expect("create isolated cache dir");
+
     let engine = Arc::new(TraceEngine::new());
     let path = get_trace_path();
 
     let engine_clone = engine.clone();
     let result: Result<String, String> = tokio::task::spawn_blocking(move || {
+        let _guard = trace_core::cache::cache_dir_override_test_lock();
+        trace_core::cache::set_cache_dir_override(Some(dir));
         let info = engine_clone
             .create_session(&path)
             .map_err(|e| e.to_string())?;
