@@ -71,10 +71,14 @@ fn build_site(module: &str, offset_hex: &str) -> Option<String> {
     if !is_valid_module(module) {
         return None;
     }
-    // 规范化：小写、去前导零（零固定写 0）
+    // 规范化：小写、去前导零（零固定写 0）。上限 16 位 hex
+    //（u64 最大 0xffffffffffffffff；超出 = 解析层异常，不是合法模块偏移）。
     let lower = offset_hex.to_ascii_lowercase();
     let trimmed = lower.trim_start_matches('0');
     let normalized = if trimmed.is_empty() { "0" } else { trimmed };
+    if normalized.len() > 16 {
+        return None;
+    }
     Some(format!("{}+0x{}", module, normalized))
 }
 
@@ -105,6 +109,28 @@ fn activation_to_dto(
     session_id: &str,
     reader: &LineReader<'_>,
 ) -> ConfirmedActivationDto {
+    // root（id 0）是 trace 上下文，不是调用：call/entry/exit/resume 全无。
+    // 哨兵 call_seq=u32::MAX 不读第 0 行伪造身份；exit_seq 只是行数上界
+    //（root 区间到 trace 末尾），不是函数出口。
+    if a.id == 0 {
+        return ConfirmedActivationDto {
+            id: 0,
+            activation: "trace_root".to_string(),
+            func_addr: None,
+            func_name: None,
+            call_seq: 0,
+            call_pc: None,
+            entry_seq: 0,
+            entry_pc: None,
+            exit_seq: a.exit_seq,
+            exit_pc: None,
+            expected_resume: None,
+            resume_seq: 0,
+            parent_id: None,
+            children_ids: a.children_ids.clone(),
+            unresolved_reason: None,
+        };
+    }
     // 哨兵语义（query/activation.rs）：
     // - resolved：entry/exit/resume 全真实；
     // - TraceEndStillActive：entry/exit 真实（截断时填的最后实际指令），
@@ -216,9 +242,11 @@ impl crate::engine::TraceEngine {
                     .iter()
                     .map(|c| BypassedCallDto {
                         call_seq: c.call_seq,
-                        call_pc: site_or_none(reader.get(c.call_seq)).unwrap_or_default(),
+                        // 稳定身份 fail-closed：无法规范化时 None，
+                        // 不用空串冒充（空串既不是身份也不是结构化 unresolved）。
+                        call_pc: site_or_none(reader.get(c.call_seq)),
                         // expected_resume 位置的稳定身份 = resume 行本身
-                        expected_resume: site_or_none(reader.get(c.resume_seq)).unwrap_or_default(),
+                        expected_resume: site_or_none(reader.get(c.resume_seq)),
                         resume_seq: c.resume_seq,
                         parent_id: c.parent_id,
                     })

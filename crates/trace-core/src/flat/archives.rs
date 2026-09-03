@@ -9,6 +9,7 @@ use super::bitvec::{BitView, FlatBitVec};
 use super::cache_format::{SectionReader, SectionWriter};
 use super::deps::{DepsRawSlices, DepsView, FlatDeps};
 use super::line_index::{LineIndexArchive, LineIndexView};
+use super::mem_access::FlatMemAccessRecord;
 use super::mem_access::{FlatMemAccess, MemAccessView};
 use super::mem_last_def::{FlatMemLastDef, MemLastDefView};
 use super::pair_split::{FlatPairSplit, PairSplitView};
@@ -58,6 +59,23 @@ impl Phase2Archive {
         // 旧 V4/更早缓存在 cache.rs 的 magic 校验处已 miss，不会到达这里。
         if r.num_sections() != 8 {
             return None;
+        }
+        // typed slice 安全预检（对齐/整除/非零）：不满足 = 损坏缓存整体 miss。
+        // 元素大小与写入路径（write_to_sections）一一对应：
+        // 0 addrs u64、1 offsets u32(CSR)、2 records 24B 结构体、
+        // 3/4 interval/count u32 单值、5 reg checkpoints u64 数组。
+        // 6/7 bincode 字节不做零长拒绝（空串在反序列化时 miss，可控）。
+        for (idx, elem) in [
+            (0usize, 8usize),
+            (1, 4),
+            (2, std::mem::size_of::<FlatMemAccessRecord>()),
+            (3, 4),
+            (4, 4),
+            (5, 8),
+        ] {
+            if !r.is_valid_typed(idx, elem) {
+                return None;
+            }
         }
         Some(Phase2Views {
             mem_accesses: MemAccessView::from_raw(r.slice(0), r.slice(1), r.slice(2)),
@@ -125,6 +143,37 @@ impl ScanArchive {
         if r.num_sections() < 20 {
             return None;
         }
+        // typed slice 安全预检：全部 section 对齐/整除/非零，不满足整体 miss。
+        // 元素大小与写入路径一一对应：FlatDeps 0-7 全 u32、
+        // mem_last_def 8 addrs u64 / 9 lines u32 / 10 values u64、
+        // pair_split 11-13 u32、init_mem_loads 14 data u8 + 15 len u32 单值、
+        // 16 reg_last_def_inner u32、17-19 计数 u32 单值。
+        for (idx, elem) in [
+            (0usize, 4usize),
+            (1, 4),
+            (2, 4),
+            (3, 4),
+            (4, 4),
+            (5, 4),
+            (6, 4),
+            (7, 4),
+            (8, 8),
+            (9, 4),
+            (10, 8),
+            (11, 4),
+            (12, 4),
+            (13, 4),
+            (14, 1),
+            (15, 4),
+            (16, 4),
+            (17, 4),
+            (18, 4),
+            (19, 4),
+        ] {
+            if !r.is_valid_typed(idx, elem) {
+                return None;
+            }
+        }
         Some(ScanViews {
             deps: DepsView::from_raw(DepsRawSlices {
                 chunk_start_lines: r.slice(0),
@@ -174,6 +223,10 @@ impl LineIndexArchive {
         if r.num_sections() < 2 {
             return None;
         }
+        // 0 sampled_offsets u64 数组、1 total u32 单值
+        if !r.is_valid_typed(0, 8) || !r.is_valid_typed(1, 4) {
+            return None;
+        }
         Some(LineIndexView::from_raw(r.slice(0), r.u32_val(1)))
     }
 }
@@ -208,13 +261,12 @@ impl CachedStore<Phase2Archive> {
         }
     }
 
-    pub fn deserialize_call_tree(&self) -> CallTree {
+    pub fn deserialize_call_tree(&self) -> Option<CallTree> {
         match self {
-            Self::Owned(a) => a.call_tree.clone(),
+            Self::Owned(a) => Some(a.call_tree.clone()),
             Self::Mapped(mmap) => {
-                let views = Phase2Archive::views_from_sections(&mmap[HEADER_LEN..]).unwrap();
-                bincode::deserialize(views.call_tree_bytes)
-                    .expect("failed to deserialize CallTree from cache")
+                let views = Phase2Archive::views_from_sections(&mmap[HEADER_LEN..])?;
+                bincode::deserialize(views.call_tree_bytes).ok()
             }
         }
     }

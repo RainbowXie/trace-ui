@@ -45,9 +45,16 @@ fn test_activation_tree_on_example_trace() {
             );
             assert_eq!(a.func_addr, a.entry_pc, "identity = entry site");
         }
-        // root 展示身份 = trace_root（不是 call@哨兵）
+        // root 展示身份 = trace_root（不是 call@哨兵）；root 是 trace 上下文
+        // 不是调用：call/entry/exit/resume 身份全 None，不读第 0 行伪造
         if a.id == 0 {
             assert_eq!(a.activation, "trace_root");
+            assert_eq!(a.func_addr, None, "root 无函数身份");
+            assert_eq!(a.entry_pc, None, "root 无入口身份");
+            assert_eq!(a.exit_pc, None, "root 无出口身份");
+            assert_eq!(a.expected_resume, None, "root 无 resume");
+            assert_eq!(a.call_pc, None, "root 无调用点");
+            assert_eq!(a.call_seq, 0, "root 无 call_seq");
         }
     }
 
@@ -67,12 +74,15 @@ fn test_activation_tree_on_example_trace() {
     assert_eq!(first.activation, format!("{}:call@1", sid));
 
     // bypassed：JNI 拦截调用只保存调用事实；expected_resume = resume 行的
-    // 稳定身份（不再是 ASLR 运行时地址）
+    // 稳定身份（不再是 ASLR 运行时地址）。无法规范化时 None（fail-closed）。
     assert_eq!(tree.bypassed_calls[0].call_seq, 54);
-    assert_eq!(tree.bypassed_calls[0].call_pc, "libmetasec_ov.so+0x12f8a4");
+    assert_eq!(
+        tree.bypassed_calls[0].call_pc,
+        Some("libmetasec_ov.so+0x12f8a4".to_string())
+    );
     assert_eq!(
         tree.bypassed_calls[0].expected_resume,
-        "libmetasec_ov.so+0x12f8a8"
+        Some("libmetasec_ov.so+0x12f8a8".to_string())
     );
     assert_eq!(tree.bypassed_calls[1].call_seq, 62);
 
@@ -322,6 +332,54 @@ fn test_corrupted_v5_cache_triggers_rescan_not_stale_load() {
     assert!(!build.from_cache, "损坏缓存不得命中 cache");
 
     // 重扫后 ActivationTree 完整可用（不是 IndexNotReady）
+    let tree = engine
+        .get_activation_tree(&sid2, 0, 100)
+        .expect("rescan must produce ActivationTree");
+    assert_eq!(tree.total_activations, total);
+    engine.close_session(&sid2).unwrap();
+}
+
+/// V5→V6 升版回归：旧 V5 布局（ActivationTree 无 all_by_call/resolved_by_resume
+/// 字段）的缓存不得被当作命中——magic 不匹配必须触发重扫，而不是误命中后
+/// bincode 反序列化失败进入永久 IndexNotReady。
+#[test]
+fn test_v5_layout_cache_rejected_by_magic_bump() {
+    let (engine, sid, _guard) = setup_session_locked(&get_trace_path());
+    let total = engine
+        .get_activation_tree(&sid, 0, 100)
+        .unwrap()
+        .total_activations;
+    engine.close_session(&sid).unwrap();
+    let path = get_trace_path();
+    let dir = current_cache_dir();
+
+    // 构造“旧 V5 缓存”：合法 V6 文件但 magic 改回 TCACHE05。
+    // V5 与 V6 的唯一差异就是 magic（布局字段数不同会反序列化失败），
+    // 这精确复现 52d42b1 时代生成的缓存。
+    let cache_file = dir.join(format!(
+        "{}{}",
+        trace_core::cache::path_hash_for_test(&path),
+        ".p2.cache"
+    ));
+    let mut bytes = std::fs::read(&cache_file).expect("cache written by first build");
+    assert_eq!(&bytes[0..8], b"TCACHE06", "current cache must be V6");
+    bytes[0..8].copy_from_slice(b"TCACHE05");
+    std::fs::write(&cache_file, &bytes).unwrap();
+
+    let info = engine.create_session(&path).expect("reopen with old magic");
+    let sid2 = info.session_id.clone();
+    let build = engine
+        .build_index(
+            &sid2,
+            trace_core::BuildOptions {
+                force_rebuild: false,
+                skip_strings: false,
+            },
+            None,
+        )
+        .expect("old-magic cache must miss and rescan");
+    assert!(!build.from_cache, "旧 V5 magic 不得命中");
+
     let tree = engine
         .get_activation_tree(&sid2, 0, 100)
         .expect("rescan must produce ActivationTree");

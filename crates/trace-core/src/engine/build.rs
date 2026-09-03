@@ -112,7 +112,11 @@ impl super::TraceEngine {
                     };
 
                 let phase2_store = CachedStore::Mapped(p2_mmap);
-                let call_tree = phase2_store.deserialize_call_tree();
+                // CallTree 反序列化失败（损坏/旧布局）= 缓存不可信，整体 miss
+                // 重扫，而不是带着 None 继续半初始化状态。
+                let call_tree = phase2_store
+                    .deserialize_call_tree()
+                    .ok_or_else(|| TraceError::Internal("p2 cache corrupt: CallTree".into()))?;
 
                 let scan_store = CachedStore::Mapped(scan_mmap);
                 let reg_last_def = scan_store.deserialize_reg_last_def();

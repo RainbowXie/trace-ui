@@ -117,10 +117,32 @@ impl<'a> SectionReader<'a> {
         Some(Self { data, sections })
     }
 
-    /// Get section data as a typed slice.
+    /// 预检：section 能否安全转成 elem_size 字节元素的 typed slice——
+    /// offset 对元素对齐、length 是元素大小的整数倍且非零
+    ///（单值 section 零长 [0] panic；数组零长无意义视为损坏）。
+    /// 不满足 = 损坏缓存，调用方应整体判 miss。
+    ///
+    /// 对齐基准：mmap（memmap2）返回页对齐基址，数据区从 header 后开始；
+    /// elem_size <= 8 且 offset % elem == 0 时基址 + offset 安全。
+    pub fn is_valid_typed(&self, idx: usize, elem_size: usize) -> bool {
+        let Some(&(offset, length)) = self.sections.get(idx) else {
+            return false;
+        };
+        let offset = offset as usize;
+        let length = length as usize;
+        offset % elem_size == 0 && length % elem_size == 0 && length > 0
+    }
+
+    /// typed slice：调用方必须先用 is_valid_typed 验证本 section
+    ///（views_from_sections 预检后构造），否则未对齐 from_raw_parts 是 UB、
+    /// 非整除会静默截断。零长 section 返回空切片（合法；单值读取
+    /// u32_val/u64_val 由预检的非零要求守护）。debug_assert 拦截
+    /// 未预检的对齐/整除违规。
     pub fn slice<T: Copy>(&self, idx: usize) -> &'a [T] {
         let (offset, length) = self.sections[idx];
         let bytes = &self.data[offset as usize..(offset + length) as usize];
+        let elem = std::mem::size_of::<T>() as u64;
+        debug_assert!(length == 0 || (offset % elem == 0 && length % elem == 0));
         unsafe {
             std::slice::from_raw_parts(
                 bytes.as_ptr() as *const T,
@@ -129,7 +151,7 @@ impl<'a> SectionReader<'a> {
         }
     }
 
-    /// Get a single u32 from a section.
+    /// 单值 u32：is_valid_typed 已验非零长度，[0] 安全。
     pub fn u32_val(&self, idx: usize) -> u32 {
         self.slice::<u32>(idx)[0]
     }
@@ -229,7 +251,10 @@ mod tests {
         let bytes = w.finish();
 
         let r = SectionReader::new(&bytes).unwrap();
-        assert_eq!(r.slice::<u32>(0).len(), 0);
+        // 空数组 section（len 0）：合法零长切片，但不得再用 u32_val 读
+        // 单值（零长 [0] panic）；预检 is_valid_typed 判非法。
+        assert!(r.bytes(0).is_empty());
+        assert!(!r.is_valid_typed(0, 4));
     }
 
     #[test]

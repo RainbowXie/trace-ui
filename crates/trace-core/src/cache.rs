@@ -8,10 +8,11 @@ use std::sync::{Arc, RwLock};
 // MAGIC 版本即缓存布局版本：布局变更（如 .p2.cache 增加 ActivationTree section）
 // 时必须递增，否则旧布局缓存仍判有效——升级后老 session 会静默缺失新能力
 // （ActivationTree 永远 IndexNotReady 且 CacheHit 不触发重扫）。
-// V5：p2.cache 增加 section 7（ActivationTree bincode）；旧 V4/更早缓存
-// magic 不匹配自动 miss → 触发重扫 → 写新缓存。
+// V6：ActivationTree 增加 all_by_call/resolved_by_resume 两个序列化字段，
+// 与 V5 的 bincode 布局不兼容；旧 V5/更早缓存 magic 不匹配自动 miss →
+// 触发重扫 → 写新缓存。
 // MAGIC（无后缀常量）服务于 48 字节旧 bincode 路径，与 section 缓存互不影响。
-const MAGIC_V5: &[u8; 8] = b"TCACHE05";
+const MAGIC_V5: &[u8; 8] = b"TCACHE06";
 const MAGIC: &[u8; 8] = b"TCACHE03";
 const HEAD_SIZE: usize = 1024 * 1024; // 1MB
 const HEADER_LEN_V4: usize = 64;
@@ -392,4 +393,17 @@ fn dir_size(path: &PathBuf) -> u64 {
         .filter_map(|e| e.metadata().ok())
         .map(|m| m.len())
         .sum()
+}
+
+#[cfg(test)]
+mod magic_version_tests {
+    use super::*;
+
+    /// p2 缓存携带序列化的 ActivationTree，布局变更必须升 magic 否则旧
+    /// V5（无新字段）误命中且反序列化失败 → 永久 IndexNotReady。
+    /// 此断言锁定当前 magic；下次改 ActivationTree 序列化时递增并更新此处。
+    #[test]
+    fn p2_magic_tracks_activation_tree_layout() {
+        assert_eq!(MAGIC_V5, b"TCACHE06");
+    }
 }

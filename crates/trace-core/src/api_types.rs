@@ -203,8 +203,9 @@ pub struct ConfirmedActivationDto {
 #[derive(Serialize)]
 pub struct BypassedCallDto {
     pub call_seq: u32,
-    pub call_pc: String,
-    pub expected_resume: String,
+    /// 稳定身份；无法规范化时 None（fail-closed，不冒充）
+    pub call_pc: Option<String>,
+    pub expected_resume: Option<String>,
     pub resume_seq: u32,
     pub parent_id: Option<u32>,
 }
