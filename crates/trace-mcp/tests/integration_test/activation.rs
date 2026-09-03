@@ -252,7 +252,7 @@ fn test_activation_tree_survives_cache_reload() {
 
     let info = engine.create_session(&path).expect("reopen");
     let sid2 = info.session_id.clone();
-    engine
+    let rebuild = engine
         .build_index(
             &sid2,
             trace_core::BuildOptions {
@@ -262,6 +262,12 @@ fn test_activation_tree_survives_cache_reload() {
             None,
         )
         .expect("rebuild (cache hit)");
+    // 合法缓存二次加载必须命中（typed 预检不得把空数组/对齐误判为损坏，
+    // 否则每次重扫，reload 假绿）
+    assert!(
+        rebuild.from_cache,
+        "合法缓存二次加载必须命中，否则 typed 预检拒绝合法缓存"
+    );
     let after = engine
         .get_activation_tree(&sid2, 0, 100)
         .expect("after reload");
@@ -352,15 +358,20 @@ fn test_bit_corrupted_v6_activation_section_triggers_rescan() {
     let path = get_trace_path();
     let dir = current_cache_dir();
 
-    // 只翻转 ActivationTree bincode 尾部一个字节（magic/布局/其他 section 完好）
+    // 损坏构造：只改 section 表里 ActivationTree 的 length 为 1（数据字节
+    // 保留）。布局预检（range/对齐/整除）全部通过、magic/hash 头部完好
+    //——真正到达 bincode 反序列化分支并失败。（翻转尾部字节会被更早的
+    // 防御层拦下，覆盖不到本分支。）
     let cache_file = dir.join(format!(
         "{}{}",
         trace_core::cache::path_hash_for_test(&path),
         ".p2.cache"
     ));
     let mut bytes = std::fs::read(&cache_file).expect("cache written by first build");
-    let last = bytes.len() - 1;
-    bytes[last] ^= 0xFF;
+    let num = u32::from_le_bytes(bytes[64..68].try_into().unwrap()) as usize;
+    assert_eq!(num, 8, "V6 p2 cache must have exactly 8 sections");
+    let base = 64 + 4 + 7 * 16; // section 7 表项（offset + length）
+    bytes[base + 8..base + 16].copy_from_slice(&1u64.to_le_bytes());
     std::fs::write(&cache_file, &bytes).unwrap();
 
     let info = engine
@@ -376,8 +387,8 @@ fn test_bit_corrupted_v6_activation_section_triggers_rescan() {
             },
             None,
         )
-        .expect("bit-corrupted cache must miss and rescan");
-    assert!(!build.from_cache, "位损坏缓存不得命中");
+        .expect("bincode 损坏必须回退重扫，不得返回 Internal");
+    assert!(!build.from_cache, "损坏缓存不得命中");
 
     let tree = engine
         .get_activation_tree(&sid2, 0, 100)
@@ -432,4 +443,59 @@ fn test_v5_layout_cache_rejected_by_magic_bump() {
         .expect("rescan must produce ActivationTree");
     assert_eq!(tree.total_activations, total);
     engine.close_session(&sid2).unwrap();
+}
+
+/// 合法空数组 section（无 patch/依赖数据的极简 trace）二次加载必须命中
+///——typed 预检不得把空数组误判为损坏（旧实现 length>0 强制导致
+/// 部分合法缓存每次重扫甚至 view getter panic）。
+#[test]
+fn test_empty_array_sections_cache_reload_hits() {
+    // 极简 trace：无内存访问、无 def-use，依赖/patch 数组为空
+    let dir = std::env::temp_dir().join(format!("trace-ui-itest-emptyarr-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    let trace_path = dir.join("trace.log");
+    std::fs::write(
+        &trace_path,
+        "[lib.so] 0x1000!0x100 nop\n[lib.so] 0x1004!0x104 nop\n[lib.so] 0x1008!0x108 nop\n",
+    )
+    .unwrap();
+
+    let guard = trace_core::cache::cache_dir_override_test_lock();
+    trace_core::cache::set_cache_dir_override(Some(dir.join("cache")));
+    std::fs::create_dir_all(dir.join("cache")).unwrap();
+
+    let engine = std::sync::Arc::new(trace_core::TraceEngine::new());
+    let info = engine.create_session(trace_path.to_str().unwrap()).unwrap();
+    let sid = info.session_id.clone();
+    let b1 = engine
+        .build_index(
+            &sid,
+            trace_core::BuildOptions {
+                force_rebuild: false,
+                skip_strings: true,
+            },
+            None,
+        )
+        .unwrap();
+    assert!(!b1.from_cache);
+    engine.close_session(&sid).unwrap();
+
+    let info2 = engine.create_session(trace_path.to_str().unwrap()).unwrap();
+    let sid2 = info2.session_id.clone();
+    let b2 = engine
+        .build_index(
+            &sid2,
+            trace_core::BuildOptions {
+                force_rebuild: false,
+                skip_strings: true,
+            },
+            None,
+        )
+        .unwrap();
+    // 空数组 section 合法：必须命中缓存（不得误判损坏/panic）
+    assert!(b2.from_cache, "合法空数组缓存必须命中");
+    engine.close_session(&sid2).unwrap();
+    drop(guard);
+    let _ = std::fs::remove_dir_all(&dir);
 }

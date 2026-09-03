@@ -115,18 +115,30 @@ impl super::TraceEngine {
                     };
 
                 let phase2_store = CachedStore::Mapped(p2_mmap);
-                // CallTree 反序列化失败（损坏/旧布局）= 缓存不可信，整体 miss
-                // 重扫，而不是带着 None 继续半初始化状态。
-                let call_tree = phase2_store
-                    .deserialize_call_tree()
-                    .ok_or_else(|| TraceError::Internal("p2 cache corrupt: CallTree".into()))?;
-                // ActivationTree 同样：V6 缓存携带它，反序列化失败（位损坏）
-                // 不能带 None 进入 CacheHit——那会让查询永远 IndexNotReady
-                // 且下次 build 仍 cache hit（不重扫）。同判损坏，整体 miss。
-                let activation_tree =
-                    phase2_store.deserialize_activation_tree().ok_or_else(|| {
-                        TraceError::Internal("p2 cache corrupt: ActivationTree".into())
-                    })?;
+                // CallTree/ActivationTree 反序列化失败（位损坏/旧布局）= 该缓存
+                // 不可信。不能返回错误（缓存损坏挡住一切），也不能带 None
+                // 进入 CacheHit（查询永久 IndexNotReady 且下次仍命中同一坏
+                // 缓存）——正确行为是放弃本次命中，回退全量重扫。
+                let cache_payload = phase2_store.deserialize_call_tree().and_then(|call_tree| {
+                    phase2_store
+                        .deserialize_activation_tree()
+                        .map(|activation_tree| (call_tree, activation_tree))
+                });
+                let (call_tree, activation_tree) = match cache_payload {
+                    Some(t) => t,
+                    None => {
+                        eprintln!("[index] p2 cache payload corrupt; falling back to full rescan");
+                        return self.build_index_inner(
+                            session_id,
+                            handle,
+                            BuildOptions {
+                                force_rebuild: true,
+                                skip_strings,
+                            },
+                            on_progress,
+                        );
+                    }
+                };
 
                 let scan_store = CachedStore::Mapped(scan_mmap);
                 let reg_last_def = scan_store.deserialize_reg_last_def();

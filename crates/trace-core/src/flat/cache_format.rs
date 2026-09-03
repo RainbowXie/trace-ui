@@ -117,32 +117,58 @@ impl<'a> SectionReader<'a> {
         Some(Self { data, sections })
     }
 
-    /// 预检：section 能否安全转成 elem_size 字节元素的 typed slice——
-    /// offset 对元素对齐、length 是元素大小的整数倍且非零
-    ///（单值 section 零长 [0] panic；数组零长无意义视为损坏）。
-    /// 不满足 = 损坏缓存，调用方应整体判 miss。
+    /// 预检：section 能否安全转成 elem_size 字节元素的 typed slice。
     ///
-    /// 对齐基准：mmap（memmap2）返回页对齐基址，数据区从 header 后开始；
-    /// elem_size <= 8 且 offset % elem == 0 时基址 + offset 安全。
+    /// 模型（与写入器 write_slice 的实际保证一致）：
+    /// - 对齐：writer 把每个 section 起点对齐到 8 字节（buf.len()%8 补零），
+    ///   mmap 基址页对齐，故只需 offset % elem_align == 0（elem_align 取
+    ///   类型自身的 align_of，如 FlatMemAccessRecord 是 24 字节/对齐 8）；
+    /// - 整除：length 必须是 elem_size 的整数倍（非整除会静默截断）；
+    /// - 空数组：合法（writer 可写入空 Vec），返回空切片；只有单值
+    ///   读取（u32_val/u64_val 的 [0]）需要非零——由调用方另验。
     pub fn is_valid_typed(&self, idx: usize, elem_size: usize) -> bool {
+        self.is_valid_typed_align(idx, elem_size, elem_size)
+    }
+
+    /// 同上，但对齐要求可不同于 elem_size（元素大小 24 的结构体只需
+    /// 8 字节对齐——writer 只保证 8）。单值场景传 require_nonzero=true。
+    pub fn is_valid_typed_align(&self, idx: usize, elem_size: usize, elem_align: usize) -> bool {
         let Some(&(offset, length)) = self.sections.get(idx) else {
             return false;
         };
         let offset = offset as usize;
         let length = length as usize;
-        offset % elem_size == 0 && length % elem_size == 0 && length > 0
+        // 零长：合法空数组（对齐/整除平凡成立）
+        if length == 0 {
+            return true;
+        }
+        offset % elem_align == 0 && length % elem_size == 0
+    }
+
+    /// 单值预检：非零长度且对齐/整除（u32_val/u64_val 的 [0] 需要）。
+    pub fn is_valid_single(&self, idx: usize, elem_size: usize) -> bool {
+        self.is_valid_typed_align(idx, elem_size, elem_size) && self.section_len(idx) > 0
+    }
+
+    /// section 字节长度。
+    pub fn section_len(&self, idx: usize) -> usize {
+        self.sections
+            .get(idx)
+            .map(|&(_, l)| l as usize)
+            .unwrap_or(0)
     }
 
     /// typed slice：调用方必须先用 is_valid_typed 验证本 section
-    ///（views_from_sections 预检后构造），否则未对齐 from_raw_parts 是 UB、
-    /// 非整除会静默截断。零长 section 返回空切片（合法；单值读取
-    /// u32_val/u64_val 由预检的非零要求守护）。debug_assert 拦截
-    /// 未预检的对齐/整除违规。
+    ///（views_from_sections 预检后构造）。零长 section 返回空切片（合法；
+    /// 单值读取 u32_val/u64_val 由预检的非零要求守护）。
+    /// debug_assert 拦截违规：对齐要求是类型自身的 align_of（不是 size_of
+    ///——24 字节的 FlatMemAccessRecord 只需 8 字节对齐，writer 也只保证 8）。
     pub fn slice<T: Copy>(&self, idx: usize) -> &'a [T] {
         let (offset, length) = self.sections[idx];
         let bytes = &self.data[offset as usize..(offset + length) as usize];
-        let elem = std::mem::size_of::<T>() as u64;
-        debug_assert!(length == 0 || (offset % elem == 0 && length % elem == 0));
+        let align = std::mem::align_of::<T>() as u64;
+        let size = std::mem::size_of::<T>() as u64;
+        debug_assert!(length == 0 || (offset % align == 0 && length % size == 0));
         unsafe {
             std::slice::from_raw_parts(
                 bytes.as_ptr() as *const T,
@@ -251,10 +277,13 @@ mod tests {
         let bytes = w.finish();
 
         let r = SectionReader::new(&bytes).unwrap();
-        // 空数组 section（len 0）：合法零长切片，但不得再用 u32_val 读
-        // 单值（零长 [0] panic）；预检 is_valid_typed 判非法。
+        // 空数组 section（len 0）合法（C1 修复语义：writer 可写空 Vec，
+        // typed 预检不得误判损坏）：typed slice 返回空；单值读取
+        // u32_val 零长 [0] panic 由 is_valid_single 拦截。
         assert!(r.bytes(0).is_empty());
-        assert!(!r.is_valid_typed(0, 4));
+        assert!(r.slice::<u32>(0).is_empty());
+        assert!(r.is_valid_typed(0, 4), "空数组合法");
+        assert!(!r.is_valid_single(0, 4), "单值读取需要非零");
     }
 
     #[test]

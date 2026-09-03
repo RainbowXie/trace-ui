@@ -60,22 +60,21 @@ impl Phase2Archive {
         if r.num_sections() != 8 {
             return None;
         }
-        // typed slice 安全预检（对齐/整除/非零）：不满足 = 损坏缓存整体 miss。
-        // 元素大小与写入路径（write_to_sections）一一对应：
-        // 0 addrs u64、1 offsets u32(CSR)、2 records 24B 结构体、
-        // 3/4 interval/count u32 单值、5 reg checkpoints u64 数组。
-        // 6/7 bincode 字节不做零长拒绝（空串在反序列化时 miss，可控）。
-        for (idx, elem) in [
-            (0usize, 8usize),
-            (1, 4),
-            (2, std::mem::size_of::<FlatMemAccessRecord>()),
-            (3, 4),
-            (4, 4),
-            (5, 8),
-        ] {
-            if !r.is_valid_typed(idx, elem) {
-                return None;
-            }
+        // typed slice 安全预检：不满足 = 损坏缓存整体 miss。
+        // 元素大小/对齐与写入路径（write_to_sections）一一对应：
+        // 0 addrs u64、1 offsets u32(CSR)、2 records 24B 结构体（对齐 8）、
+        // 3/4 interval/count u32 单值（非零）、5 reg checkpoints u64 数组。
+        // 数组 section 空合法；6/7 bincode 字节不预检（反序列化时 miss）。
+        let rec_size = std::mem::size_of::<FlatMemAccessRecord>();
+        let rec_align = std::mem::align_of::<FlatMemAccessRecord>();
+        if !r.is_valid_typed(0, 8)
+            || !r.is_valid_typed(1, 4)
+            || !r.is_valid_typed_align(2, rec_size, rec_align)
+            || !r.is_valid_single(3, 4)
+            || !r.is_valid_single(4, 4)
+            || !r.is_valid_typed(5, 8)
+        {
+            return None;
         }
         Some(Phase2Views {
             mem_accesses: MemAccessView::from_raw(r.slice(0), r.slice(1), r.slice(2)),
@@ -148,6 +147,9 @@ impl ScanArchive {
         // mem_last_def 8 addrs u64 / 9 lines u32 / 10 values u64、
         // pair_split 11-13 u32、init_mem_loads 14 data u8 + 15 len u32 单值、
         // 16 reg_last_def_inner u32、17-19 计数 u32 单值。
+        // typed slice 安全预检：不满足 = 损坏缓存整体 miss。
+        // 数组 section（元素与写入路径一一对应）空合法；
+        // 单值 section（15 len、17-19 计数）要求非零。
         for (idx, elem) in [
             (0usize, 4usize),
             (1, 4),
@@ -164,13 +166,14 @@ impl ScanArchive {
             (12, 4),
             (13, 4),
             (14, 1),
-            (15, 4),
             (16, 4),
-            (17, 4),
-            (18, 4),
-            (19, 4),
         ] {
             if !r.is_valid_typed(idx, elem) {
+                return None;
+            }
+        }
+        for idx in [15usize, 17, 18, 19] {
+            if !r.is_valid_single(idx, 4) {
                 return None;
             }
         }
@@ -223,8 +226,8 @@ impl LineIndexArchive {
         if r.num_sections() < 2 {
             return None;
         }
-        // 0 sampled_offsets u64 数组、1 total u32 单值
-        if !r.is_valid_typed(0, 8) || !r.is_valid_typed(1, 4) {
+        // 0 sampled_offsets u64 数组（空合法）、1 total u32 单值（非零）
+        if !r.is_valid_typed(0, 8) || !r.is_valid_single(1, 4) {
             return None;
         }
         Some(LineIndexView::from_raw(r.slice(0), r.u32_val(1)))
