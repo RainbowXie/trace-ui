@@ -225,13 +225,11 @@ impl crate::engine::TraceEngine {
             let b_take = (limit as usize).min(tree.bypassed_calls.len().saturating_sub(b_skip));
             let b_page = &tree.bypassed_calls[b_skip..b_skip + b_take];
 
-            // 全量计数（不复制树：直接在切片上数）
-            let non_root = &activations[1..];
-            let confirmed = non_root
-                .iter()
-                .filter(|a| a.unresolved_reason.is_none())
-                .count() as u32;
-            let unresolved = (non_root.len() as u32).saturating_sub(confirmed);
+            // 全量计数（不扫描全树：confirmed_ids 就是全量索引，
+            // 百万级调用下每页 O(n) 线性过滤会放大到不可接受）
+            let confirmed = tree.confirmed_ids.len() as u32;
+            let non_root = (activations.len() - 1) as u32;
+            let unresolved = non_root.saturating_sub(confirmed);
 
             Ok(ActivationTreeDto {
                 activations: page

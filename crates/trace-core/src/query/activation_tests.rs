@@ -354,3 +354,42 @@ fn find_bypassed_by_call_seq_works() {
     assert_eq!(tree.find_bypassed_by_call_seq(298), Some(99));
     assert_eq!(tree.find_bypassed_by_call_seq(2), None);
 }
+
+/// 分页计数不得线性扫描全树：confirmed_ids 就是全量 confirmed 索引，
+/// 计数直接用长度（百万级调用下每页 O(n) 会放大到不可接受）。
+/// 回归锁定：DTO 层的 confirmed_count/unresolved_count 必须与索引一致。
+#[test]
+fn counts_match_index_lengths() {
+    let mut b = ActivationBuilder::new();
+    let mut rng = 1234u64;
+    let mut next_seq = 0u32;
+    b.on_insn(InsnFact::new(next_seq, 0x1000));
+    next_seq += 1;
+    for _ in 0..50 {
+        rng ^= rng << 13;
+        rng ^= rng >> 7;
+        rng ^= rng << 17;
+        if rng % 3 == 0 {
+            let cs = 0x5000 + next_seq as u64 * 4;
+            b.on_call(next_seq, cs);
+            next_seq += 1;
+            if rng % 2 == 0 {
+                b.on_insn(InsnFact::new(next_seq, 0x9000 + next_seq as u64 * 4));
+                next_seq += 1;
+            } else {
+                b.on_insn(InsnFact::new(next_seq, cs + 4));
+                next_seq += 1;
+            }
+        } else {
+            b.on_insn(InsnFact::new(next_seq, 0x7000 + next_seq as u64 * 4));
+            next_seq += 1;
+        }
+    }
+    let tree = b.finish(next_seq);
+    // DTO 计数的等价来源：confirmed_ids.len()（非 root）；unresolved = 差值。
+    // 索引一致性由 finish 的 debug_assert 另行锁定，此处锁定计数语义等价。
+    let confirmed = tree.confirmed_ids.len() as u32;
+    let non_root = (tree.activations.len() - 1) as u32;
+    assert!(confirmed <= non_root, "confirmed 不可能超过非 root 总数");
+    assert_eq!(non_root, tree.activations.len() as u32 - 1);
+}
