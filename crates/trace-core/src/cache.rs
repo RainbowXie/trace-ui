@@ -1,9 +1,9 @@
 use crate::query::strings::StringIndex;
+use crate::staging;
 use memmap2::Mmap;
 use sha2::{Digest, Sha256};
-use std::io::{BufReader, BufWriter, Read, Write};
+use std::io::{BufReader, Read, Write};
 use std::path::PathBuf;
-use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, RwLock};
 
 // MAGIC 版本即缓存布局版本：布局变更（如 .p2.cache 增加 ActivationTree section）
@@ -129,56 +129,6 @@ fn load_cached<T: serde::de::DeserializeOwned>(
     bincode::deserialize_from(reader).ok()
 }
 
-/// 原子发布：staging（同目录临时文件）→ 写入 → flush+rename。
-/// 跨 session 竞态防护：同一 trace 可开多个 session 共享同一缓存路径，
-/// 直接 File::create 截断会让已 mmap 旧文件的 session 触发 SIGBUS；
-/// rename 原子替换保证读者要么看到完整旧文件、要么看到完整新文件，
-/// 已 mmap 的旧 inode 在 unlink 后仍可安全访问（POSIX 语义）。
-fn atomic_publish(
-    path: &std::path::Path,
-    write_fn: impl FnOnce(&mut BufWriter<std::fs::File>) -> bool,
-) -> bool {
-    // 同进程可并发写同一 cache key（多 session）；仅 pid 会撞临时文件。
-    static SEQ: AtomicU64 = AtomicU64::new(0);
-    let name = path.file_name().and_then(|n| n.to_str()).unwrap_or("cache");
-    let tmp = path.with_file_name(format!(
-        ".{}.{}.{}.tmp",
-        name,
-        std::process::id(),
-        SEQ.fetch_add(1, Ordering::Relaxed)
-    ));
-    let file = match std::fs::File::create(&tmp) {
-        Ok(f) => f,
-        Err(_) => return false,
-    };
-    let mut writer = BufWriter::new(file);
-    if !write_fn(&mut writer) {
-        let _ = std::fs::remove_file(&tmp);
-        return false;
-    }
-    if writer.flush().is_err() {
-        let _ = std::fs::remove_file(&tmp);
-        return false;
-    }
-    let file = match writer.into_inner() {
-        Ok(f) => f,
-        Err(_) => {
-            let _ = std::fs::remove_file(&tmp);
-            return false;
-        }
-    };
-    if file.sync_all().is_err() {
-        let _ = std::fs::remove_file(&tmp);
-        return false;
-    }
-    drop(file);
-    if std::fs::rename(&tmp, path).is_err() {
-        let _ = std::fs::remove_file(&tmp);
-        return false;
-    }
-    true
-}
-
 fn save_cached<T: serde::Serialize>(file_path: &str, data: &[u8], suffix: &str, value: &T) {
     let Some(path) = cache_path(file_path, suffix) else {
         return;
@@ -193,7 +143,7 @@ fn save_cached<T: serde::Serialize>(file_path: &str, data: &[u8], suffix: &str, 
     };
     let mut header = Vec::with_capacity(48);
     write_header(&mut header, data);
-    let _ = atomic_publish(&path, move |w| {
+    let _ = staging::atomic_publish(&path, move |w| {
         w.write_all(&header).is_ok() && w.write_all(&payload).is_ok()
     });
 }
@@ -208,7 +158,7 @@ pub fn save_bincode_raw(file_path: &str, data: &[u8], suffix: &str, payload: &[u
     }
     let mut header = Vec::with_capacity(48);
     write_header(&mut header, data);
-    let _ = atomic_publish(&path, move |w| {
+    let _ = staging::atomic_publish(&path, move |w| {
         w.write_all(&header).is_ok() && w.write_all(payload).is_ok()
     });
 }
@@ -230,7 +180,7 @@ pub fn save_sections_raw(file_path: &str, data: &[u8], suffix: &str, section_byt
     header.resize(HEADER_LEN_V6, 0); // pad to 64 bytes
 
     let payload_len = section_bytes.len();
-    if atomic_publish(&path, move |w| {
+    if staging::atomic_publish(&path, move |w| {
         w.write_all(&header).is_ok() && w.write_all(section_bytes).is_ok()
     }) {
         eprintln!(
@@ -411,8 +361,10 @@ pub fn clear_all_cache() -> (u32, u64) {
     if let Ok(entries) = std::fs::read_dir(&dir) {
         for entry in entries.flatten() {
             let path = entry.path();
+            let name = path.file_name().and_then(|n| n.to_str()).unwrap_or("");
+            let is_staging = name.starts_with('.') && name.contains(".tmp.");
             let ext = path.extension().and_then(|e| e.to_str());
-            if ext == Some("bin") || ext == Some("rkyv") || ext == Some("cache") {
+            if is_staging || ext == Some("bin") || ext == Some("rkyv") || ext == Some("cache") {
                 if let Ok(meta) = path.metadata() {
                     total_size += meta.len();
                 }

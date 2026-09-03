@@ -5,7 +5,6 @@ use std::sync::atomic::Ordering;
 
 use trace_parser::types::TraceFormat;
 
-use super::cache::sync_parent_dir;
 #[cfg(unix)]
 use super::fingerprint::{
     fd_signature, fingerprint_path, search_memory_fd_verified,
@@ -20,6 +19,7 @@ use super::{
 use crate::cache::cache_dir_override_test_lock as cache_test_guard;
 #[cfg(unix)]
 use crate::error::TraceError;
+use crate::staging::sync_parent_dir;
 
 #[test]
 fn cache_contains_all_occurrences_and_default_ranges_hit_without_rescanning() {

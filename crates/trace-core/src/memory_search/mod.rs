@@ -19,6 +19,8 @@ mod fingerprint;
 mod scan;
 
 #[cfg(test)]
+mod cache_publish_tests;
+#[cfg(test)]
 mod cache_tests;
 #[cfg(test)]
 mod tests;
@@ -54,8 +56,6 @@ pub(crate) const CACHE_TAG_LEN: usize = 8;
 const PER_MATCH_ENVELOPE: usize = 512;
 /// 响应预算里响应体外层字段的固定开销上界。
 const RESPONSE_BASE_ENVELOPE: usize = 512;
-/// staging 文件的最长存活时间：PID 被复用后靠它兜底回收。
-pub(crate) const STAGING_MAX_AGE: std::time::Duration = std::time::Duration::from_secs(24 * 3600);
 #[cfg(unix)]
 pub(crate) const FINGERPRINT_MAGIC: &[u8; 8] = b"TMSFPR01";
 

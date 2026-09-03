@@ -12,6 +12,7 @@ use trace_core::TraceEngine;
 
 mod activation;
 mod analysis;
+mod cache_corruption;
 mod export;
 mod misc;
 mod search;

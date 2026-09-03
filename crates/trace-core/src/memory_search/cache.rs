@@ -3,7 +3,7 @@
 
 use std::fs::{self, File, OpenOptions};
 use std::io::{Read, Seek, Write};
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 
 use sha2::{Digest, Sha256};
 use trace_parser::types::TraceFormat;
@@ -14,9 +14,10 @@ use super::CACHE_RECORD_READ_COUNT;
 use super::{
     cache_header_total_len, ensure_trace_unchanged, CachePage, MemoryOccurrence,
     MemorySearchOptions, MemorySearchRw, CACHE_HEADER_DIGEST_LEN, CACHE_HEADER_LEN, CACHE_MAGIC,
-    CACHE_RECORD_LEN, CACHE_TAG_LEN, STAGING_MAX_AGE,
+    CACHE_RECORD_LEN, CACHE_TAG_LEN,
 };
 use crate::error::{Result, TraceError};
+use crate::staging;
 
 /// 每条 record 的完整性 tag：绑定内容身份、记录序号与 record 字节。
 /// 合法外观的篡改（改 seq/address/rw）或跨页复制都会使 tag 失配。
@@ -172,14 +173,7 @@ pub(crate) fn load_cache_page(
     })
 }
 
-/// Flush the parent directory after publishing a cache file.  A cache whose
-/// directory entry was not flushed cannot be considered published, so open
-/// and sync failures are errors, not best-effort hints.
-pub(crate) fn sync_parent_dir(parent: &Path) -> Result<()> {
-    let parent_file = File::open(parent).map_err(TraceError::Io)?;
-    parent_file.sync_all().map_err(TraceError::Io)?;
-    Ok(())
-}
+pub(crate) use crate::staging::cleanup_stale_staging_files;
 
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn stream_cache(
@@ -196,7 +190,7 @@ pub(crate) fn stream_cache(
         TraceError::CacheError("memory search cache has no parent directory".to_string())
     })?;
     fs::create_dir_all(parent).map_err(TraceError::Io)?;
-    cleanup_stale_staging_files(parent)?;
+    staging::cleanup_stale_staging_files(parent)?;
     let temp_path = parent.join(format!(
         ".{}.tmp.{}.{}",
         path.file_name()
@@ -275,7 +269,8 @@ pub(crate) fn stream_cache(
         write_cache_header(&mut file, &header).map_err(TraceError::Io)?;
         file.sync_all().map_err(TraceError::Io)?;
         fs::rename(&temp_path, path).map_err(TraceError::Io)?;
-        sync_parent_dir(parent)?;
+        // rename 已把新文件挂到最终名；父目录 fsync 失败不得把这次搜索写成错误。
+        let _ = staging::published_after_rename(path, parent);
         Ok(())
     })();
     if result.is_err() {
@@ -295,114 +290,6 @@ fn write_all_at(file: &File, buf: &[u8], offset: u64) -> std::io::Result<()> {
         let mut file = file;
         file.seek(std::io::SeekFrom::Start(offset))?;
         file.write_all(buf)
-    }
-}
-
-/// 检查指定进程是否实际持有（打开着）某个文件。
-/// 用于区分“真实的长扫描 writer”与“复用了旧 PID 的无关进程”：
-/// 前者任何年龄都不得回收，后者按年龄兑底。
-#[cfg(target_os = "linux")]
-fn staging_file_held_by(pid: u32, path: &Path) -> bool {
-    let Ok(entries) = fs::read_dir(format!("/proc/{pid}/fd")) else {
-        return false;
-    };
-    let target = fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf());
-    for entry in entries.flatten() {
-        if let Ok(link) = fs::read_link(entry.path()) {
-            let link = fs::canonicalize(&link).unwrap_or(link);
-            if link == target {
-                return true;
-            }
-        }
-    }
-    false
-}
-
-#[cfg(all(unix, not(target_os = "linux")))]
-fn staging_file_held_by(_pid: u32, _path: &Path) -> bool {
-    // 无 /proc 可查时保守保留活着 PID 的 staging（年龄规则不介入）。
-    true
-}
-
-#[cfg(not(unix))]
-fn staging_file_held_by(_pid: u32, _path: &Path) -> bool {
-    // Windows 无 fd 持有检测；按死 PID 处理，交由年龄/PID 规则回收。
-    false
-}
-
-/// Remove abandoned cache staging files left by a process that was killed
-/// while scanning.  A live writer keeps its staging file; a subsequent build
-/// reclaims files whose recorded writer PID no longer exists, so repeated
-/// failed helpers cannot accumulate unbounded disk usage.
-pub(crate) fn cleanup_stale_staging_files(parent: &Path) -> Result<()> {
-    let entries = fs::read_dir(parent).map_err(TraceError::Io)?;
-    let current_pid = std::process::id();
-    for entry in entries {
-        let entry = entry.map_err(TraceError::Io)?;
-        let Some(name) = entry.file_name().to_str().map(str::to_owned) else {
-            continue;
-        };
-        let Some(rest) = name.strip_prefix('.') else {
-            continue;
-        };
-        let Some((cache_name, pid_and_uuid)) = rest.rsplit_once(".tmp.") else {
-            continue;
-        };
-        if !cache_name.ends_with(".memory-search.cache") {
-            continue;
-        }
-        let Some(pid_text) = pid_and_uuid.split('.').next() else {
-            continue;
-        };
-        let Ok(pid) = pid_text.parse::<u32>() else {
-            continue;
-        };
-        // 活着的 PID 仍可能是复用的：只有该进程实际持有这个文件时才一定是
-        // 真实 writer，任何年龄都保留；不持有但较新的 staging 可能是即将被
-        // 持有的并发构建，也保留；其余活着但过期的 staging 一律回收。
-        let pid_alive = pid == current_pid || staging_process_is_alive(pid);
-        if pid_alive {
-            if staging_file_held_by(pid, &entry.path()) {
-                continue;
-            }
-            let aged_out = entry
-                .metadata()
-                .and_then(|m| m.modified())
-                .map(|modified| {
-                    modified
-                        .elapsed()
-                        .map(|age| age > STAGING_MAX_AGE)
-                        .unwrap_or(false)
-                })
-                .unwrap_or(false);
-            if !aged_out {
-                continue;
-            }
-        }
-        match fs::remove_file(entry.path()) {
-            Ok(()) => {}
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
-            Err(error) => return Err(TraceError::Io(error)),
-        }
-    }
-    Ok(())
-}
-
-fn staging_process_is_alive(pid: u32) -> bool {
-    #[cfg(unix)]
-    {
-        if pid > i32::MAX as u32 {
-            return false;
-        }
-        // SAFETY: kill(pid, 0) performs no signal delivery; it only probes
-        // whether the process exists (EPERM still means it is alive).
-        let result = unsafe { libc::kill(pid as libc::pid_t, 0) };
-        result == 0 || std::io::Error::last_os_error().raw_os_error() == Some(libc::EPERM)
-    }
-    #[cfg(not(unix))]
-    {
-        let _ = pid;
-        false
     }
 }
 

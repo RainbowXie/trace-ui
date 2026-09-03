@@ -15,6 +15,7 @@ pub mod query;
 pub mod scan_unified;
 pub mod scanner;
 pub mod session;
+mod staging;
 pub mod utils;
 
 pub use api_types::*;
