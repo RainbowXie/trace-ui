@@ -53,7 +53,7 @@ impl Phase2Archive {
     /// `data` = &mmap[HEADER_LEN..] (after 64-byte cache header)
     pub fn views_from_sections(data: &[u8]) -> Option<Phase2Views<'_>> {
         let r = SectionReader::new(data)?;
-        // V5 缓存（magic TCACHE05）布局固定为恰好 8 个 section；
+        // V6 缓存（magic TCACHE06）布局固定为恰好 8 个 section；
         // 不等于 8 = 损坏/截断缓存，整体判 miss 触发重扫重建，
         // fail-closed：不能接受半新半旧布局（ActivationTree 永久缺失）。
         // 旧 V4/更早缓存在 cache.rs 的 magic 校验处已 miss，不会到达这里。
@@ -280,7 +280,7 @@ impl CachedStore<Phase2Archive> {
             Self::Mapped(mmap) => {
                 let views = Phase2Archive::views_from_sections(&mmap[HEADER_LEN..])?;
                 // 结构变更后旧缓存反序列化失败时不 panic：返回 None 让 session
-                // 进入 IndexNotReady；缓存版本号（MAGIC_V5）机制在下次重建时
+                // 进入 IndexNotReady；缓存版本号（MAGIC_V6）机制在下次重建时
                 // 自然修复。
                 views
                     .activation_tree_bytes

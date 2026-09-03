@@ -145,9 +145,10 @@ impl<'a> SectionReader<'a> {
         offset % elem_align == 0 && length % elem_size == 0
     }
 
-    /// 单值预检：非零长度且对齐/整除（u32_val/u64_val 的 [0] 需要）。
+    /// 单值预检：长度必须恰为 elem_size（u32_val/u64_val 的 [0] 需要）；
+    /// 多余字节静默忽略会掩盖布局漂移，零长 [0] 会 panic。
     pub fn is_valid_single(&self, idx: usize, elem_size: usize) -> bool {
-        self.is_valid_typed_align(idx, elem_size, elem_size) && self.section_len(idx) > 0
+        self.is_valid_typed_align(idx, elem_size, elem_size) && self.section_len(idx) == elem_size
     }
 
     /// section 字节长度。
@@ -283,7 +284,20 @@ mod tests {
         assert!(r.bytes(0).is_empty());
         assert!(r.slice::<u32>(0).is_empty());
         assert!(r.is_valid_typed(0, 4), "空数组合法");
-        assert!(!r.is_valid_single(0, 4), "单值读取需要非零");
+        assert!(!r.is_valid_single(0, 4), "单值读取需要恰好 elem_size");
+    }
+
+    #[test]
+    fn test_single_rejects_padded_length() {
+        // 8 字节的“u32 单值”整除且非零，但后四字节会被静默忽略——
+        // 精确长度要求才能拦住布局漂移。
+        let mut w = SectionWriter::new();
+        w.write_slice(&[1u32, 2]);
+        let bytes = w.finish();
+        let r = SectionReader::new(&bytes).unwrap();
+        assert!(r.is_valid_typed(0, 4));
+        assert_eq!(r.section_len(0), 8);
+        assert!(!r.is_valid_single(0, 4));
     }
 
     #[test]

@@ -411,9 +411,9 @@ fn test_v5_layout_cache_rejected_by_magic_bump() {
     let path = get_trace_path();
     let dir = current_cache_dir();
 
-    // 构造“旧 V5 缓存”：合法 V6 文件但 magic 改回 TCACHE05。
-    // V5 与 V6 的唯一差异就是 magic（布局字段数不同会反序列化失败），
-    // 这精确复现 52d42b1 时代生成的缓存。
+    // 构造：合法 V6 文件但 magic 改回 TCACHE05。
+    // 注意：这不是精确复现旧 V5 布局（V5 的 bincode 字段数与 V6 不同），
+    // 只验证 magic 拒绝路径——旧 magic 必须 miss 重扫而不是误命中。
     let cache_file = dir.join(format!(
         "{}{}",
         trace_core::cache::path_hash_for_test(&path),
@@ -498,4 +498,92 @@ fn test_empty_array_sections_cache_reload_hits() {
     engine.close_session(&sid2).unwrap();
     drop(guard);
     let _ = std::fs::remove_dir_all(&dir);
+}
+
+fn corrupt_section_count(cache_file: &std::path::Path, expected: u32, reported: u32) {
+    let bytes = std::fs::read(cache_file).expect("cache written by first build");
+    assert!(bytes.len() > 64);
+    let num = u32::from_le_bytes(bytes[64..68].try_into().unwrap());
+    assert_eq!(num, expected);
+    let mut corrupted = bytes.clone();
+    corrupted[64..68].copy_from_slice(&reported.to_le_bytes());
+    let table_end = 64 + 4 + (expected as usize) * 16;
+    let new_table_end = 64 + 4 + (reported as usize) * 16;
+    corrupted.drain(new_table_end..table_end);
+    std::fs::write(cache_file, &corrupted).unwrap();
+}
+
+/// scan/lidx 损坏必须在加载预检 miss，不得进入 view getter unwrap panic。
+#[test]
+fn test_corrupted_scan_cache_triggers_rescan_not_panic() {
+    let (engine, sid, _guard) = setup_session_locked(&get_trace_path());
+    let total = engine
+        .get_activation_tree(&sid, 0, 100)
+        .unwrap()
+        .total_activations;
+    engine.close_session(&sid).unwrap();
+    let path = get_trace_path();
+    let dir = current_cache_dir();
+    let cache_file = dir.join(format!(
+        "{}{}",
+        trace_core::cache::path_hash_for_test(&path),
+        ".scan.cache"
+    ));
+    corrupt_section_count(&cache_file, 20, 19);
+
+    let info = engine.create_session(&path).expect("reopen scan cache");
+    let sid2 = info.session_id.clone();
+    let build = engine
+        .build_index(
+            &sid2,
+            trace_core::BuildOptions {
+                force_rebuild: false,
+                skip_strings: false,
+            },
+            None,
+        )
+        .expect("scan 损坏必须回退重扫，不得 panic");
+    assert!(!build.from_cache, "损坏 scan 缓存不得命中");
+    let tree = engine
+        .get_activation_tree(&sid2, 0, 100)
+        .expect("rescan must produce ActivationTree");
+    assert_eq!(tree.total_activations, total);
+    engine.close_session(&sid2).unwrap();
+}
+
+#[test]
+fn test_corrupted_lidx_cache_triggers_rescan_not_panic() {
+    let (engine, sid, _guard) = setup_session_locked(&get_trace_path());
+    let total = engine
+        .get_activation_tree(&sid, 0, 100)
+        .unwrap()
+        .total_activations;
+    engine.close_session(&sid).unwrap();
+    let path = get_trace_path();
+    let dir = current_cache_dir();
+    let cache_file = dir.join(format!(
+        "{}{}",
+        trace_core::cache::path_hash_for_test(&path),
+        ".lidx.cache"
+    ));
+    corrupt_section_count(&cache_file, 2, 1);
+
+    let info = engine.create_session(&path).expect("reopen lidx cache");
+    let sid2 = info.session_id.clone();
+    let build = engine
+        .build_index(
+            &sid2,
+            trace_core::BuildOptions {
+                force_rebuild: false,
+                skip_strings: false,
+            },
+            None,
+        )
+        .expect("lidx 损坏必须回退重扫，不得 panic");
+    assert!(!build.from_cache, "损坏 lidx 缓存不得命中");
+    let tree = engine
+        .get_activation_tree(&sid2, 0, 100)
+        .expect("rescan must produce ActivationTree");
+    assert_eq!(tree.total_activations, total);
+    engine.close_session(&sid2).unwrap();
 }

@@ -3,6 +3,7 @@ use memmap2::Mmap;
 use sha2::{Digest, Sha256};
 use std::io::{BufReader, BufWriter, Read, Write};
 use std::path::PathBuf;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, RwLock};
 
 // MAGIC 版本即缓存布局版本：布局变更（如 .p2.cache 增加 ActivationTree section）
@@ -12,10 +13,11 @@ use std::sync::{Arc, RwLock};
 // 与 V5 的 bincode 布局不兼容；旧 V5/更早缓存 magic 不匹配自动 miss →
 // 触发重扫 → 写新缓存。
 // MAGIC（无后缀常量）服务于 48 字节旧 bincode 路径，与 section 缓存互不影响。
-const MAGIC_V5: &[u8; 8] = b"TCACHE06";
+// MAGIC_V6：section 缓存当前布局版本号（TCACHE06）。
+const MAGIC_V6: &[u8; 8] = b"TCACHE06";
 const MAGIC: &[u8; 8] = b"TCACHE03";
 const HEAD_SIZE: usize = 1024 * 1024; // 1MB
-const HEADER_LEN_V4: usize = 64;
+const HEADER_LEN_V6: usize = 64;
 
 static CACHE_DIR_OVERRIDE: RwLock<Option<PathBuf>> = RwLock::new(None);
 
@@ -127,6 +129,56 @@ fn load_cached<T: serde::de::DeserializeOwned>(
     bincode::deserialize_from(reader).ok()
 }
 
+/// 原子发布：staging（同目录临时文件）→ 写入 → flush+rename。
+/// 跨 session 竞态防护：同一 trace 可开多个 session 共享同一缓存路径，
+/// 直接 File::create 截断会让已 mmap 旧文件的 session 触发 SIGBUS；
+/// rename 原子替换保证读者要么看到完整旧文件、要么看到完整新文件，
+/// 已 mmap 的旧 inode 在 unlink 后仍可安全访问（POSIX 语义）。
+fn atomic_publish(
+    path: &std::path::Path,
+    write_fn: impl FnOnce(&mut BufWriter<std::fs::File>) -> bool,
+) -> bool {
+    // 同进程可并发写同一 cache key（多 session）；仅 pid 会撞临时文件。
+    static SEQ: AtomicU64 = AtomicU64::new(0);
+    let name = path.file_name().and_then(|n| n.to_str()).unwrap_or("cache");
+    let tmp = path.with_file_name(format!(
+        ".{}.{}.{}.tmp",
+        name,
+        std::process::id(),
+        SEQ.fetch_add(1, Ordering::Relaxed)
+    ));
+    let file = match std::fs::File::create(&tmp) {
+        Ok(f) => f,
+        Err(_) => return false,
+    };
+    let mut writer = BufWriter::new(file);
+    if !write_fn(&mut writer) {
+        let _ = std::fs::remove_file(&tmp);
+        return false;
+    }
+    if writer.flush().is_err() {
+        let _ = std::fs::remove_file(&tmp);
+        return false;
+    }
+    let file = match writer.into_inner() {
+        Ok(f) => f,
+        Err(_) => {
+            let _ = std::fs::remove_file(&tmp);
+            return false;
+        }
+    };
+    if file.sync_all().is_err() {
+        let _ = std::fs::remove_file(&tmp);
+        return false;
+    }
+    drop(file);
+    if std::fs::rename(&tmp, path).is_err() {
+        let _ = std::fs::remove_file(&tmp);
+        return false;
+    }
+    true
+}
+
 fn save_cached<T: serde::Serialize>(file_path: &str, data: &[u8], suffix: &str, value: &T) {
     let Some(path) = cache_path(file_path, suffix) else {
         return;
@@ -134,20 +186,16 @@ fn save_cached<T: serde::Serialize>(file_path: &str, data: &[u8], suffix: &str, 
     if let Some(parent) = path.parent() {
         let _ = std::fs::create_dir_all(parent);
     }
-    let file = match std::fs::File::create(&path) {
-        Ok(f) => f,
-        Err(_) => return,
+    // 序列化先进内存：bincode 失败不得留下半截临时文件（也避免
+    // 写入闭包里吞掉序列化错误后仍 rename 半截文件）。
+    let Ok(payload) = bincode::serialize(value) else {
+        return;
     };
-    let mut writer = BufWriter::new(file);
     let mut header = Vec::with_capacity(48);
     write_header(&mut header, data);
-    if writer.write_all(&header).is_err() {
-        return;
-    }
-    if bincode::serialize_into(&mut writer, value).is_err() {
-        return;
-    }
-    let _ = writer.flush();
+    let _ = atomic_publish(&path, move |w| {
+        w.write_all(&header).is_ok() && w.write_all(&payload).is_ok()
+    });
 }
 
 /// 将预序列化的 bincode 字节写入缓存文件（TCACHE03 header + raw bytes），不依赖 session。
@@ -158,20 +206,11 @@ pub fn save_bincode_raw(file_path: &str, data: &[u8], suffix: &str, payload: &[u
     if let Some(parent) = path.parent() {
         let _ = std::fs::create_dir_all(parent);
     }
-    let file = match std::fs::File::create(&path) {
-        Ok(f) => f,
-        Err(_) => return,
-    };
-    let mut writer = BufWriter::new(file);
     let mut header = Vec::with_capacity(48);
     write_header(&mut header, data);
-    if writer.write_all(&header).is_err() {
-        return;
-    }
-    if writer.write_all(payload).is_err() {
-        return;
-    }
-    let _ = writer.flush();
+    let _ = atomic_publish(&path, move |w| {
+        w.write_all(&header).is_ok() && w.write_all(payload).is_ok()
+    });
 }
 
 // ── Section-based cache save/load ──
@@ -184,32 +223,21 @@ pub fn save_sections_raw(file_path: &str, data: &[u8], suffix: &str, section_byt
     if let Some(parent) = path.parent() {
         let _ = std::fs::create_dir_all(parent);
     }
-    let file = match std::fs::File::create(&path) {
-        Ok(f) => f,
-        Err(_) => return,
-    };
-    let mut writer = BufWriter::new(file);
-
-    // Write 64-byte header（V5：见顶部版本注释）
-    let mut header = Vec::with_capacity(HEADER_LEN_V4);
-    header.extend_from_slice(MAGIC_V5);
+    let mut header = Vec::with_capacity(HEADER_LEN_V6);
+    header.extend_from_slice(MAGIC_V6);
     header.extend_from_slice(&(data.len() as u64).to_le_bytes());
     header.extend_from_slice(&head_hash(data));
-    header.resize(HEADER_LEN_V4, 0); // pad to 64 bytes
+    header.resize(HEADER_LEN_V6, 0); // pad to 64 bytes
 
-    if writer.write_all(&header).is_err() {
-        return;
+    let payload_len = section_bytes.len();
+    if atomic_publish(&path, move |w| {
+        w.write_all(&header).is_ok() && w.write_all(section_bytes).is_ok()
+    }) {
+        eprintln!(
+            "[cache] saved {} ({} + {} bytes)",
+            suffix, HEADER_LEN_V6, payload_len
+        );
     }
-    if writer.write_all(section_bytes).is_err() {
-        return;
-    }
-    let _ = writer.flush();
-    eprintln!(
-        "[cache] saved {} ({} + {} bytes)",
-        suffix,
-        HEADER_LEN_V4,
-        section_bytes.len()
-    );
 }
 
 fn load_cache_mmap(file_path: &str, data: &[u8], suffix: &str) -> Option<Arc<Mmap>> {
@@ -223,12 +251,12 @@ fn load_cache_mmap(file_path: &str, data: &[u8], suffix: &str) -> Option<Arc<Mma
     };
     let mmap = unsafe { Mmap::map(&file) }.ok()?;
 
-    // Validate V4 header
-    if mmap.len() < HEADER_LEN_V4 {
+    // Validate V6 header
+    if mmap.len() < HEADER_LEN_V6 {
         eprintln!("[cache] {} too small: {} bytes", suffix, mmap.len());
         return None;
     }
-    if &mmap[0..8] != MAGIC_V5 {
+    if &mmap[0..8] != MAGIC_V6 {
         eprintln!("[cache] {} magic mismatch: {:?}", suffix, &mmap[0..8]);
         return None;
     }
@@ -248,14 +276,27 @@ fn load_cache_mmap(file_path: &str, data: &[u8], suffix: &str) -> Option<Arc<Mma
         return None;
     }
 
-    // 布局预检：p2 缓存的 section 数量固定为 8（V5）；不匹配 = 损坏/截断，
-    // 整体判 miss 触发重扫，而不是 mmap 命中后在 view getter 里 unwrap panic
-    // 或留下半新半旧的 session。其他后缀（scan/lidx）布局由各自的读取路径
-    // 按段数防御（SectionReader 的 offset/length 范围校验兜底越界）。
-    if suffix == ".p2.cache"
-        && crate::flat::archives::Phase2Archive::views_from_sections(&mmap[HEADER_LEN_V4..])
-            .is_none()
-    {
+    // 布局预检：三个核心缓存（p2/scan/lidx）的 section 布局在加载时统一
+    // 验证，任一失败 = 损坏/截断，整体判 miss 触发重扫——不得 mmap 命中
+    // 后在 view getter 里 unwrap panic（archives.rs 的 views_from_sections
+    // 返回 None 时调用方 unwrap），也不得留下半新半旧的 session。
+    let layout_ok = match suffix {
+        ".p2.cache" => {
+            crate::flat::archives::Phase2Archive::views_from_sections(&mmap[HEADER_LEN_V6..])
+                .is_some()
+        }
+        ".scan.cache" => {
+            crate::flat::archives::ScanArchive::views_from_sections(&mmap[HEADER_LEN_V6..])
+                .is_some()
+        }
+        ".lidx.cache" => {
+            crate::flat::line_index::LineIndexArchive::views_from_sections(&mmap[HEADER_LEN_V6..])
+                .is_some()
+        }
+        // 其他后缀（string/gumtrace-extra 等 bincode 缓存）布局由反序列化兜底
+        _ => true,
+    };
+    if !layout_ok {
         eprintln!("[cache] {} section layout invalid (corrupted)", suffix);
         return None;
     }
@@ -404,6 +445,6 @@ mod magic_version_tests {
     /// 此断言锁定当前 magic；下次改 ActivationTree 序列化时递增并更新此处。
     #[test]
     fn p2_magic_tracks_activation_tree_layout() {
-        assert_eq!(MAGIC_V5, b"TCACHE06");
+        assert_eq!(MAGIC_V6, b"TCACHE06");
     }
 }
