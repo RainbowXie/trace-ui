@@ -1,5 +1,7 @@
 pub mod activation;
 #[cfg(test)]
+mod activation_fuzz;
+#[cfg(test)]
 mod activation_tests;
 pub mod call_tree;
 pub mod crypto;

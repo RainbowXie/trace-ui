@@ -420,12 +420,17 @@ impl ActivationTree {
 
         // 从候选（entry 最大且 <= seq）沿嵌套树 parent 链向上：
         // 区间 laminar → 包含者 = 祖先链上 exit >= seq 的最深层。
-        // exit < seq 的区间不是包含者（已闭合在 seq 前）；其 parent 的
-        // exit 单调不减，第一次遇到 exit >= seq 即最内层包含者。
+        // 链上只接受 confirmed 节点：unresolved（截断/未确认）的区间不可信，
+        // 不参与归属——遇到即终止（child 闭合但 outer 截断的形态中，
+        // inner 是 confirmed 而 parent 链上是 unresolved outer；此时 seq
+        // 若不在任何 confirmed 区间内则无归属）。
         // 链长 = 嵌套深度（典型 <10，不会出现回扫全部兄弟的退化——
         // root 在 N 次顺序调用后的查询是链长 1 的场景）。
         let mut cur = &self.activations[ids[lo - 1] as usize];
         loop {
+            if cur.unresolved_reason.is_some() {
+                return None;
+            }
             if cur.exit_seq >= seq {
                 return Some(cur);
             }
