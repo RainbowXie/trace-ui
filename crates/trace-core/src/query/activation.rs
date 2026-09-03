@@ -352,8 +352,8 @@ impl ActivationBuilder {
 
         self.activations[0].exit_seq = total_lines;
 
-        // 查询索引：confirmed activation 按 entry_seq 严格递增（激活按时间顺序）。
-        // debug_assert 防御未来改动破坏二分前提。
+        // 查询索引（按 push/确认时间序）
+        // confirmed：按 entry_seq 严格递增（激活按时间顺序）
         let confirmed_ids: Vec<u32> = self
             .activations
             .iter()
@@ -367,10 +367,37 @@ impl ActivationBuilder {
                     < self.activations[w[1] as usize].entry_seq),
             "confirmed activation entry_seq 必须按 id 严格递增"
         );
+        // opens 全局索引：所有非 root（call 行真实存在，unresolved 也是调用指令）
+        let all_by_call: Vec<u32> = self
+            .activations
+            .iter()
+            .filter(|a| a.id != 0)
+            .map(|a| a.id)
+            .collect();
+        debug_assert!(
+            all_by_call
+                .windows(2)
+                .all(|w| self.activations[w[0] as usize].call_seq
+                    < self.activations[w[1] as usize].call_seq),
+            "activation call_seq 必须按 id 严格递增"
+        );
+        // closes 全局索引：只 resolved（resume_seq 真实；unresolved 无 resume）。
+        // 嵌套闭合顺序 inner 先于 outer（id 序相反），必须显式按 resume_seq 排序。
+        let mut resolved_by_resume = confirmed_ids.clone();
+        resolved_by_resume.sort_by_key(|&id| self.activations[id as usize].resume_seq);
+        debug_assert!(
+            resolved_by_resume
+                .windows(2)
+                .all(|w| self.activations[w[0] as usize].resume_seq
+                    < self.activations[w[1] as usize].resume_seq),
+            "resolved activation resume_seq 必须按排序后严格递增"
+        );
 
         ActivationTree {
             activations: self.activations,
             confirmed_ids,
+            all_by_call,
+            resolved_by_resume,
             bypassed_calls: self.bypassed_calls,
         }
     }
@@ -383,6 +410,12 @@ pub struct ActivationTree {
     /// confirmed activation 的 id 索引，按 entry_seq 严格递增（二分查找用）。
     /// 查询沿 parent 链向上，链长 = 嵌套深度。
     pub confirmed_ids: Vec<u32>,
+    /// 所有 activation（含 unresolved）的 id 索引，按 call_seq 严格递增。
+    /// call 行的 opens 查询：call_seq 全局唯一，与 owner 上下文解耦。
+    pub all_by_call: Vec<u32>,
+    /// resolved activation 的 id 索引，按 resume_seq 严格递增。
+    /// resume 行的 closes 查询：resume_seq 全局唯一；unresolved 无真实 resume。
+    pub resolved_by_resume: Vec<u32>,
     /// 没有记录函数体的调用（不参与 Confirmed Function 聚合）。
     /// 按 call_seq 严格递增（确认顺序 = 调用顺序），resume_seq 同样递增。
     pub bypassed_calls: Vec<BypassedCall>,
@@ -478,56 +511,46 @@ impl ActivationTree {
             .map(|_| lo)
     }
 
-    /// 在 owner（None = root 上下文）的直接 children 中找 call_seq == seq 的调用。
+    /// 全局 call 查询（与归属上下文解耦）：call_seq == seq 的 activation id。
     ///
-    /// children 按 push 顺序即时间序，call_seq 严格递增 → 二分。
-    /// unresolved 子记录也算（其 call 行仍是调用指令）。
-    pub fn find_child_call(&self, owner: Option<&ConfirmedActivation>, seq: u32) -> Option<u32> {
-        let children = match owner {
-            Some(a) => &a.children_ids,
-            None => &self.activations[0].children_ids,
-        };
+    /// 边界查询不能依赖 owner 上下文——unresolved outer（截断）不产生归属，
+    /// 但其内部 confirmed inner 的 call 行是真实指令。call_seq 全局唯一
+    ///（每条 call 指令一行），二分 all_by_call。
+    pub fn find_call(&self, seq: u32) -> Option<u32> {
+        let ids = &self.all_by_call;
         let mut lo = 0usize;
-        let mut hi = children.len();
+        let mut hi = ids.len();
         while lo < hi {
             let mid = lo + (hi - lo) / 2;
-            if self.activations[children[mid] as usize].call_seq < seq {
+            if self.activations[ids[mid] as usize].call_seq < seq {
                 lo = mid + 1;
             } else {
                 hi = mid;
             }
         }
-        children
-            .get(lo)
+        ids.get(lo)
             .copied()
             .filter(|&id| self.activations[id as usize].call_seq == seq)
     }
 
-    /// 在 owner 的直接 children 中找 resume_seq == seq 的 confirmed 调用
-    ///（该 seq 是 caller 上下文内执行的 resume 指令）。
+    /// 全局 resume 查询：resume_seq == seq 的 resolved activation id。
     ///
-    /// resume 必然晚于 call：二分 call_seq <= seq 的上限位置，只需检查该位置
-    /// 的 child——后续 child 的 call_seq > seq，其 resume 只能更大；前面的
-    /// child 的 resume < 本 child 的 call（时间序），不可能等于 seq。
-    pub fn find_child_resume(&self, owner: Option<&ConfirmedActivation>, seq: u32) -> Option<u32> {
-        let children = match owner {
-            Some(a) => &a.children_ids,
-            None => &self.activations[0].children_ids,
-        };
+    /// resume_seq 全局唯一（每条 resume 指令只闭合一个调用），只查 resolved
+    ///（unresolved 的 resume_seq=0 哨兵，不是真实 resume）。
+    pub fn find_resume(&self, seq: u32) -> Option<u32> {
+        let ids = &self.resolved_by_resume;
         let mut lo = 0usize;
-        let mut hi = children.len();
+        let mut hi = ids.len();
         while lo < hi {
             let mid = lo + (hi - lo) / 2;
-            if self.activations[children[mid] as usize].call_seq <= seq {
+            if self.activations[ids[mid] as usize].resume_seq < seq {
                 lo = mid + 1;
             } else {
                 hi = mid;
             }
         }
-        lo.checked_sub(1).and_then(|i| {
-            let id = children[i];
-            let a = &self.activations[id as usize];
-            (a.unresolved_reason.is_none() && a.resume_seq == seq).then_some(id)
-        })
+        ids.get(lo)
+            .copied()
+            .filter(|&id| self.activations[id as usize].resume_seq == seq)
     }
 }

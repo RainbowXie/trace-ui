@@ -107,15 +107,17 @@ fn activation_to_dto(
 ) -> ConfirmedActivationDto {
     // 哨兵语义（query/activation.rs）：
     // - resolved：entry/exit/resume 全真实；
-    // - TraceEndStillActive：entry/exit 真实，resume_seq=0（未到达）；
+    // - TraceEndStillActive：entry/exit 真实（截断时填的最后实际指令），
+    //   resume_seq=0（未到达）；
     // - NoNextInsn/DisplacedByAnotherCall：entry/exit/resume 全 0。
-    // 哨兵 0 不读 trace 第 0 行伪造身份，对应边界字段置 None；
-    // call/callsite 在所有状态下都是真实观察到的。
+    // 哨兵 0 不读 trace 第 0 行伪造身份；call/callsite 在所有状态下真实。
     let resolved = a.unresolved_reason.is_none();
     let truncated = matches!(
         a.unresolved_reason,
         Some(UnresolvedReason::TraceEndStillActive)
     );
+    // entry/exit 在 resolved 或 truncated 下都是真实观察，都解析。
+    let entry_exit_real = resolved || truncated;
     ConfirmedActivationDto {
         id: a.id,
         // 展示身份：root 是 trace_root（协议定义），其余 = session + call anchor
@@ -124,7 +126,7 @@ fn activation_to_dto(
         } else {
             format!("{}:call@{}", session_id, a.call_seq)
         },
-        func_addr: if resolved {
+        func_addr: if entry_exit_real {
             site_or_none(reader.get(a.entry_seq))
         } else {
             None
@@ -133,13 +135,13 @@ fn activation_to_dto(
         call_seq: a.call_seq,
         call_pc: site_or_none(reader.get(a.call_seq)),
         entry_seq: a.entry_seq,
-        entry_pc: if resolved {
+        entry_pc: if entry_exit_real {
             site_or_none(reader.get(a.entry_seq))
         } else {
             None
         },
         exit_seq: a.exit_seq,
-        exit_pc: if resolved || truncated {
+        exit_pc: if entry_exit_real {
             site_or_none(reader.get(a.exit_seq))
         } else {
             None
@@ -303,13 +305,13 @@ impl crate::engine::TraceEngine {
             //   或 bypassed 调用的直接 resume——后者不在 activations 中，
             //   用 bypassed:N 引用）。
             // - opens：本指令是某个调用的 call 行。
-            let closes = if let Some(child) = tree.find_child_resume(owner, seq) {
+            let closes = if let Some(child) = tree.find_resume(seq) {
                 Some(format!("activation:{}", child))
             } else {
                 tree.find_bypassed_resume_by_seq(seq)
                     .map(|i| format!("bypassed:{}", i))
             };
-            let opens = if let Some(child) = tree.find_child_call(owner, seq) {
+            let opens = if let Some(child) = tree.find_call(seq) {
                 Some(format!("activation:{}", child))
             } else {
                 tree.find_bypassed_by_call_seq(seq)

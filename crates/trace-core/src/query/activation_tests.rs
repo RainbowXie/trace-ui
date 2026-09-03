@@ -258,7 +258,7 @@ fn call_at_seq_zero_is_found() {
     let a = &tree.activations[1];
     assert_eq!(a.call_seq, 0, "seq 0 的真实调用必须可查");
     assert!(a.unresolved_reason.is_none());
-    assert_eq!(tree.find_child_call(None, 0), Some(1));
+    assert_eq!(tree.find_call(0), Some(1));
 }
 
 /// 二分查找在大规模 activation 上正确（性能 + 正确性回归）。
