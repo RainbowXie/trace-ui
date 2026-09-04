@@ -8,51 +8,42 @@ use std::io::{self, BufWriter, Write};
 use std::path::Path;
 use std::time::Duration;
 
-#[cfg(test)]
-use std::sync::atomic::{AtomicBool, Ordering};
-#[cfg(test)]
-use std::sync::Mutex;
-
 use crate::error::{Result, TraceError};
 
 /// PID 被复用后靠年龄兑底回收：活着但不持有 fd 的 staging 超过这个时间才删。
 pub(crate) const STAGING_MAX_AGE: Duration = Duration::from_secs(24 * 3600);
 
 #[cfg(test)]
-static FORCE_PARENT_FSYNC_FAIL: AtomicBool = AtomicBool::new(false);
-#[cfg(test)]
-static FORCE_PARENT_FSYNC_FAIL_LOCK: Mutex<()> = Mutex::new(());
-
-/// 测试注入：rename 之后的父目录 fsync 必须能在真实写路径上失败，
-/// 否则只能证明 helper 恒 true，锁不住 `atomic_publish` / `stream_cache`。
-/// 持锁避免并行测试互相覆盖全局开关。
-#[cfg(test)]
-pub(crate) struct ForceParentFsyncFailGuard {
-    _lock: std::sync::MutexGuard<'static, ()>,
+thread_local! {
+    static FORCE_PARENT_FSYNC_FAIL: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
 }
+
+/// 测试注入限定在当前测试线程，避免 `cargo test` 并行执行时让无关发布
+/// 路径也收到 fsync 失败，产生同源假证据。
+#[cfg(test)]
+pub(crate) struct ForceParentFsyncFailGuard;
 
 #[cfg(test)]
 impl ForceParentFsyncFailGuard {
     pub(crate) fn arm() -> Self {
-        let lock = FORCE_PARENT_FSYNC_FAIL_LOCK
-            .lock()
-            .unwrap_or_else(|e| e.into_inner());
-        FORCE_PARENT_FSYNC_FAIL.store(true, Ordering::SeqCst);
-        Self { _lock: lock }
+        FORCE_PARENT_FSYNC_FAIL.with(|flag| {
+            assert!(!flag.replace(true), "parent fsync failure already armed");
+        });
+        Self
     }
 }
 
 #[cfg(test)]
 impl Drop for ForceParentFsyncFailGuard {
     fn drop(&mut self) {
-        FORCE_PARENT_FSYNC_FAIL.store(false, Ordering::SeqCst);
+        FORCE_PARENT_FSYNC_FAIL.with(|flag| flag.set(false));
     }
 }
 
 /// rename 之后必须 fsync 父目录，否则崩溃会让目录项回滚到旧名字。
 pub(crate) fn sync_parent_dir(parent: &Path) -> Result<()> {
     #[cfg(test)]
-    if FORCE_PARENT_FSYNC_FAIL.load(Ordering::SeqCst) {
+    if FORCE_PARENT_FSYNC_FAIL.with(|flag| flag.get()) {
         return Err(TraceError::Io(io::Error::other(
             "injected parent dir fsync failure",
         )));

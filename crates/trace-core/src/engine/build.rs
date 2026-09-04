@@ -22,7 +22,7 @@ enum IndexResult {
 struct CacheHitData {
     phase2_store: CachedStore<Phase2Archive>,
     call_tree: crate::query::call_tree::CallTree,
-    /// V6 缓存必携带（build 时已验反序列化成功）；此处 Option 仅匹配
+    /// V7 缓存必携带（build 时已验反序列化成功）；此处 Option 仅匹配
     /// 反序列化接口签名，None 不可能出现（出现即上层已判 miss）。
     activation_tree: crate::query::activation::ActivationTree,
     string_index: Option<crate::query::strings::StringIndex>,
@@ -68,15 +68,20 @@ impl super::TraceEngine {
         options: BuildOptions,
         on_progress: Option<ProgressCallback>,
     ) -> Result<BuildResult> {
-        let (mmap_arc, file_path) = {
+        let (mmap_arc, file_path, trace_hash) = {
             let state = handle
                 .state
                 .read()
                 .map_err(|e| TraceError::Internal(e.to_string()))?;
-            (state.mmap.clone(), state.file_path.clone())
+            (
+                state.mmap.clone(),
+                state.file_path.clone(),
+                state.trace_hash,
+            )
         };
 
         let data: &[u8] = &mmap_arc;
+        let trace_len = data.len() as u64;
         let force = options.force_rebuild;
         let skip_strings = options.skip_strings;
 
@@ -90,9 +95,9 @@ impl super::TraceEngine {
         // 尝试从缓存加载（三个核心缓存全部命中时使用）
         if !force {
             if let (Some(p2_mmap), Some(scan_mmap), Some(lidx_mmap)) = (
-                cache::load_phase2_cache(&file_path, data),
-                cache::load_scan_cache(&file_path, data),
-                cache::load_lidx_cache(&file_path, data),
+                cache::load_phase2_cache(&file_path, trace_len, &trace_hash),
+                cache::load_scan_cache(&file_path, trace_len, &trace_hash),
+                cache::load_lidx_cache(&file_path, trace_len, &trace_hash),
             ) {
                 // 通知进度：缓存加载
                 if let Some(ref cb) = on_progress {
@@ -104,11 +109,11 @@ impl super::TraceEngine {
                     });
                 }
 
-                let string_index = cache::load_string_cache(&file_path, data);
+                let string_index = cache::load_string_cache(&file_path, trace_len, &trace_hash);
 
                 let (call_annotations, consumed_seqs) =
                     if detected_format == trace_parser::types::TraceFormat::Gumtrace {
-                        cache::load_gumtrace_extra(&file_path, data)
+                        cache::load_gumtrace_extra(&file_path, trace_len, &trace_hash)
                             .unwrap_or_else(|| (HashMap::new(), Vec::new()))
                     } else {
                         (HashMap::new(), Vec::new())
@@ -145,6 +150,25 @@ impl super::TraceEngine {
 
                 let lidx_store = CachedStore::Mapped(lidx_mmap);
                 let total_lines = lidx_store.total_lines();
+                // 三个文件独立原子发布只能保证“每个文件完整”，不能保证
+                // 读者没有跨代混合。scan 与 lidx 的共享行数是加载时可验证的
+                // generation 边界；不一致时放弃整组缓存并重扫。
+                if scan_store.line_count() != total_lines {
+                    eprintln!(
+                        "[index] cache generation mismatch: scan_lines={} lidx_lines={}; falling back to full rescan",
+                        scan_store.line_count(),
+                        total_lines
+                    );
+                    return self.build_index_inner(
+                        session_id,
+                        handle,
+                        BuildOptions {
+                            force_rebuild: true,
+                            skip_strings,
+                        },
+                        on_progress,
+                    );
+                }
 
                 eprintln!(
                     "[index] section cache hit: total_lines={}, format={:?}",
@@ -355,7 +379,7 @@ impl super::TraceEngine {
                 );
 
                 // 3. write lock：仅存储数据到 session
-                let (fp, mmap_arc, gum_extra, total_lines, has_string_index) = {
+                let (fp, gum_extra, total_lines, has_string_index, trace_len, trace_hash) = {
                     let mut state = handle
                         .state
                         .write()
@@ -390,25 +414,25 @@ impl super::TraceEngine {
 
                     (
                         state.file_path.clone(),
-                        state.mmap.clone(),
                         gum_extra,
                         total_lines,
                         has_string_index,
+                        state.mmap.len() as u64,
+                        state.trace_hash,
                     )
                 };
                 // write lock 已释放
 
                 // 4. 同步写缓存
                 eprintln!("[index] writing cache files...");
-                let data_for_cache: &[u8] = &mmap_arc;
-                cache::save_sections_raw(&fp, data_for_cache, ".p2.cache", &p2_bytes);
-                cache::save_sections_raw(&fp, data_for_cache, ".scan.cache", &scan_bytes);
-                cache::save_sections_raw(&fp, data_for_cache, ".lidx.cache", &lidx_bytes);
+                cache::save_sections_raw(&fp, trace_len, &trace_hash, ".p2.cache", &p2_bytes);
+                cache::save_sections_raw(&fp, trace_len, &trace_hash, ".scan.cache", &scan_bytes);
+                cache::save_sections_raw(&fp, trace_len, &trace_hash, ".lidx.cache", &lidx_bytes);
                 if let Some(ref si_b) = si_bytes {
-                    cache::save_bincode_raw(&fp, data_for_cache, ".strings", si_b);
+                    cache::save_bincode_raw(&fp, trace_len, &trace_hash, ".strings", si_b);
                 }
                 if let Some((ref anns, ref seqs)) = gum_extra {
-                    cache::save_gumtrace_extra(&fp, data_for_cache, anns, seqs);
+                    cache::save_gumtrace_extra(&fp, trace_len, &trace_hash, anns, seqs);
                 }
                 eprintln!("[index] cache save complete");
 

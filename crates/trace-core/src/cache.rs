@@ -9,15 +9,15 @@ use std::sync::{Arc, RwLock};
 // MAGIC 版本即缓存布局版本：布局变更（如 .p2.cache 增加 ActivationTree section）
 // 时必须递增，否则旧布局缓存仍判有效——升级后老 session 会静默缺失新能力
 // （ActivationTree 永远 IndexNotReady 且 CacheHit 不触发重扫）。
-// V6：ActivationTree 增加 all_by_call/resolved_by_resume 两个序列化字段，
-// 与 V5 的 bincode 布局不兼容；旧 V5/更早缓存 magic 不匹配自动 miss →
-// 触发重扫 → 写新缓存。
+// V6：ActivationTree 增加 all_by_call/resolved_by_resume 两个序列化字段。
+// V7：利用 64 字节 header 的尾部 16 字节绑定 section payload 摘要；此前
+// 只校验 trace 身份，payload 内位损坏若保持长度/结构关系会静默命中。
 // MAGIC（无后缀常量）服务于 48 字节旧 bincode 路径，与 section 缓存互不影响。
-// MAGIC_V6：section 缓存当前布局版本号（TCACHE06）。
-const MAGIC_V6: &[u8; 8] = b"TCACHE06";
+// MAGIC_V7：section 缓存当前布局版本号（TCACHE07）。
+const MAGIC_V7: &[u8; 8] = b"TCACHE07";
 const MAGIC: &[u8; 8] = b"TCACHE03";
-const HEAD_SIZE: usize = 1024 * 1024; // 1MB
-const HEADER_LEN_V6: usize = 64;
+const HEADER_LEN_V7: usize = 64;
+const SECTION_DIGEST_LEN: usize = 16;
 
 static CACHE_DIR_OVERRIDE: RwLock<Option<PathBuf>> = RwLock::new(None);
 
@@ -77,59 +77,69 @@ fn cache_path_ext(file_path: &str, suffix: &str) -> Option<PathBuf> {
     cache_dir().map(|d| d.join(format!("{}{}", hash, suffix)))
 }
 
-fn head_hash(data: &[u8]) -> [u8; 32] {
-    let end = data.len().min(HEAD_SIZE);
-    let mut hasher = Sha256::new();
-    hasher.update(&data[..end]);
-    hasher.finalize().into()
+fn section_digest(data: &[u8]) -> [u8; SECTION_DIGEST_LEN] {
+    Sha256::digest(data)[..SECTION_DIGEST_LEN]
+        .try_into()
+        .expect("section digest length")
 }
 
-fn validate_header(buf: &[u8], data: &[u8]) -> bool {
+fn validate_header(buf: &[u8], trace_len: u64, trace_hash: &[u8; 32]) -> bool {
     if buf.len() < 48 || &buf[0..8] != MAGIC {
         return false;
     }
     let stored_size = u64::from_le_bytes(buf[8..16].try_into().unwrap_or_default());
-    if stored_size != data.len() as u64 {
+    if stored_size != trace_len {
         return false;
     }
     let cached_hash: [u8; 32] = match buf[16..48].try_into() {
         Ok(h) => h,
         Err(_) => return false,
     };
-    cached_hash == head_hash(data)
+    &cached_hash == trace_hash
 }
 
-fn validate_header_from_reader(reader: &mut impl Read, data: &[u8]) -> bool {
+fn validate_header_from_reader(
+    reader: &mut impl Read,
+    trace_len: u64,
+    trace_hash: &[u8; 32],
+) -> bool {
     let mut header = [0u8; 48];
     if reader.read_exact(&mut header).is_err() {
         return false;
     }
-    validate_header(&header, data)
+    validate_header(&header, trace_len, trace_hash)
 }
 
-fn write_header(buf: &mut Vec<u8>, data: &[u8]) {
+fn write_header(buf: &mut Vec<u8>, trace_len: u64, trace_hash: &[u8; 32]) {
     buf.extend_from_slice(MAGIC);
-    buf.extend_from_slice(&(data.len() as u64).to_le_bytes());
-    buf.extend_from_slice(&head_hash(data));
+    buf.extend_from_slice(&trace_len.to_le_bytes());
+    buf.extend_from_slice(trace_hash);
 }
 
 // ── 通用加载/保存 (bincode, legacy) ──
 
 fn load_cached<T: serde::de::DeserializeOwned>(
     file_path: &str,
-    data: &[u8],
+    trace_len: u64,
+    trace_hash: &[u8; 32],
     suffix: &str,
 ) -> Option<T> {
     let path = cache_path(file_path, suffix)?;
     let file = std::fs::File::open(&path).ok()?;
     let mut reader = BufReader::new(file);
-    if !validate_header_from_reader(&mut reader, data) {
+    if !validate_header_from_reader(&mut reader, trace_len, trace_hash) {
         return None;
     }
     bincode::deserialize_from(reader).ok()
 }
 
-fn save_cached<T: serde::Serialize>(file_path: &str, data: &[u8], suffix: &str, value: &T) {
+fn save_cached<T: serde::Serialize>(
+    file_path: &str,
+    trace_len: u64,
+    trace_hash: &[u8; 32],
+    suffix: &str,
+    value: &T,
+) {
     let Some(path) = cache_path(file_path, suffix) else {
         return;
     };
@@ -142,14 +152,20 @@ fn save_cached<T: serde::Serialize>(file_path: &str, data: &[u8], suffix: &str, 
         return;
     };
     let mut header = Vec::with_capacity(48);
-    write_header(&mut header, data);
+    write_header(&mut header, trace_len, trace_hash);
     let _ = staging::atomic_publish(&path, move |w| {
         w.write_all(&header).is_ok() && w.write_all(&payload).is_ok()
     });
 }
 
 /// 将预序列化的 bincode 字节写入缓存文件（TCACHE03 header + raw bytes），不依赖 session。
-pub fn save_bincode_raw(file_path: &str, data: &[u8], suffix: &str, payload: &[u8]) {
+pub fn save_bincode_raw(
+    file_path: &str,
+    trace_len: u64,
+    trace_hash: &[u8; 32],
+    suffix: &str,
+    payload: &[u8],
+) {
     let Some(path) = cache_path(file_path, suffix) else {
         return;
     };
@@ -157,7 +173,7 @@ pub fn save_bincode_raw(file_path: &str, data: &[u8], suffix: &str, payload: &[u
         let _ = std::fs::create_dir_all(parent);
     }
     let mut header = Vec::with_capacity(48);
-    write_header(&mut header, data);
+    write_header(&mut header, trace_len, trace_hash);
     let _ = staging::atomic_publish(&path, move |w| {
         w.write_all(&header).is_ok() && w.write_all(payload).is_ok()
     });
@@ -166,18 +182,25 @@ pub fn save_bincode_raw(file_path: &str, data: &[u8], suffix: &str, payload: &[u
 // ── Section-based cache save/load ──
 
 /// 将预序列化的 section 字节写入缓存文件（header + raw bytes），不依赖 session。
-pub fn save_sections_raw(file_path: &str, data: &[u8], suffix: &str, section_bytes: &[u8]) {
+pub fn save_sections_raw(
+    file_path: &str,
+    trace_len: u64,
+    trace_hash: &[u8; 32],
+    suffix: &str,
+    section_bytes: &[u8],
+) {
     let Some(path) = cache_path_ext(file_path, suffix) else {
         return;
     };
     if let Some(parent) = path.parent() {
         let _ = std::fs::create_dir_all(parent);
     }
-    let mut header = Vec::with_capacity(HEADER_LEN_V6);
-    header.extend_from_slice(MAGIC_V6);
-    header.extend_from_slice(&(data.len() as u64).to_le_bytes());
-    header.extend_from_slice(&head_hash(data));
-    header.resize(HEADER_LEN_V6, 0); // pad to 64 bytes
+    let mut header = Vec::with_capacity(HEADER_LEN_V7);
+    header.extend_from_slice(MAGIC_V7);
+    header.extend_from_slice(&trace_len.to_le_bytes());
+    header.extend_from_slice(trace_hash);
+    header.extend_from_slice(&section_digest(section_bytes));
+    debug_assert_eq!(header.len(), HEADER_LEN_V7);
 
     let payload_len = section_bytes.len();
     if staging::atomic_publish(&path, move |w| {
@@ -185,12 +208,17 @@ pub fn save_sections_raw(file_path: &str, data: &[u8], suffix: &str, section_byt
     }) {
         eprintln!(
             "[cache] saved {} ({} + {} bytes)",
-            suffix, HEADER_LEN_V6, payload_len
+            suffix, HEADER_LEN_V7, payload_len
         );
     }
 }
 
-fn load_cache_mmap(file_path: &str, data: &[u8], suffix: &str) -> Option<Arc<Mmap>> {
+fn load_cache_mmap(
+    file_path: &str,
+    trace_len: u64,
+    trace_hash: &[u8; 32],
+    suffix: &str,
+) -> Option<Arc<Mmap>> {
     let path = cache_path_ext(file_path, suffix)?;
     let file = match std::fs::File::open(&path) {
         Ok(f) => f,
@@ -201,28 +229,32 @@ fn load_cache_mmap(file_path: &str, data: &[u8], suffix: &str) -> Option<Arc<Mma
     };
     let mmap = unsafe { Mmap::map(&file) }.ok()?;
 
-    // Validate V6 header
-    if mmap.len() < HEADER_LEN_V6 {
+    // Validate V7 header
+    if mmap.len() < HEADER_LEN_V7 {
         eprintln!("[cache] {} too small: {} bytes", suffix, mmap.len());
         return None;
     }
-    if &mmap[0..8] != MAGIC_V6 {
+    if &mmap[0..8] != MAGIC_V7 {
         eprintln!("[cache] {} magic mismatch: {:?}", suffix, &mmap[0..8]);
         return None;
     }
     let stored_size = u64::from_le_bytes(mmap[8..16].try_into().ok()?);
-    if stored_size != data.len() as u64 {
+    if stored_size != trace_len {
         eprintln!(
             "[cache] {} size mismatch: stored={} actual={}",
-            suffix,
-            stored_size,
-            data.len()
+            suffix, stored_size, trace_len
         );
         return None;
     }
     let cached_hash: [u8; 32] = mmap[16..48].try_into().ok()?;
-    if cached_hash != head_hash(data) {
-        eprintln!("[cache] {} hash mismatch", suffix);
+    if &cached_hash != trace_hash {
+        eprintln!("[cache] {} trace hash mismatch", suffix);
+        return None;
+    }
+    let cached_payload_digest: [u8; SECTION_DIGEST_LEN] =
+        mmap[48..HEADER_LEN_V7].try_into().ok()?;
+    if cached_payload_digest != section_digest(&mmap[HEADER_LEN_V7..]) {
+        eprintln!("[cache] {} payload digest mismatch", suffix);
         return None;
     }
 
@@ -232,15 +264,15 @@ fn load_cache_mmap(file_path: &str, data: &[u8], suffix: &str) -> Option<Arc<Mma
     // 返回 None 时调用方 unwrap），也不得留下半新半旧的 session。
     let layout_ok = match suffix {
         ".p2.cache" => {
-            crate::flat::archives::Phase2Archive::views_from_sections(&mmap[HEADER_LEN_V6..])
+            crate::flat::archives::Phase2Archive::views_from_sections(&mmap[HEADER_LEN_V7..])
                 .is_some()
         }
         ".scan.cache" => {
-            crate::flat::archives::ScanArchive::views_from_sections(&mmap[HEADER_LEN_V6..])
+            crate::flat::archives::ScanArchive::views_from_sections(&mmap[HEADER_LEN_V7..])
                 .is_some()
         }
         ".lidx.cache" => {
-            crate::flat::line_index::LineIndexArchive::views_from_sections(&mmap[HEADER_LEN_V6..])
+            crate::flat::line_index::LineIndexArchive::views_from_sections(&mmap[HEADER_LEN_V7..])
                 .is_some()
         }
         // 其他后缀（string/gumtrace-extra 等 bincode 缓存）布局由反序列化兜底
@@ -257,38 +289,68 @@ fn load_cache_mmap(file_path: &str, data: &[u8], suffix: &str) -> Option<Arc<Mma
 
 // ── Section-based cache load ──
 
-pub fn load_phase2_cache(file_path: &str, data: &[u8]) -> Option<Arc<Mmap>> {
-    load_cache_mmap(file_path, data, ".p2.cache")
+pub fn load_phase2_cache(
+    file_path: &str,
+    trace_len: u64,
+    trace_hash: &[u8; 32],
+) -> Option<Arc<Mmap>> {
+    load_cache_mmap(file_path, trace_len, trace_hash, ".p2.cache")
 }
 
-pub fn load_scan_cache(file_path: &str, data: &[u8]) -> Option<Arc<Mmap>> {
-    load_cache_mmap(file_path, data, ".scan.cache")
+pub fn load_scan_cache(
+    file_path: &str,
+    trace_len: u64,
+    trace_hash: &[u8; 32],
+) -> Option<Arc<Mmap>> {
+    load_cache_mmap(file_path, trace_len, trace_hash, ".scan.cache")
 }
 
-pub fn load_lidx_cache(file_path: &str, data: &[u8]) -> Option<Arc<Mmap>> {
-    load_cache_mmap(file_path, data, ".lidx.cache")
+pub fn load_lidx_cache(
+    file_path: &str,
+    trace_len: u64,
+    trace_hash: &[u8; 32],
+) -> Option<Arc<Mmap>> {
+    load_cache_mmap(file_path, trace_len, trace_hash, ".lidx.cache")
 }
 
 // ── StringIndex bincode 缓存 ──
 
-pub fn save_string_cache(file_path: &str, data: &[u8], index: &StringIndex) {
-    save_cached(file_path, data, ".strings", index);
+pub fn save_string_cache(
+    file_path: &str,
+    trace_len: u64,
+    trace_hash: &[u8; 32],
+    index: &StringIndex,
+) {
+    save_cached(file_path, trace_len, trace_hash, ".strings", index);
 }
 
-pub fn load_string_cache(file_path: &str, data: &[u8]) -> Option<StringIndex> {
-    load_cached(file_path, data, ".strings")
+pub fn load_string_cache(
+    file_path: &str,
+    trace_len: u64,
+    trace_hash: &[u8; 32],
+) -> Option<StringIndex> {
+    load_cached(file_path, trace_len, trace_hash, ".strings")
 }
 
 // ── Crypto scan bincode 缓存 ──
 
 use crate::query::crypto::CryptoScanResult;
 
-pub fn save_crypto_cache(file_path: &str, data: &[u8], result: &CryptoScanResult) {
-    save_cached(file_path, data, ".crypto", result);
+pub fn save_crypto_cache(
+    file_path: &str,
+    trace_len: u64,
+    trace_hash: &[u8; 32],
+    result: &CryptoScanResult,
+) {
+    save_cached(file_path, trace_len, trace_hash, ".crypto", result);
 }
 
-pub fn load_crypto_cache(file_path: &str, data: &[u8]) -> Option<CryptoScanResult> {
-    load_cached(file_path, data, ".crypto")
+pub fn load_crypto_cache(
+    file_path: &str,
+    trace_len: u64,
+    trace_hash: &[u8; 32],
+) -> Option<CryptoScanResult> {
+    load_cached(file_path, trace_len, trace_hash, ".crypto")
 }
 
 // ── Gumtrace extra (call_annotations + consumed_seqs) bincode 缓存 ──
@@ -297,13 +359,15 @@ use trace_parser::gumtrace::CallAnnotation;
 
 pub fn save_gumtrace_extra(
     file_path: &str,
-    data: &[u8],
+    trace_len: u64,
+    trace_hash: &[u8; 32],
     call_annotations: &std::collections::HashMap<u32, CallAnnotation>,
     consumed_seqs: &[u32],
 ) {
     save_cached(
         file_path,
-        data,
+        trace_len,
+        trace_hash,
         ".gum-extra",
         &(call_annotations, consumed_seqs),
     );
@@ -311,9 +375,10 @@ pub fn save_gumtrace_extra(
 
 pub fn load_gumtrace_extra(
     file_path: &str,
-    data: &[u8],
+    trace_len: u64,
+    trace_hash: &[u8; 32],
 ) -> Option<(std::collections::HashMap<u32, CallAnnotation>, Vec<u32>)> {
-    load_cached(file_path, data, ".gum-extra")
+    load_cached(file_path, trace_len, trace_hash, ".gum-extra")
 }
 
 /// 删除指定文件的所有缓存
@@ -392,11 +457,50 @@ fn dir_size(path: &PathBuf) -> u64 {
 mod magic_version_tests {
     use super::*;
 
-    /// p2 缓存携带序列化的 ActivationTree，布局变更必须升 magic 否则旧
-    /// V5（无新字段）误命中且反序列化失败 → 永久 IndexNotReady。
-    /// 此断言锁定当前 magic；下次改 ActivationTree 序列化时递增并更新此处。
+    /// section 缓存同时绑定布局版本与 payload 摘要；任一合同改变都必须升 magic。
+    /// 此断言锁定当前版本，避免下次格式变更漏改。
     #[test]
-    fn p2_magic_tracks_activation_tree_layout() {
-        assert_eq!(MAGIC_V6, b"TCACHE06");
+    fn section_magic_tracks_payload_integrity_contract() {
+        assert_eq!(MAGIC_V7, b"TCACHE07");
+    }
+
+    #[test]
+    fn section_cache_identity_includes_trace_tail() {
+        let _guard = cache_dir_override_test_lock();
+        let dir = std::env::temp_dir().join(format!(
+            "trace-ui-cache-tail-{}-{}",
+            std::process::id(),
+            uuid::Uuid::new_v4()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        set_cache_dir_override(Some(dir.clone()));
+
+        let path = "/tmp/trace-ui-cache-tail.trace";
+        let mut original = vec![0u8; 1024 * 1024 + 1];
+        original[1024 * 1024] = 1;
+        let archive = crate::flat::line_index::LineIndexArchive {
+            sampled_offsets: vec![0],
+            total: 1,
+        };
+        let original_hash: [u8; 32] = Sha256::digest(&original).into();
+        save_sections_raw(
+            path,
+            original.len() as u64,
+            &original_hash,
+            ".lidx.cache",
+            &archive.to_sections(),
+        );
+        assert!(load_lidx_cache(path, original.len() as u64, &original_hash).is_some());
+
+        let mut changed = original;
+        changed[1024 * 1024] = 2;
+        let changed_hash: [u8; 32] = Sha256::digest(&changed).into();
+        assert!(
+            load_lidx_cache(path, changed.len() as u64, &changed_hash).is_none(),
+            "same-size trace changes after the first MiB must invalidate caches"
+        );
+
+        set_cache_dir_override(None);
+        let _ = std::fs::remove_dir_all(dir);
     }
 }

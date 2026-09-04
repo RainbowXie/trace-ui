@@ -201,7 +201,12 @@ impl crate::engine::TraceEngine {
                     .state
                     .write()
                     .map_err(|e| TraceError::Internal(e.to_string()))?;
-                crate::cache::save_string_cache(&state.file_path, &state.mmap, &string_index);
+                crate::cache::save_string_cache(
+                    &state.file_path,
+                    state.mmap.len() as u64,
+                    &state.trace_hash,
+                    &string_index,
+                );
                 state.string_index = Some(string_index);
             }
 

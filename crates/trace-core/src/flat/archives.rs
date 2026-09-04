@@ -15,6 +15,7 @@ use super::mem_last_def::{FlatMemLastDef, MemLastDefView};
 use super::pair_split::{FlatPairSplit, PairSplitView};
 use super::reg_checkpoints::{FlatRegCheckpoints, RegCheckpointsView};
 use super::scan_view::ScanView;
+use super::validation::{phase2_raw, scan_raw};
 
 pub const HEADER_LEN: usize = 64;
 
@@ -53,7 +54,7 @@ impl Phase2Archive {
     /// `data` = &mmap[HEADER_LEN..] (after 64-byte cache header)
     pub fn views_from_sections(data: &[u8]) -> Option<Phase2Views<'_>> {
         let r = SectionReader::new(data)?;
-        // V6 缓存（magic TCACHE06）布局固定为恰好 8 个 section；
+        // V7 缓存（magic TCACHE07）布局固定为恰好 8 个 section；
         // 不等于 8 = 损坏/截断缓存，整体判 miss 触发重扫重建，
         // fail-closed：不能接受半新半旧布局（ActivationTree 永久缺失）。
         // 旧 V4/更早缓存在 cache.rs 的 magic 校验处已 miss，不会到达这里。
@@ -77,9 +78,16 @@ impl Phase2Archive {
         {
             return None;
         }
+        // 字节级合法不足以保证零拷贝 view 可安全索引；CSR 哨兵和 checkpoint
+        // 维度若不闭合，查询才会在 mmap 命中之后越界或除零。
+        let raw = phase2_raw(&r)?;
         Some(Phase2Views {
-            mem_accesses: MemAccessView::from_raw(r.slice(0), r.slice(1), r.slice(2)),
-            reg_checkpoints: RegCheckpointsView::from_raw(r.u32_val(3), r.u32_val(4), r.slice(5)),
+            mem_accesses: MemAccessView::from_raw(raw.addrs, raw.offsets, raw.records),
+            reg_checkpoints: RegCheckpointsView::from_raw(
+                raw.checkpoint_interval,
+                raw.checkpoint_count,
+                raw.checkpoint_data,
+            ),
             call_tree_bytes: r.bytes(6),
             activation_tree_bytes: Some(r.bytes(7)),
         })
@@ -140,7 +148,7 @@ impl ScanArchive {
 
     pub fn views_from_sections(data: &[u8]) -> Option<ScanViews<'_>> {
         let r = SectionReader::new(data)?;
-        if r.num_sections() < 20 {
+        if r.num_sections() != 20 {
             return None;
         }
         // typed 预检失败 = 损坏缓存整体 miss。
@@ -174,24 +182,25 @@ impl ScanArchive {
                 return None;
             }
         }
+        let raw = scan_raw(&r)?;
         Some(ScanViews {
             deps: DepsView::from_raw(DepsRawSlices {
-                chunk_start_lines: r.slice(0),
-                chunk_offsets_start: r.slice(1),
-                chunk_data_start: r.slice(2),
-                all_offsets: r.slice(3),
-                all_data: r.slice(4),
-                patch_lines: r.slice(5),
-                patch_offsets: r.slice(6),
-                patch_data: r.slice(7),
+                chunk_start_lines: raw.chunk_start_lines,
+                chunk_offsets_start: raw.chunk_offsets_start,
+                chunk_data_start: raw.chunk_data_start,
+                all_offsets: raw.all_offsets,
+                all_data: raw.all_data,
+                patch_lines: raw.patch_lines,
+                patch_offsets: raw.patch_offsets,
+                patch_data: raw.patch_data,
             }),
-            mem_last_def: MemLastDefView::from_raw(r.slice(8), r.slice(9), r.slice(10)),
-            pair_split: PairSplitView::from_raw(r.slice(11), r.slice(12), r.slice(13)),
-            init_mem_loads: BitView::from_raw(r.slice(14), r.u32_val(15)),
-            reg_last_def_inner: r.slice(16),
-            line_count: r.u32_val(17),
-            parsed_count: r.u32_val(18),
-            mem_op_count: r.u32_val(19),
+            mem_last_def: MemLastDefView::from_raw(raw.mem_addrs, raw.mem_lines, raw.mem_values),
+            pair_split: PairSplitView::from_raw(raw.pair_keys, raw.pair_offsets, raw.pair_data),
+            init_mem_loads: BitView::from_raw(raw.bit_data, raw.bit_len),
+            reg_last_def_inner: raw.reg_last_def_inner,
+            line_count: raw.line_count,
+            parsed_count: raw.parsed_count,
+            mem_op_count: raw.mem_op_count,
         })
     }
 }
@@ -220,14 +229,26 @@ impl LineIndexArchive {
 
     pub fn views_from_sections(data: &[u8]) -> Option<LineIndexView<'_>> {
         let r = SectionReader::new(data)?;
-        if r.num_sections() < 2 {
+        if r.num_sections() != 2 {
             return None;
         }
         // 0 sampled_offsets u64 数组（空合法）、1 total u32 单值走 is_valid_single（length == elem_size）
         if !r.is_valid_typed(0, 8) || !r.is_valid_single(1, 4) {
             return None;
         }
-        Some(LineIndexView::from_raw(r.slice(0), r.u32_val(1)))
+        let sampled_offsets: &[u64] = r.slice(0);
+        let total = r.u32_val(1);
+        let expected_samples = usize::try_from(total)
+            .ok()
+            .and_then(|total| total.checked_add(255))
+            .map(|total| total / 256);
+        if expected_samples != Some(sampled_offsets.len())
+            || (total > 0 && sampled_offsets.first().copied() != Some(0))
+            || sampled_offsets.windows(2).any(|w| w[0] >= w[1])
+        {
+            return None;
+        }
+        Some(LineIndexView::from_raw(sampled_offsets, total))
     }
 }
 
@@ -277,7 +298,7 @@ impl CachedStore<Phase2Archive> {
             Self::Mapped(mmap) => {
                 let views = Phase2Archive::views_from_sections(&mmap[HEADER_LEN..])?;
                 // 结构变更后旧缓存反序列化失败时不 panic：返回 None 让 session
-                // 进入 IndexNotReady；缓存版本号（MAGIC_V6）机制在下次重建时
+                // 进入 IndexNotReady；缓存版本号（MAGIC_V7）机制在下次重建时
                 // 自然修复。
                 views
                     .activation_tree_bytes

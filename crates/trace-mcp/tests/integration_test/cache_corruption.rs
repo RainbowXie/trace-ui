@@ -1,14 +1,20 @@
 //! 缓存损坏 / 升版 / 空数组命中回归。
 //!
 //! 从 activation.rs 拆出：损坏 miss 重扫与合法二次命中不是 Activation
-//! 语义，混在同一文件会超 500 行软上限。
+//! 语义，独立文件避免把激活模型测试与缓存合同耦合。
 
 use super::*;
+use sha2::{Digest, Sha256};
 
 /// 当前隔离缓存目录（setup_session 已为每次调用分配独立目录；
 /// 旧格式测试用它直接操作缓存文件）。
 fn current_cache_dir() -> std::path::PathBuf {
     trace_core::cache::cache_dir().expect("setup_session 已设置隔离目录")
+}
+
+fn refresh_section_digest(bytes: &mut [u8]) {
+    let digest = Sha256::digest(&bytes[64..]);
+    bytes[48..64].copy_from_slice(&digest[..16]);
 }
 
 #[test]
@@ -58,11 +64,10 @@ fn test_activation_tree_survives_cache_reload() {
     engine.close_session(&sid2).unwrap();
 }
 
-/// 旧格式 Phase2 缓存（7 sections，无 ActivationTree）不 panic，
-/// ActivationTree 查询返回 IndexNotReady，重建后恢复。
+/// 当前 V7 Phase2 缓存若只剩 7 sections，必须判损坏并重建。
 #[test]
-fn test_corrupted_v5_cache_triggers_rescan_not_stale_load() {
-    // V5 缓存布局固定 8 sections：7-section 的 V5 缓存 = 损坏/截断，
+fn test_truncated_v7_cache_triggers_rescan_not_stale_load() {
+    // V7 缓存布局固定 8 sections：7-section = 损坏/截断，
     // 必须整体判 miss（重扫重建），不能部分加载留下永久缺失的能力。
     // 多阶段（build→改缓存→reopen）全程持锁自控目录。
     let (engine, sid, _guard) = setup_session_locked(&get_trace_path());
@@ -84,12 +89,13 @@ fn test_corrupted_v5_cache_triggers_rescan_not_stale_load() {
     let bytes = std::fs::read(&cache_file).expect("cache written by first build");
     assert!(bytes.len() > 64);
     let num = u32::from_le_bytes(bytes[64..68].try_into().unwrap()) as usize;
-    assert_eq!(num, 8, "V5 p2 cache must have exactly 8 sections");
+    assert_eq!(num, 8, "V7 p2 cache must have exactly 8 sections");
     let mut corrupted = bytes.clone();
     corrupted[64..68].copy_from_slice(&7u32.to_le_bytes());
     let table_end = 64 + 4 + 8 * 16;
     let new_table_end = 64 + 4 + 7 * 16;
     corrupted.drain(new_table_end..table_end);
+    refresh_section_digest(&mut corrupted);
     std::fs::write(&cache_file, &corrupted).unwrap();
 
     let info = engine
@@ -117,10 +123,9 @@ fn test_corrupted_v5_cache_triggers_rescan_not_stale_load() {
     engine.close_session(&sid2).unwrap();
 }
 
-/// V6 缓存位损坏（ActivationTree bincode 损坏）必须整体 miss 重扫
-///——不能带着 None 进入 CacheHit 让查询永远 IndexNotReady。
+/// V7 ActivationTree section 的 bincode 边界损坏必须整体 miss 重扫。
 #[test]
-fn test_bit_corrupted_v6_activation_section_triggers_rescan() {
+fn test_corrupted_v7_activation_section_triggers_rescan() {
     let (engine, sid, _guard) = setup_session_locked(&get_trace_path());
     let total = engine
         .get_activation_tree(&sid, 0, 100)
@@ -141,9 +146,10 @@ fn test_bit_corrupted_v6_activation_section_triggers_rescan() {
     ));
     let mut bytes = std::fs::read(&cache_file).expect("cache written by first build");
     let num = u32::from_le_bytes(bytes[64..68].try_into().unwrap()) as usize;
-    assert_eq!(num, 8, "V6 p2 cache must have exactly 8 sections");
+    assert_eq!(num, 8, "V7 p2 cache must have exactly 8 sections");
     let base = 64 + 4 + 7 * 16; // section 7 表项（offset + length）
     bytes[base + 8..base + 16].copy_from_slice(&1u64.to_le_bytes());
+    refresh_section_digest(&mut bytes);
     std::fs::write(&cache_file, &bytes).unwrap();
 
     let info = engine
@@ -169,11 +175,10 @@ fn test_bit_corrupted_v6_activation_section_triggers_rescan() {
     engine.close_session(&sid2).unwrap();
 }
 
-/// V5→V6 升版回归：旧 V5 布局（ActivationTree 无 all_by_call/resolved_by_resume
-/// 字段）的缓存不得被当作命中——magic 不匹配必须触发重扫，而不是误命中后
-/// bincode 反序列化失败进入永久 IndexNotReady。
+/// V6→V7 升版回归：旧 V6 缓存没有 section payload 摘要，
+/// 不得被当作命中——magic 不匹配必须触发重扫。
 #[test]
-fn test_v5_layout_cache_rejected_by_magic_bump() {
+fn test_v6_layout_cache_rejected_by_magic_bump() {
     let (engine, sid, _guard) = setup_session_locked(&get_trace_path());
     let total = engine
         .get_activation_tree(&sid, 0, 100)
@@ -183,20 +188,18 @@ fn test_v5_layout_cache_rejected_by_magic_bump() {
     let path = get_trace_path();
     let dir = current_cache_dir();
 
-    // 构造：合法 V6 文件但 magic 改回 TCACHE05。
-    // 注意：这不是精确复现旧 V5 布局（V5 的 bincode 字段数与 V6 不同），
-    // 只验证 magic 拒绝路径——旧 magic 必须 miss 重扫而不是误命中。
+    // 构造：合法 V7 文件但 magic 改回 TCACHE06，只验证旧 magic 拒绝路径。
     let cache_file = dir.join(format!(
         "{}{}",
         trace_core::cache::path_hash_for_test(&path),
         ".p2.cache"
     ));
     let mut bytes = std::fs::read(&cache_file).expect("cache written by first build");
-    assert_eq!(&bytes[0..8], b"TCACHE06", "current cache must be V6");
-    bytes[0..8].copy_from_slice(b"TCACHE05");
+    assert_eq!(&bytes[0..8], b"TCACHE07", "current cache must be V7");
+    bytes[0..8].copy_from_slice(b"TCACHE06");
     std::fs::write(&cache_file, &bytes).unwrap();
 
-    let info = engine.create_session(&path).expect("reopen with old magic");
+    let info = engine.create_session(&path).expect("reopen with V6 magic");
     let sid2 = info.session_id.clone();
     let build = engine
         .build_index(
@@ -207,8 +210,8 @@ fn test_v5_layout_cache_rejected_by_magic_bump() {
             },
             None,
         )
-        .expect("old-magic cache must miss and rescan");
-    assert!(!build.from_cache, "旧 V5 magic 不得命中");
+        .expect("V6 cache must miss and rescan");
+    assert!(!build.from_cache, "旧 V6 magic 不得命中");
 
     let tree = engine
         .get_activation_tree(&sid2, 0, 100)
@@ -282,6 +285,7 @@ fn corrupt_section_count(cache_file: &std::path::Path, expected: u32, reported: 
     let table_end = 64 + 4 + (expected as usize) * 16;
     let new_table_end = 64 + 4 + (reported as usize) * 16;
     corrupted.drain(new_table_end..table_end);
+    refresh_section_digest(&mut corrupted);
     std::fs::write(cache_file, &corrupted).unwrap();
 }
 

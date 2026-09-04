@@ -9,3 +9,4 @@ pub mod mem_last_def;
 pub mod pair_split;
 pub mod reg_checkpoints;
 pub mod scan_view;
+mod validation;
