@@ -8,11 +8,16 @@ use trace_parser::insn_class::InsnClass;
 
 use super::activation::stable_site;
 
-/// 本 Activation 窗口内属于它自己的一条指令：稳定身份 + 是否控制转移。
+/// 本 Activation 窗口内属于它自己的一条指令：稳定身份 + 是否控制转移 +
+/// 栈参数机械查询需要的行内片段（V1 保存行文本；有界 serializer 任务
+/// 到来时改为流式两遍扫描）。
 struct OwnedInsn {
     seq: u32,
     site: String,
     transfer: bool,
+    line: String,
+    mnemonic: Option<String>,
+    first_operand: Option<String>,
 }
 
 /// 冻结切分规则（docs/trace-ui/cfg-generation.md）的块终止指令：
@@ -132,7 +137,11 @@ impl crate::engine::TraceEngine {
             abi: FunctionAbiDto {
                 entry_sp: known_register(&entry_registers, 31),
                 arguments,
-                stack_arguments: Vec::new(),
+                stack_arguments: if entry_registers[31] == u64::MAX {
+                    Vec::new()
+                } else {
+                    collect_stack_arguments(&owned, entry_registers[31])
+                },
                 returns,
             },
             executed_block_sequence,
@@ -185,11 +194,16 @@ fn owned_instructions(
         let site = stable_site(line).ok_or_else(|| {
             TraceError::InvalidArgument(format!("seq {} 缺少稳定 module+offset", seq))
         })?;
-        let transfer = line_mnemonic(line).is_some_and(is_control_transfer);
+        let mnemonic = line_mnemonic(line).map(str::to_owned);
+        let transfer = mnemonic.as_deref().is_some_and(is_control_transfer);
+        let first_operand = first_operand(line);
         owned.push(OwnedInsn {
             seq,
             site,
             transfer,
+            line: line.to_owned(),
+            mnemonic,
+            first_operand,
         });
     }
     Ok(owned)
@@ -216,6 +230,123 @@ fn split_executed_blocks(owned: &[OwnedInsn]) -> Vec<ExecutedBlockEntryDto> {
         }
     }
     blocks
+}
+
+/// 从 raw 行提取 `mem_r=0x…` / `mem_w=0x…` 注解地址。
+fn line_mem_annotation(line: &str, key: &str) -> Option<u64> {
+    let marker = format!("{key}=0x");
+    let start = line.find(&marker)? + marker.len();
+    let hex = &line[start..];
+    let end = hex
+        .find(|c: char| !c.is_ascii_hexdigit())
+        .unwrap_or(hex.len());
+    u64::from_str_radix(&hex[..end], 16).ok()
+}
+
+/// 助记符 + 目标操作数 → 访存宽度（字节）。单寄存器载荷；ldp/stp 成对
+/// 访存不属于单个栈参数，返回 None 留给后续 memory facts。
+fn access_width(mnemonic: &str, operand: &str) -> Option<u32> {
+    let register = operand.trim().split(',').next()?.trim();
+    let width = match mnemonic {
+        "ldrb" | "ldrsb" | "strb" | "ldtrb" | "sttrb" => 1,
+        "ldrh" | "ldrsh" | "strh" => 2,
+        "ldrsw" => 4,
+        "ldur" | "str" | "stur" | "ldr" => match register.chars().next()? {
+            'x' => 8,
+            'w' => 4,
+            _ => return None,
+        },
+        _ => return None,
+    };
+    Some(width)
+}
+
+/// 提取箭头后目标寄存器的值：`-> x0=0x41`。
+fn arrow_register_value(line: &str, register: &str) -> Option<u64> {
+    let arrow = line.find("-> ")? + 3;
+    let tail = &line[arrow..];
+    let pattern = format!("{register}=0x");
+    let start = tail.find(&pattern)? + pattern.len();
+    let hex = &tail[start..];
+    let end = hex
+        .find(|c: char| !c.is_ascii_hexdigit())
+        .unwrap_or(hex.len());
+    u64::from_str_radix(&hex[..end], 16).ok()
+}
+
+/// 助记符之后的第一个操作数（目标寄存器）。
+fn first_operand(line: &str) -> Option<String> {
+    let mnemonic = line_mnemonic(line)?;
+    let after = &line[line.find(mnemonic)? + mnemonic.len()..];
+    let operand = after.trim_start();
+    let end = operand.find(';')?;
+    Some(operand[..end].trim_end_matches(',').to_string())
+}
+
+/// 栈参数三门合同的机械侧：entry SP 及之上、本次实际读取、宽度可确认的
+/// 单寄存器载荷。首次读取前被写回的槽保留读取证据但 value 为 null；
+/// 多次读取合并 read_seqs；不确定值保持 null，不以零值或写后值补齐。
+fn collect_stack_arguments(owned: &[OwnedInsn], entry_sp: u64) -> Vec<FunctionStackArgumentDto> {
+    let mut writes: Vec<(u64, u32, u32)> = Vec::new();
+    for insn in owned {
+        if let (Some(address), Some(mnemonic), Some(operand)) = (
+            line_mem_annotation(&insn.line, "mem_w"),
+            insn.mnemonic.as_deref(),
+            insn.first_operand.as_deref(),
+        ) {
+            if let Some(size) = access_width(mnemonic, operand) {
+                writes.push((address, size, insn.seq));
+            }
+        }
+    }
+    let mut slots: std::collections::BTreeMap<(u64, u32), (Option<u64>, Vec<u32>)> =
+        std::collections::BTreeMap::new();
+    for insn in owned {
+        let Some(address) = line_mem_annotation(&insn.line, "mem_r") else {
+            continue;
+        };
+        if address < entry_sp {
+            continue;
+        }
+        let Some((mnemonic, operand)) = insn.mnemonic.as_deref().zip(insn.first_operand.as_deref())
+        else {
+            continue;
+        };
+        let Some(size) = access_width(mnemonic, operand) else {
+            continue;
+        };
+        let written_before = writes.iter().any(|(waddress, wsize, wseq)| {
+            *wseq < insn.seq
+                && *waddress < address + u64::from(size)
+                && address < *waddress + u64::from(*wsize)
+        });
+        let value = if written_before {
+            None
+        } else {
+            insn.first_operand
+                .as_deref()
+                .and_then(|operand| operand.split(',').next())
+                .and_then(|register| arrow_register_value(&insn.line, register.trim()))
+        };
+        let slot = slots
+            .entry((address - entry_sp, size))
+            .or_insert((value, Vec::new()));
+        if slot.0.is_none() && value.is_some() {
+            slot.0 = value;
+        }
+        slot.1.push(insn.seq);
+    }
+    slots
+        .into_iter()
+        .map(
+            |((offset, size), (value, read_seqs))| FunctionStackArgumentDto {
+                offset: offset as i64,
+                size,
+                value: value.map(|value| format!("0x{value:016x}")),
+                read_seqs,
+            },
+        )
+        .collect()
 }
 
 fn registers_at(

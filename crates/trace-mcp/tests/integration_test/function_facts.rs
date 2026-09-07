@@ -214,3 +214,86 @@ fn a_later_observed_target_splits_the_earlier_linear_execution() {
     engine.close_session(&sid).unwrap();
     std::fs::remove_file(path).expect("remove inline trace");
 }
+
+#[test]
+fn stack_arguments_come_from_real_reads_of_the_caller_area() {
+    // 栈参数三门合同：只有本次 Activation 实际读取、且地址在 entry SP 及
+    // 之上的栈槽进入 stack_arguments；未读取的槽与 callee 自己的局部读取
+    // 都不进入。
+    let (engine, sid, path) = setup_inline_trace(&[
+        "[App] 0x1000!0x1000 sub sp, sp, #0x20; sp=0x3020 -> sp=0x3000",
+        "[App] 0x1004!0x1004 bl #0x2000; sp=0x3000",
+        "[App] 0x2000!0x2000 sub sp, sp, #0x20; sp=0x3000 -> sp=0x2fe0",
+        "[App] 0x2004!0x2004 ldr x0, [sp, #0x20]; sp=0x2fe0 mem_r=0x3000 -> x0=0x41",
+        "[App] 0x2008!0x2008 ldr x1, [sp, #0x30]; sp=0x2fe0 mem_r=0x3010 -> x1=0x42",
+        "[App] 0x200c!0x200c ldr x2, [sp, #0x8]; sp=0x2fe0 mem_r=0x2fe8 -> x2=0x99",
+        "[App] 0x2010!0x2010 ret; sp=0x2fe0",
+        "[App] 0x1008!0x1008 mov x0, #0x99; x0=0x41 -> x0=0x99",
+    ]);
+
+    let bundle = engine
+        .get_function_facts(&sid, 1, 2)
+        .expect("function facts");
+
+    assert_eq!(
+        bundle.abi.entry_sp,
+        Some("0x0000000000003000".to_string()),
+        "entry SP 必须是入口指令执行前的 SP"
+    );
+    let slots = bundle
+        .abi
+        .stack_arguments
+        .iter()
+        .map(|slot| {
+            (
+                slot.offset,
+                slot.size,
+                slot.value.clone(),
+                slot.read_seqs.clone(),
+            )
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(
+        slots,
+        vec![
+            (0, 8, Some("0x0000000000000041".to_string()), vec![3]),
+            (16, 8, Some("0x0000000000000042".to_string()), vec![4]),
+        ],
+        "只有实际读取且位于 entry SP 之上的槽进入；偏移 8 的未读槽与 entry SP 之下的局部读取都不进入"
+    );
+
+    engine.close_session(&sid).unwrap();
+    std::fs::remove_file(path).expect("remove inline trace");
+}
+
+#[test]
+fn a_written_slot_before_its_first_read_keeps_a_null_value() {
+    // callee 在首次读取前写回了同一栈槽：入口原始值无法从 trace 恢复，
+    // value 必须保持 null，不得用写入后的值或读取值冒充。
+    let (engine, sid, path) = setup_inline_trace(&[
+        "[App] 0x1000!0x1000 sub sp, sp, #0x20; sp=0x3020 -> sp=0x3000",
+        "[App] 0x1004!0x1004 bl #0x2000; sp=0x3000",
+        "[App] 0x2000!0x2000 str x3, [sp]; sp=0x3000 x3=0x77 mem_w=0x3000",
+        "[App] 0x2004!0x2004 ldr x0, [sp]; sp=0x3000 mem_r=0x3000 -> x0=0x77",
+        "[App] 0x2008!0x2008 ret; sp=0x3000",
+        "[App] 0x1008!0x1008 mov x0, #0x99; x0=0x77 -> x0=0x99",
+    ]);
+
+    let bundle = engine
+        .get_function_facts(&sid, 1, 2)
+        .expect("function facts");
+
+    assert_eq!(
+        bundle
+            .abi
+            .stack_arguments
+            .iter()
+            .map(|slot| (slot.offset, slot.size, slot.value.is_none()))
+            .collect::<Vec<_>>(),
+        vec![(0, 8, true)],
+        "写后读的槽保留读取证据但 value 为 null"
+    );
+
+    engine.close_session(&sid).unwrap();
+    std::fs::remove_file(path).expect("remove inline trace");
+}
