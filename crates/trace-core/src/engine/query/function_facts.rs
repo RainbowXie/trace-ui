@@ -113,7 +113,7 @@ fn registers_at(
         .nearest_before(seq)
         .ok_or_else(|| TraceError::Internal("无可用检查点".to_string()))?;
     let mut values = *snapshot;
-    for replay_seq in checkpoint_seq..=seq {
+    for replay_seq in checkpoint_seq..seq {
         if let Some(raw) = index.get_line(&state.mmap, replay_seq) {
             if let Ok(line) = std::str::from_utf8(raw) {
                 crate::phase2::update_reg_values(&mut values, line);
