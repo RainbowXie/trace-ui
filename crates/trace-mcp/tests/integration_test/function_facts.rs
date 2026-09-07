@@ -390,3 +390,106 @@ fn external_reads_and_final_writes_follow_the_producer_rules() {
     engine.close_session(&sid).unwrap();
     std::fs::remove_file(path).expect("remove inline trace");
 }
+
+#[test]
+fn bypassed_calls_become_external_call_events() {
+    // 未记录函数体的调用成为 caller 的 External Call Event：callsite/resume
+    // 锚点、注解符号 target、call 前 ABI 参数与 SP、调用方准备的栈参数
+    // （evidence_seqs 是写入序号）、resume 前返回值；无明确捕获证据的
+    // Event 访存数组为空。
+    let (engine, sid, path) = setup_inline_trace(&[
+        "[App] 0x5004!0x5004 bl #0x1000; sp=0x3030",
+        "[App] 0x1000!0x1000 sub sp, sp, #0x10; sp=0x3030 -> sp=0x3020",
+        "[App] 0x1004!0x1004 str x1, [sp]; sp=0x3020 x1=0x1234 mem_w=0x3020",
+        "[App] 0x1008!0x1008 mov x0, #0x11; x0=0x0 -> x0=0x11",
+        "[App] 0x100c!0x100c bl #0x3000; x0=0x11 sp=0x3020",
+        "call func: extfoo(0x11)",
+        "args0: 0x11",
+        "ret: 0x99",
+        "[App] 0x1010!0x1010 mov x2, #0x1; x0=0x99 -> x2=0x1",
+        "[App] 0x1014!0x1014 ret; sp=0x3020",
+        "[App] 0x5008!0x5008 mov x0, #0x99; x0=0x99 -> x0=0x99",
+    ]);
+
+    let bundle = engine
+        .get_function_facts(&sid, 0, 1)
+        .expect("function facts");
+
+    assert_eq!(bundle.external_call_events.len(), 1);
+    let event = &bundle.external_call_events[0];
+    assert_eq!(event.callsite.seq, 4);
+    assert_eq!(event.callsite.offset, "App+0x100c");
+    assert_eq!(
+        event
+            .resume
+            .as_ref()
+            .map(|anchor| (anchor.seq, anchor.offset.clone())),
+        Some((8, "App+0x1010".to_string()))
+    );
+    assert_eq!(event.target.symbol, Some("extfoo".to_string()));
+    assert!(event.target.module.is_none() && event.target.entry.is_none());
+    assert_eq!(event.call_sp, Some("0x0000000000003020".to_string()));
+    assert_eq!(
+        event.arguments.get("X0"),
+        Some(&Some("0x0000000000000011".to_string()))
+    );
+    assert_eq!(event.arguments.get("X7"), Some(&None));
+    assert_eq!(
+        event
+            .stack_arguments
+            .iter()
+            .map(|slot| (
+                slot.offset,
+                slot.size,
+                slot.value.clone(),
+                slot.evidence_seqs.clone()
+            ))
+            .collect::<Vec<_>>(),
+        vec![(0, 8, Some("0x0000000000001234".to_string()), vec![2])]
+    );
+    assert_eq!(
+        event.returns.get("X0"),
+        Some(&Some("0x0000000000000099".to_string()))
+    );
+    assert!(event.memory_reads.is_empty());
+    assert!(event.global_reads.is_empty());
+    assert!(event.memory_writes.is_empty());
+    assert!(event.global_writes.is_empty());
+    assert!(event.unresolved.is_empty());
+
+    engine.close_session(&sid).unwrap();
+    std::fs::remove_file(path).expect("remove inline trace");
+}
+
+#[test]
+fn a_bypassed_call_without_annotation_marks_the_missing_target() {
+    // 无注解的未记录调用：target 三个身份字段都为 null 时，Event 必须带
+    // indirect_target_unresolved 缺口，不得伪造身份。
+    let (engine, sid, path) = setup_inline_trace(&[
+        "[App] 0x5004!0x5004 bl #0x1000; sp=0x3030",
+        "[App] 0x1000!0x1000 mov x0, #0x11; x0=0x0 -> x0=0x11",
+        "[App] 0x1004!0x1004 bl #0x3000; x0=0x11 sp=0x3030",
+        "[App] 0x1008!0x1008 mov x2, #0x1; sp=0x3030 -> x2=0x1",
+        "[App] 0x100c!0x100c ret; sp=0x3030",
+        "[App] 0x5008!0x5008 mov x0, #0x99; x0=0x99 -> x0=0x99",
+    ]);
+
+    let bundle = engine
+        .get_function_facts(&sid, 0, 1)
+        .expect("function facts");
+
+    assert_eq!(bundle.external_call_events.len(), 1);
+    let event = &bundle.external_call_events[0];
+    assert!(
+        event.target.module.is_none()
+            && event.target.entry.is_none()
+            && event.target.symbol.is_none()
+    );
+    assert!(event
+        .unresolved
+        .iter()
+        .any(|gap| gap.kind == "indirect_target_unresolved"));
+
+    engine.close_session(&sid).unwrap();
+    std::fs::remove_file(path).expect("remove inline trace");
+}

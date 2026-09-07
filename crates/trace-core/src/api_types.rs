@@ -327,6 +327,51 @@ pub struct FunctionGlobalFactDto {
 pub struct FunctionExternalCallEventDto {
     pub callsite: FunctionAnchorDto,
     pub resume: Option<FunctionAnchorDto>,
+    pub target: FunctionExternalTargetDto,
+    pub call_sp: Option<String>,
+    pub arguments: std::collections::BTreeMap<String, Option<String>>,
+    pub stack_arguments: Vec<FunctionExternalStackArgumentDto>,
+    pub returns: std::collections::BTreeMap<String, Option<String>>,
+    pub memory_reads: Vec<FunctionEventMemoryRecordDto>,
+    pub global_reads: Vec<FunctionEventGlobalRecordDto>,
+    pub memory_writes: Vec<FunctionEventMemoryRecordDto>,
+    pub global_writes: Vec<FunctionEventGlobalRecordDto>,
+    pub unresolved: Vec<FunctionEventUnresolvedDto>,
+}
+
+#[derive(Serialize)]
+pub struct FunctionExternalTargetDto {
+    pub module: Option<String>,
+    pub entry: Option<String>,
+    pub symbol: Option<String>,
+}
+
+#[derive(Serialize)]
+pub struct FunctionExternalStackArgumentDto {
+    pub offset: i64,
+    pub size: u32,
+    pub value: Option<String>,
+    pub evidence_seqs: Vec<u32>,
+}
+
+#[derive(Serialize)]
+pub struct FunctionEventMemoryRecordDto {
+    pub address: String,
+    pub size: u32,
+    pub bytes: Option<String>,
+}
+
+#[derive(Serialize)]
+pub struct FunctionEventGlobalRecordDto {
+    pub global: String,
+    pub size: u32,
+    pub bytes: Option<String>,
+}
+
+#[derive(Serialize)]
+pub struct FunctionEventUnresolvedDto {
+    pub kind: String,
+    pub detail: String,
 }
 
 #[derive(Serialize)]
