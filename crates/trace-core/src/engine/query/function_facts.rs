@@ -49,17 +49,17 @@ impl crate::engine::TraceEngine {
                 })
         };
         let function = site(activation.entry_seq)?;
-        let entry_registers = self.get_registers_at(session_id, activation.entry_seq)?;
-        let resume_registers = self.get_registers_at(session_id, activation.resume_seq)?;
+        let entry_registers = registers_at(&state, activation.entry_seq)?;
+        let resume_registers = registers_at(&state, activation.resume_seq)?;
         let arguments = (0..=7)
             .map(|index| {
                 let name = format!("X{}", index);
-                let value = known_register(&entry_registers, &name);
+                let value = known_register(&entry_registers, index);
                 (name, value)
             })
             .collect::<BTreeMap<_, _>>();
         let mut returns = BTreeMap::new();
-        returns.insert("X0".to_string(), known_register(&resume_registers, "X0"));
+        returns.insert("X0".to_string(), known_register(&resume_registers, 0));
 
         Ok(FunctionFactBundleDto {
             function: function.clone(),
@@ -82,7 +82,7 @@ impl crate::engine::TraceEngine {
                 },
             },
             abi: FunctionAbiDto {
-                entry_sp: known_register(&entry_registers, "SP"),
+                entry_sp: known_register(&entry_registers, 31),
                 arguments,
                 stack_arguments: Vec::new(),
                 returns,
@@ -101,12 +101,32 @@ impl crate::engine::TraceEngine {
     }
 }
 
+fn registers_at(
+    state: &crate::session::SessionState,
+    seq: u32,
+) -> Result<[u64; trace_parser::types::RegId::COUNT]> {
+    let checkpoints = state
+        .reg_checkpoints_view()
+        .ok_or(TraceError::IndexNotReady)?;
+    let index = state.line_index_view().ok_or(TraceError::IndexNotReady)?;
+    let (checkpoint_seq, snapshot) = checkpoints
+        .nearest_before(seq)
+        .ok_or_else(|| TraceError::Internal("无可用检查点".to_string()))?;
+    let mut values = *snapshot;
+    for replay_seq in checkpoint_seq..=seq {
+        if let Some(raw) = index.get_line(&state.mmap, replay_seq) {
+            if let Ok(line) = std::str::from_utf8(raw) {
+                crate::phase2::update_reg_values(&mut values, line);
+            }
+        }
+    }
+    Ok(values)
+}
+
 fn known_register(
-    registers: &std::collections::HashMap<String, String>,
-    name: &str,
+    registers: &[u64; trace_parser::types::RegId::COUNT],
+    index: usize,
 ) -> Option<String> {
-    registers
-        .get(name)
-        .filter(|value| value.as_str() != "?")
-        .cloned()
+    let value = registers[index];
+    (value != u64::MAX).then(|| format!("0x{:016x}", value))
 }
