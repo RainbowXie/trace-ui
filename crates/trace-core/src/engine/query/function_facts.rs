@@ -113,6 +113,16 @@ impl crate::engine::TraceEngine {
         returns.insert("X0".to_string(), known_register(&resume_registers, 0));
         let owned = owned_instructions(&state, tree, activation)?;
         let executed_block_sequence = split_executed_blocks(&owned);
+        let stack_argument_slots: std::collections::HashSet<(u64, u32)> =
+            if entry_registers[31] == u64::MAX {
+                Default::default()
+            } else {
+                collect_stack_arguments(&owned, entry_registers[31])
+                    .into_iter()
+                    .map(|slot| (entry_registers[31] + slot.offset as u64, slot.size))
+                    .collect()
+            };
+        let (memory_reads, memory_writes) = collect_memory_facts(&owned, &stack_argument_slots);
 
         Ok(FunctionFactBundleDto {
             function: function.clone(),
@@ -145,9 +155,9 @@ impl crate::engine::TraceEngine {
                 returns,
             },
             executed_block_sequence,
-            memory_reads: Vec::new(),
+            memory_reads,
             global_reads: Vec::new(),
-            memory_writes: Vec::new(),
+            memory_writes,
             global_writes: Vec::new(),
             external_call_events: Vec::new(),
             unresolved: Vec::new(),
@@ -305,7 +315,17 @@ fn collect_stack_arguments(owned: &[OwnedInsn], entry_sp: u64) -> Vec<FunctionSt
         let Some(address) = line_mem_annotation(&insn.line, "mem_r") else {
             continue;
         };
+        // ABI 位置的机械证据：SP/FP 相对寻址才可能是 caller 栈参数区；
+        // 其他基址（堆/数据指针）不属于栈参数，交给 memory facts。
         if address < entry_sp {
+            continue;
+        }
+        let base_is_stack = insn
+            .first_operand
+            .as_deref()
+            .and_then(base_register)
+            .is_some_and(|base| base == "sp" || base == "fp");
+        if !base_is_stack {
             continue;
         }
         let Some((mnemonic, operand)) = insn.mnemonic.as_deref().zip(insn.first_operand.as_deref())
@@ -347,6 +367,114 @@ fn collect_stack_arguments(owned: &[OwnedInsn], entry_sp: u64) -> Vec<FunctionSt
             },
         )
         .collect()
+}
+
+/// 分号与箭头之间的 pre-state 区段里提取 `xN=0x…`（写入值的来源寄存器）。
+fn prestate_register_value(line: &str, register: &str) -> Option<u64> {
+    let semicolon = line.find(';')?;
+    let region_end = line.find(" -> ").unwrap_or(line.len());
+    let region = &line[semicolon..region_end];
+    let pattern = format!("{register}=0x");
+    let start = region.find(&pattern)? + pattern.len();
+    let hex = &region[start..];
+    let end = hex
+        .find(|c: char| !c.is_ascii_hexdigit())
+        .unwrap_or(hex.len());
+    u64::from_str_radix(&hex[..end], 16).ok()
+}
+
+/// u64 → 按地址递增（小端）的 lowercase hex 字节串。
+fn little_endian_hex(value: u64, size: u32) -> String {
+    let bytes = value.to_le_bytes();
+    let used = &bytes[..size as usize];
+    used.iter().map(|byte| format!("{byte:02x}")).collect()
+}
+
+/// producer→consumer 机械事实：
+/// - 写入：owned 指令的 mem_w 按 (address,size) 聚合，bytes 取最终一次
+///   写入的源寄存器 pre-state（小端），seqs 保留全部生产者；
+/// - 读取：同一地址在本 Activation 内没有更早写入（外部来源）才进入；
+///   bytes 取首次读取的目标寄存器值；已确认为栈参数的槽不重复进入
+///   memory_reads（abi.stack_arguments 是它们的正式位置）；
+/// - 写后读属内部数据流，两表都不进入。
+fn collect_memory_facts(
+    owned: &[OwnedInsn],
+    stack_slots: &std::collections::HashSet<(u64, u32)>,
+) -> (Vec<FunctionMemoryFactDto>, Vec<FunctionMemoryFactDto>) {
+    #[derive(Default)]
+    struct Slot {
+        seqs: Vec<u32>,
+        /// 最终写入值（写侧）/首次读取值（读侧）。
+        value: Option<u64>,
+        value_seq: u32,
+    }
+    let mut writes: std::collections::BTreeMap<(u64, u32), Slot> = Default::default();
+    let mut reads: std::collections::BTreeMap<(u64, u32), Slot> = Default::default();
+    let mut written_ranges: Vec<(u64, u32)> = Vec::new();
+    for insn in owned {
+        let Some((mnemonic, operand)) = insn.mnemonic.as_deref().zip(insn.first_operand.as_deref())
+        else {
+            continue;
+        };
+        let register = operand.split(',').next().unwrap_or("").trim();
+        if let Some(address) = line_mem_annotation(&insn.line, "mem_w") {
+            if let Some(size) = access_width(mnemonic, operand) {
+                let value = prestate_register_value(&insn.line, register);
+                let slot = writes.entry((address, size)).or_default();
+                if slot.value.is_none() || insn.seq >= slot.value_seq {
+                    slot.value = value;
+                    slot.value_seq = insn.seq;
+                }
+                slot.seqs.push(insn.seq);
+                written_ranges.push((address, size));
+                continue;
+            }
+        }
+        if let Some(address) = line_mem_annotation(&insn.line, "mem_r") {
+            if let Some(size) = access_width(mnemonic, operand) {
+                let internally_produced = written_ranges.iter().any(|(waddress, wsize)| {
+                    *waddress < address + u64::from(size) && address < *waddress + u64::from(*wsize)
+                });
+                if !internally_produced {
+                    let value = arrow_register_value(&insn.line, register);
+                    let slot = reads.entry((address, size)).or_default();
+                    if slot.value.is_none() {
+                        slot.value = value;
+                        slot.value_seq = insn.seq;
+                    }
+                    slot.seqs.push(insn.seq);
+                }
+            }
+        }
+    }
+    let materialize = |map: std::collections::BTreeMap<(u64, u32), Slot>| {
+        map.into_iter()
+            .map(|((address, size), slot)| FunctionMemoryFactDto {
+                address: format!("0x{address:x}"),
+                size,
+                bytes: slot.value.map(|value| little_endian_hex(value, size)),
+                seqs: slot.seqs,
+            })
+            .collect::<Vec<_>>()
+    };
+    let reads = reads
+        .into_iter()
+        .filter(|((address, size), _)| !stack_slots.contains(&(*address, *size)))
+        .collect();
+    (materialize(reads), materialize(writes))
+}
+
+/// 操作数 `[base, #offset]` 中的基址寄存器名（sp/wsp/fp/x29 归一为 sp/fp）。
+fn base_register(operand: &str) -> Option<String> {
+    let start = operand.find('[')?;
+    let rest = &operand[start + 1..];
+    let end = rest.find([',', ']'])?;
+    let name = rest[..end].trim();
+    match name {
+        "sp" | "wsp" => Some("sp".to_string()),
+        "x29" | "fp" => Some("fp".to_string()),
+        other => Some(other.to_string()),
+    }
 }
 
 fn registers_at(

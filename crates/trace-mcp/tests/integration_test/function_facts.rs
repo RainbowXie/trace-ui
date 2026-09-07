@@ -51,7 +51,26 @@ fn confirmed_activation_returns_a_complete_function_fact_bundle() {
             .collect::<Vec<_>>(),
         vec![11]
     );
-    assert!(bundle.memory_reads.is_empty());
+    // 样本 activation 内唯一访存：GOT 风格外部读取（x16 相对寻址，非栈
+    // 参数），最终值为 0x79b745a4c0 的小端字节。
+    assert_eq!(
+        bundle
+            .memory_reads
+            .iter()
+            .map(|read| (
+                read.address.as_str(),
+                read.size,
+                read.bytes.clone(),
+                read.seqs.clone()
+            ))
+            .collect::<Vec<_>>(),
+        vec![(
+            "0x7522fe1f80",
+            8,
+            Some("c0a445b779000000".to_string()),
+            vec![12]
+        )]
+    );
     assert!(bundle.global_reads.is_empty());
     assert!(bundle.memory_writes.is_empty());
     assert!(bundle.global_writes.is_empty());
@@ -292,6 +311,80 @@ fn a_written_slot_before_its_first_read_keeps_a_null_value() {
             .collect::<Vec<_>>(),
         vec![(0, 8, true)],
         "写后读的槽保留读取证据但 value 为 null"
+    );
+
+    engine.close_session(&sid).unwrap();
+    std::fs::remove_file(path).expect("remove inline trace");
+}
+
+#[test]
+fn external_reads_and_final_writes_follow_the_producer_rules() {
+    // producer→consumer：函数先写后读的地址是内部数据流，不进 memory_reads；
+    // 只进最终写入。从未在本次调用内写入的读取是外部输入，bytes 取读取值
+    // （小端、按地址递增）。同一地址多次写入保留全部 write_seqs 与最终值。
+    let (engine, sid, path) = setup_inline_trace(&[
+        "[App] 0x1000!0x1000 sub sp, sp, #0x20; sp=0x3020 -> sp=0x3000",
+        "[App] 0x1004!0x1004 bl #0x2000; sp=0x3000",
+        "[App] 0x2000!0x2000 ldr x0, [sp]; sp=0x3000 mem_r=0x3000 -> x0=0x1111",
+        "[App] 0x2004!0x2004 str x1, [x8]; x1=0xaa x8=0x5000 mem_w=0x5000",
+        "[App] 0x2008!0x2008 str x1, [x8]; x1=0xbb x8=0x5000 mem_w=0x5000",
+        "[App] 0x200c!0x200c ldr x2, [x8]; x8=0x5000 mem_r=0x5000 -> x2=0xbb",
+        "[App] 0x2010!0x2010 ldr x3, [x9]; x9=0x6000 mem_r=0x6000 -> x3=0x4142",
+        "[App] 0x2014!0x2014 ret; sp=0x3000",
+        "[App] 0x1008!0x1008 mov x0, #0x99; x0=0x1111 -> x0=0x99",
+    ]);
+
+    let bundle = engine
+        .get_function_facts(&sid, 1, 2)
+        .expect("function facts");
+
+    // 外部读取：0x3000（caller 栈槽——已作为 stack argument 报告，不重复
+    // 进入 memory_reads）、0x6000（从未写过 → 外部输入）。
+    let reads = bundle
+        .memory_reads
+        .iter()
+        .map(|read| {
+            (
+                read.address.as_str(),
+                read.size,
+                read.bytes.clone(),
+                read.seqs.clone(),
+            )
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(
+        reads,
+        vec![(
+            "0x6000",
+            8,
+            Some("4241000000000000".to_string()),
+            vec![6]
+        )],
+        "写后读（0x5000）不进入 memory_reads；已确认的栈参数槽（0x3000）不重复进入；外部读取 bytes 为小端实际字节"
+    );
+
+    // 最终写入：0x5000 两次写入合并，保留全部 write_seqs 与最终值 0xbb。
+    let writes = bundle
+        .memory_writes
+        .iter()
+        .map(|write| {
+            (
+                write.address.as_str(),
+                write.size,
+                write.bytes.clone(),
+                write.seqs.clone(),
+            )
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(
+        writes,
+        vec![(
+            "0x5000",
+            8,
+            Some("bb00000000000000".to_string()),
+            vec![3, 4]
+        )],
+        "同一地址多次写入合并为一项，bytes 为最终值，write_seqs 保留全部生产者"
     );
 
     engine.close_session(&sid).unwrap();
