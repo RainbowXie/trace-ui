@@ -256,6 +256,87 @@ pub struct InstructionOwnerDto {
     pub detail: String,
 }
 
+/// FunctionCallRecord 构建器的一次 Activation 机械事实快照。
+#[derive(Serialize)]
+pub struct FunctionFactBundleDto {
+    pub function: String,
+    pub trace_anchors: FunctionTraceAnchorsDto,
+    pub abi: FunctionAbiDto,
+    pub executed_block_sequence: Vec<ExecutedBlockEntryDto>,
+    pub memory_reads: Vec<FunctionMemoryFactDto>,
+    pub global_reads: Vec<FunctionGlobalFactDto>,
+    pub memory_writes: Vec<FunctionMemoryFactDto>,
+    pub global_writes: Vec<FunctionGlobalFactDto>,
+    pub external_call_events: Vec<FunctionExternalCallEventDto>,
+    pub unresolved: Vec<FunctionFactUnresolvedDto>,
+}
+
+#[derive(Serialize)]
+pub struct FunctionTraceAnchorsDto {
+    pub call: FunctionAnchorDto,
+    pub entry: FunctionAnchorDto,
+    pub exit: FunctionAnchorDto,
+    pub resume: FunctionAnchorDto,
+}
+
+#[derive(Serialize)]
+pub struct FunctionAnchorDto {
+    pub seq: u32,
+    pub offset: String,
+}
+
+#[derive(Serialize)]
+pub struct FunctionAbiDto {
+    pub entry_sp: Option<String>,
+    pub arguments: std::collections::BTreeMap<String, Option<String>>,
+    pub stack_arguments: Vec<FunctionStackArgumentDto>,
+    pub returns: std::collections::BTreeMap<String, Option<String>>,
+}
+
+#[derive(Serialize)]
+pub struct FunctionStackArgumentDto {
+    pub offset: i64,
+    pub size: u32,
+    pub value: Option<String>,
+    pub read_seqs: Vec<u32>,
+}
+
+#[derive(Serialize)]
+pub struct ExecutedBlockEntryDto {
+    pub block: String,
+    pub entry_seq: u32,
+}
+
+#[derive(Serialize)]
+pub struct FunctionMemoryFactDto {
+    pub address: String,
+    pub size: u32,
+    pub bytes: Option<String>,
+    pub seqs: Vec<u32>,
+}
+
+#[derive(Serialize)]
+pub struct FunctionGlobalFactDto {
+    pub global: String,
+    pub size: u32,
+    pub bytes: Option<String>,
+    pub seqs: Vec<u32>,
+}
+
+#[derive(Serialize)]
+pub struct FunctionExternalCallEventDto {
+    pub callsite: FunctionAnchorDto,
+    pub resume: Option<FunctionAnchorDto>,
+}
+
+#[derive(Serialize)]
+pub struct FunctionFactUnresolvedDto {
+    pub kind: String,
+    pub seqs: Vec<u32>,
+    pub location: Option<String>,
+    pub detail: String,
+}
+
 // ── Strings ──
 
 pub struct StringQueryOptions {

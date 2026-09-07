@@ -15,6 +15,7 @@ mod analysis;
 mod cache_corruption;
 mod cache_semantic_corruption;
 mod export;
+mod function_facts;
 mod misc;
 mod search;
 mod session;

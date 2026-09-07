@@ -4,6 +4,7 @@ mod activation;
 mod call_tree;
 mod crypto;
 mod dep_tree;
+mod function_facts;
 mod functions;
 mod memory;
 mod strings;
