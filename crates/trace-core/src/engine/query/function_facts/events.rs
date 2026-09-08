@@ -108,15 +108,34 @@ pub(super) fn collect_external_call_events(
         .iter()
         .map(|call| call.call_seq)
         .collect();
-    for insn in owned.iter().filter(|insn| insn.transfer) {
-        if bypassed_seqs.contains(&insn.seq) {
+    // 只有间接分支（b/br/PAC 变体）是「未记录函数体」的外部调用载体：
+    // BL/BLR 是调用边界——有 ConfirmedActivation 的 callee 即使带
+    // call func: 注解也必须由自己的 Activation 记录，不能在这里伪造成
+    // Event（否则 Event 的 resume 还会被错设为本 Activation 的终点）。
+    let recorded_call_seqs: std::collections::HashSet<u32> = tree
+        .activations
+        .iter()
+        .filter(|other| other.id != 0)
+        .map(|other| other.call_seq)
+        .collect();
+    for (position, insn) in owned.iter().enumerate().filter(|(_, insn)| insn.transfer) {
+        if bypassed_seqs.contains(&insn.seq) || recorded_call_seqs.contains(&insn.seq) {
+            continue;
+        }
+        if !is_indirect_branch(insn.mnemonic.as_deref().unwrap_or("")) {
             continue;
         }
         let Some(annotation) = state.call_annotations.get(&insn.seq) else {
             continue;
         };
+        // resume = 外部函数返回后 caller 的续行：优先窗口内下一条 owned
+        // 指令（函数中段的外部调用）；尾跳转（PLT stub）后窗口内无指令，
+        // 用本 Activation 的 resume。
+        let resume_seq = owned[position + 1..]
+            .first()
+            .map_or(activation.resume_seq, |next| next.seq);
         let callsite_registers = registers_at(state, insn.seq)?;
-        let resume_registers = registers_at(state, activation.resume_seq)?;
+        let resume_registers = registers_at(state, resume_seq)?;
         let arguments = (0..=7)
             .map(|register| {
                 (
@@ -133,8 +152,8 @@ pub(super) fn collect_external_call_events(
                 offset: insn.site.clone(),
             },
             resume: Some(FunctionAnchorDto {
-                seq: activation.resume_seq,
-                offset: site(activation.resume_seq)?,
+                seq: resume_seq,
+                offset: site(resume_seq)?,
             }),
             target: FunctionExternalTargetDto {
                 module: None,
@@ -154,4 +173,14 @@ pub(super) fn collect_external_call_events(
         });
     }
     Ok(events)
+}
+
+/// 只有间接分支可以是注解外部调用的载体：BL/BLR 属于调用边界（由
+/// Activation/bypassed 覆盖），RET 是返回。
+fn is_indirect_branch(mnemonic: &str) -> bool {
+    matches!(
+        trace_parser::insn_class::classify(mnemonic, None),
+        trace_parser::insn_class::InsnClass::Branch
+            | trace_parser::insn_class::InsnClass::BranchReg
+    )
 }

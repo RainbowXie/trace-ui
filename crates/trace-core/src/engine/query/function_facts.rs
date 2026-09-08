@@ -20,6 +20,7 @@ use abi::collect_stack_arguments;
 use blocks::{owned_instructions, split_executed_blocks};
 use dataflow::collect_memory_facts;
 use events::collect_external_call_events;
+use lines::arrow_register_value;
 
 impl crate::engine::TraceEngine {
     pub fn get_function_facts(
@@ -87,7 +88,14 @@ impl crate::engine::TraceEngine {
                     .map(|slot| (entry_registers[31] + slot.offset as u64, slot.size))
                     .collect()
             };
-        let (memory_reads, memory_writes) = collect_memory_facts(&owned, &stack_argument_slots);
+        // 返回值生产者：owned 内最后一条定义 X0 的指令（箭头后 x0= 或
+        // ret: 注解行）——影响目标闭包的种子之一。
+        let return_producer = owned
+            .iter()
+            .rfind(|insn| arrow_register_value(&insn.line, "x0").is_some())
+            .map(|insn| insn.seq);
+        let (memory_reads, memory_writes, access_unresolved) =
+            collect_memory_facts(&state, &owned, &stack_argument_slots, return_producer);
         let external_call_events = collect_external_call_events(&state, tree, activation, &owned)?;
 
         Ok(FunctionFactBundleDto {
@@ -126,7 +134,7 @@ impl crate::engine::TraceEngine {
             memory_writes,
             global_writes: Vec::new(),
             external_call_events,
-            unresolved: Vec::new(),
+            unresolved: access_unresolved,
         })
     }
 }

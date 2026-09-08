@@ -51,26 +51,10 @@ fn confirmed_activation_returns_a_complete_function_fact_bundle() {
             .collect::<Vec<_>>(),
         vec![11]
     );
-    // 样本 activation 内唯一访存：GOT 风格外部读取（x16 相对寻址，非栈
-    // 参数），最终值为 0x79b745a4c0 的小端字节。
-    assert_eq!(
-        bundle
-            .memory_reads
-            .iter()
-            .map(|read| (
-                read.address.as_str(),
-                read.size,
-                read.bytes.clone(),
-                read.seqs.clone()
-            ))
-            .collect::<Vec<_>>(),
-        vec![(
-            "0x7522fe1f80",
-            8,
-            Some("c0a445b779000000".to_string()),
-            vec![12]
-        )]
-    );
+    // 样本 activation 是 PLT stub：唯一访存（GOT 读取 seq 12）的值只流向
+    // br 的目标解析——不影响记录的任何输出（返回值/写入/事件参数），按
+    // 动态依赖筛选不进入 memory_reads。
+    assert!(bundle.memory_reads.is_empty());
     assert!(bundle.global_reads.is_empty());
     assert!(bundle.memory_writes.is_empty());
     assert!(bundle.global_writes.is_empty());
@@ -341,6 +325,7 @@ fn external_reads_and_final_writes_follow_the_producer_rules() {
         "[App] 0x2008!0x2008 str x1, [x8]; x1=0xbb x8=0x5000 mem_w=0x5000",
         "[App] 0x200c!0x200c ldr x2, [x8]; x8=0x5000 mem_r=0x5000 -> x2=0xbb",
         "[App] 0x2010!0x2010 ldr x3, [x9]; x9=0x6000 mem_r=0x6000 -> x3=0x4142",
+        "[App] 0x2012!0x2012 mov x0, x3; x3=0x4142 -> x0=0x4142",
         "[App] 0x2014!0x2014 ret; sp=0x3000",
         "[App] 0x1008!0x1008 mov x0, #0x99; x0=0x1111 -> x0=0x99",
     ]);
@@ -683,6 +668,207 @@ fn ldpsw_stack_argument_reads_keep_a_null_value() {
         "ldpsw 栈参数保留读取证据但 value 为 null（箭头值只覆盖 Xt1）"
     );
     assert!(bundle.memory_reads.is_empty());
+
+    engine.close_session(&sid).unwrap();
+    std::fs::remove_file(path).expect("remove inline trace");
+}
+
+#[test]
+fn an_annotated_confirmed_child_is_not_an_external_call_event() {
+    // 带注解的普通 BL：callee 真正执行并有 ConfirmedActivation——不能
+    // 伪造成 Event（resume 也不能错设为外层终点）。
+    let (engine, sid, path) = setup_inline_trace(&[
+        "[App] 0x5004!0x5004 bl #0x1000; sp=0x3030",
+        "[App] 0x1000!0x1000 orr x1, x1, x1; x0=0x11",
+        "[App] 0x1004!0x1004 bl #0x3000; x0=0x11 sp=0x3020",
+        "call func: recorded_inner(0x11)",
+        "[App] 0x3000!0x3000 orr x4, x4, x4; x0=0x11",
+        "[App] 0x3004!0x3004 ret",
+        "[App] 0x1008!0x1008 orr x5, x5, x5",
+        "[App] 0x100c!0x100c ret",
+        "[App] 0x5008!0x5008 mov x0, #0x1",
+    ]);
+
+    let bundle = engine
+        .get_function_facts(&sid, 0, 1)
+        .expect("function facts");
+    assert!(
+        bundle
+            .external_call_events
+            .iter()
+            .all(|event| event.callsite.offset != "App+0x1004"),
+        "有 ConfirmedActivation 的 callee 即使带注解也不是 Event：{:?}",
+        bundle.external_call_events
+    );
+    // 内层有自己的 Activation 事实。
+    let inner = engine.get_function_facts(&sid, 2, 4).expect("inner facts");
+    assert_eq!(inner.function, "App+0x3000");
+
+    engine.close_session(&sid).unwrap();
+    std::fs::remove_file(path).expect("remove inline trace");
+}
+
+#[test]
+fn failed_exclusive_stores_have_no_memory_effect() {
+    // stxr 状态寄存器非 0（失败）：无内存效果——既不写也不阻断，后续
+    // 外部读取必须保留。
+    let (engine, sid, path) = setup_inline_trace(&[
+        "[App] 0x1004!0x1004 bl #0x2000; sp=0x5000",
+        "[App] 0x2000!0x2000 stxr w1, x0, [x9]; x0=0xfeed x9=0x6000 mem_w=0x6000 -> w1=0x1",
+        "[App] 0x2004!0x2004 mov x0, x2; -> x0=0x1234",
+        "[App] 0x2008!0x2008 ldr x2, [x9]; x9=0x6000 mem_r=0x6000 -> x2=0x1234",
+        "[App] 0x200c!0x200c mov x0, x2; x2=0x1234 -> x0=0x1234",
+        "[App] 0x2010!0x2010 ret",
+        "[App] 0x1008!0x1008 mov x0, #0x1",
+    ]);
+
+    let bundle = engine
+        .get_function_facts(&sid, 0, 1)
+        .expect("function facts");
+    assert!(
+        bundle
+            .memory_reads
+            .iter()
+            .any(|read| read.address == "0x6000"),
+        "失败的独占写不产生内存效果，真实外部读取不得被吞：{:?}",
+        bundle.memory_reads
+    );
+    assert!(
+        bundle
+            .memory_writes
+            .iter()
+            .all(|write| write.address != "0x6000"),
+        "失败的独占写不得进入 writes"
+    );
+
+    engine.close_session(&sid).unwrap();
+    std::fs::remove_file(path).expect("remove inline trace");
+}
+
+#[test]
+fn successful_exclusive_stores_write_the_data_register_width() {
+    // stxr 状态 0（成功）：真实写入数据寄存器宽度（x → 8 字节）。
+    let (engine, sid, path) = setup_inline_trace(&[
+        "[App] 0x1004!0x1004 bl #0x2000; sp=0x5000",
+        "[App] 0x2000!0x2000 stxr w1, x0, [x9]; x0=0xfeed x9=0x6000 mem_w=0x6000 -> w1=0x0",
+        "[App] 0x2004!0x2004 ret",
+        "[App] 0x1008!0x1008 mov x0, #0x1",
+    ]);
+
+    let bundle = engine
+        .get_function_facts(&sid, 0, 1)
+        .expect("function facts");
+    assert_eq!(
+        bundle
+            .memory_writes
+            .iter()
+            .map(|write| (
+                write.address.as_str(),
+                write.size,
+                write.bytes.clone(),
+                write.seqs.clone()
+            ))
+            .collect::<Vec<_>>(),
+        vec![("0x6000", 8, Some("edfe000000000000".to_string()), vec![1])],
+        "成功的独占写按数据寄存器宽度记录最终值"
+    );
+
+    engine.close_session(&sid).unwrap();
+    std::fs::remove_file(path).expect("remove inline trace");
+}
+
+#[test]
+fn irrelevant_reads_do_not_enter_memory_facts() {
+    // 同一 Activation：流入返回值的读取相关（进入）；与任何输出无关的
+    // 读取（值进 x3 后死亡）不进入。
+    let (engine, sid, path) = setup_inline_trace(&[
+        "[App] 0x1004!0x1004 bl #0x2000; sp=0x3000",
+        "[App] 0x2000!0x2000 ldr x0, [x8]; x8=0x8000 mem_r=0x8000 -> x0=0x77",
+        "[App] 0x2004!0x2004 ldr x3, [x9]; x9=0x9000 mem_r=0x9000 -> x3=0x42",
+        "[App] 0x2008!0x2008 ret",
+        "[App] 0x1008!0x1008 mov x0, #0x1",
+    ]);
+
+    let bundle = engine
+        .get_function_facts(&sid, 0, 1)
+        .expect("function facts");
+    assert_eq!(
+        bundle
+            .memory_reads
+            .iter()
+            .map(|read| (read.address.as_str(), read.bytes.clone()))
+            .collect::<Vec<_>>(),
+        vec![("0x8000", Some("7700000000000000".to_string()))],
+        "只有影响目标（流入返回值）的读取进入 memory_reads"
+    );
+
+    engine.close_session(&sid).unwrap();
+    std::fs::remove_file(path).expect("remove inline trace");
+}
+
+#[test]
+fn relevant_reads_with_uncovered_widths_surface_as_unresolved() {
+    // 影响目标但宽度未覆盖的读取（ldapr）：不得「空 reads + 空 unresolved」
+    // 静默消失——必须留下 unsupported_instruction 缺口。
+    let (engine, sid, path) = setup_inline_trace(&[
+        "[App] 0x1004!0x1004 bl #0x2000; sp=0x3000",
+        "[App] 0x2000!0x2000 ldapr x0, [x9]; x9=0x9000 mem_r=0x9000 -> x0=0x42",
+        "[App] 0x2004!0x2004 ret",
+        "[App] 0x1008!0x1008 mov x0, #0x1",
+    ]);
+
+    let bundle = engine
+        .get_function_facts(&sid, 0, 1)
+        .expect("function facts");
+    assert!(bundle.memory_reads.is_empty());
+    assert!(
+        bundle
+            .unresolved
+            .iter()
+            .any(|gap| gap.kind == "unsupported_instruction"
+                && gap.location.as_deref() == Some("0x9000")),
+        "影响目标的未覆盖访存必须产生结构化 unresolved：{:?}",
+        bundle.unresolved
+    );
+
+    engine.close_session(&sid).unwrap();
+    std::fs::remove_file(path).expect("remove inline trace");
+}
+
+#[test]
+fn partially_overwritten_writes_split_into_final_byte_ranges() {
+    // 8 字节写的后半被 4 字节写覆盖：不得保留互相矛盾的两条 8 字节
+    // 最终事实——按字节粒度拆成两个互不重叠的最终范围。
+    let (engine, sid, path) = setup_inline_trace(&[
+        "[App] 0x1004!0x1004 bl #0x2000; sp=0x3000",
+        "[App] 0x2000!0x2000 str x0, [x8]; x0=0x1122334455667788 x8=0x7000 mem_w=0x7000",
+        "[App] 0x2004!0x2004 str w1, [x8, #4]; w1=0xaabbccdd x8=0x7000 mem_w=0x7004",
+        "[App] 0x2008!0x2008 ret",
+        "[App] 0x1008!0x1008 mov x0, #0x1",
+    ]);
+
+    let bundle = engine
+        .get_function_facts(&sid, 0, 1)
+        .expect("function facts");
+    assert_eq!(
+        bundle
+            .memory_writes
+            .iter()
+            .map(|write| (
+                write.address.as_str(),
+                write.size,
+                write.bytes.clone(),
+                write.seqs.clone()
+            ))
+            .collect::<Vec<_>>(),
+        vec![(
+            "0x7000",
+            8,
+            Some("88776655ddccbbaa".to_string()),
+            vec![1, 2],
+        )],
+        "部分覆盖按字节粒度合并出正确的 8 字节最终值，两个真实贡献者都保留"
+    );
 
     engine.close_session(&sid).unwrap();
     std::fs::remove_file(path).expect("remove inline trace");

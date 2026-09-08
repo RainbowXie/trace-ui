@@ -279,7 +279,7 @@ pub struct FunctionTraceAnchorsDto {
     pub resume: FunctionAnchorDto,
 }
 
-#[derive(Serialize)]
+#[derive(Serialize, Debug)]
 pub struct FunctionAnchorDto {
     pub seq: u32,
     pub offset: String,
@@ -307,7 +307,7 @@ pub struct ExecutedBlockEntryDto {
     pub entry_seq: u32,
 }
 
-#[derive(Serialize)]
+#[derive(Serialize, Debug)]
 pub struct FunctionMemoryFactDto {
     pub address: String,
     pub size: u32,
@@ -323,7 +323,7 @@ pub struct FunctionGlobalFactDto {
     pub seqs: Vec<u32>,
 }
 
-#[derive(Serialize)]
+#[derive(Serialize, Debug)]
 pub struct FunctionExternalCallEventDto {
     pub callsite: FunctionAnchorDto,
     pub resume: Option<FunctionAnchorDto>,
@@ -339,14 +339,14 @@ pub struct FunctionExternalCallEventDto {
     pub unresolved: Vec<FunctionEventUnresolvedDto>,
 }
 
-#[derive(Serialize)]
+#[derive(Serialize, Debug)]
 pub struct FunctionExternalTargetDto {
     pub module: Option<String>,
     pub entry: Option<String>,
     pub symbol: Option<String>,
 }
 
-#[derive(Serialize)]
+#[derive(Serialize, Debug)]
 pub struct FunctionExternalStackArgumentDto {
     pub offset: i64,
     pub size: u32,
@@ -354,27 +354,27 @@ pub struct FunctionExternalStackArgumentDto {
     pub evidence_seqs: Vec<u32>,
 }
 
-#[derive(Serialize)]
+#[derive(Serialize, Debug)]
 pub struct FunctionEventMemoryRecordDto {
     pub address: String,
     pub size: u32,
     pub bytes: Option<String>,
 }
 
-#[derive(Serialize)]
+#[derive(Serialize, Debug)]
 pub struct FunctionEventGlobalRecordDto {
     pub global: String,
     pub size: u32,
     pub bytes: Option<String>,
 }
 
-#[derive(Serialize)]
+#[derive(Serialize, Debug)]
 pub struct FunctionEventUnresolvedDto {
     pub kind: String,
     pub detail: String,
 }
 
-#[derive(Serialize)]
+#[derive(Serialize, Debug)]
 pub struct FunctionFactUnresolvedDto {
     pub kind: String,
     pub seqs: Vec<u32>,
