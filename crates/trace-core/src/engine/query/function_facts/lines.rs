@@ -80,11 +80,14 @@ pub(super) fn access_width(mnemonic: &str, operand: &str) -> Option<u32> {
             "ldrh" | "ldrsh" | "strh" | "ldurh" | "ldursh" | "sturh" | "ldtrh" | "ldtrsh"
             | "sttrh" => 2,
             "ldrsw" | "ldursw" | "ldtrsw" => 4,
-            // 单寄存器普通/非缩放/穿透访存与原子（独占/LSE 均为标量宽度）。
+            // 单寄存器普通/非缩放/穿透访存与原子 LOAD（首操作数=数据寄存器）。
+            // 独占 STORE（stxr/stlxr/stxp 家族）首操作数是状态寄存器 Ws，
+            // 不能据此定宽——归入未知宽度走保守阻断。
             "ldur" | "str" | "stur" | "ldr" | "ldtr" | "sttr" | "ldar" | "ldarh" | "ldxr"
-            | "ldaxr" | "stlr" | "stlxr" | "stxr" | "stxrb" => scalar(8)?,
-            // 成对访存：两个标量寄存器，总宽 2×。
-            "ldp" | "stp" | "ldnp" | "stnp" | "ldpsw" | "ldxp" | "stxp" => scalar(16)?,
+            | "ldaxr" | "stlr" => scalar(8)?,
+            // 成对访存（ldxp 首操作数是数据寄存器；stp 家族首操作数同为
+            // 数据寄存器）。
+            "ldp" | "stp" | "ldnp" | "stnp" | "ldpsw" | "ldxp" => scalar(16)?,
             _ => return None,
         };
     Some(width)

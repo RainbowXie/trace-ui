@@ -90,14 +90,14 @@ pub(super) fn collect_memory_facts(
             }
         }
     }
-    let materialize = |map: BTreeMap<(u64, u32), Slot>| {
+    let materialize_writes = |map: BTreeMap<(u64, u32), Slot>| {
         map.into_iter()
             .map(|((address, size), slot)| FunctionMemoryFactDto {
                 address: format!("0x{address:x}"),
                 size,
                 bytes: slot.value.map(|value| little_endian_hex(value, size)),
                 // 同键写完全覆盖前写：只有最终一次写对最终字节有贡献
-                // （合同 write_seqs 语义）。
+                // （合同 write_seqs 语义）；读条目不过滤（见 reads 分支）。
                 seqs: slot
                     .seqs
                     .iter()
@@ -107,9 +107,21 @@ pub(super) fn collect_memory_facts(
             })
             .collect::<Vec<_>>()
     };
+    // 读保留全部读取 seq（合同 read_seqs=读取该范围中至少一个相关字节的
+    // 实际指令序号），bytes 取首次读取值。
+    let materialize_reads = |map: BTreeMap<(u64, u32), Slot>| {
+        map.into_iter()
+            .map(|((address, size), slot)| FunctionMemoryFactDto {
+                address: format!("0x{address:x}"),
+                size,
+                bytes: slot.value.map(|value| little_endian_hex(value, size)),
+                seqs: slot.seqs,
+            })
+            .collect::<Vec<_>>()
+    };
     let reads = reads
         .into_iter()
         .filter(|((address, size), _)| !stack_slots.contains(&(*address, *size)))
         .collect();
-    (materialize(reads), materialize(writes))
+    (materialize_reads(reads), materialize_writes(writes))
 }

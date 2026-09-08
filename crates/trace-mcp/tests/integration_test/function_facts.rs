@@ -560,3 +560,67 @@ fn pair_writes_block_forged_external_values() {
     engine.close_session(&sid).unwrap();
     std::fs::remove_file(path).expect("remove inline trace");
 }
+
+#[test]
+fn exclusive_store_status_register_does_not_shrink_the_block_radius() {
+    // stxr 的第一个操作数是状态寄存器 Ws：不能据此把写宽声明成 4 字节
+    // ——x0 的 8 字节独占写必须按未知宽度保守阻断后续读取。
+    let (engine, sid, path) = setup_inline_trace(&[
+        "[App] 0x1004!0x1004 bl #0x2000; sp=0x5000",
+        "[App] 0x2000!0x2000 stxr w1, x0, [x9]; x0=0xfeed x9=0x6000 mem_w=0x6000",
+        "[App] 0x2004!0x2004 ldr x2, [x9]; x9=0x6000 mem_r=0x6000 -> x2=0xfeed",
+        "[App] 0x2008!0x2008 ret",
+        "[App] 0x1008!0x1008 mov x0, #0x1",
+    ]);
+
+    let bundle = engine
+        .get_function_facts(&sid, 0, 1)
+        .expect("function facts");
+    assert!(
+        bundle
+            .memory_reads
+            .iter()
+            .all(|read| read.address != "0x6000"),
+        "独占写后的读取是内部数据流，不得因 Ws 缩窄写宽而漏阻断"
+    );
+
+    engine.close_session(&sid).unwrap();
+    std::fs::remove_file(path).expect("remove inline trace");
+}
+
+#[test]
+fn pair_reads_of_stack_arguments_keep_a_null_value() {
+    // ldp 读取 ≥ entry SP 的栈槽：进入 stack_arguments（读取证据），但
+    // 单箭头值只覆盖一半，value 必须为 null。
+    let (engine, sid, path) = setup_inline_trace(&[
+        "[App] 0x1000!0x1000 sub sp, sp, #0x20; sp=0x3020 -> sp=0x3000",
+        "[App] 0x1004!0x1004 bl #0x2000; sp=0x3000",
+        "[App] 0x2000!0x2000 ldp x0, x1, [sp]; sp=0x3000 mem_r=0x3000 -> x0=0x1111",
+        "[App] 0x2004!0x2004 ret",
+        "[App] 0x1008!0x1008 mov x0, #0x99",
+    ]);
+
+    let bundle = engine
+        .get_function_facts(&sid, 1, 2)
+        .expect("function facts");
+    assert_eq!(
+        bundle
+            .abi
+            .stack_arguments
+            .iter()
+            .map(|slot| (
+                slot.offset,
+                slot.size,
+                slot.value.is_none(),
+                slot.read_seqs.clone()
+            ))
+            .collect::<Vec<_>>(),
+        vec![(0, 16, true, vec![2])],
+        "pair 读保留读取证据但 value 为 null（单箭头值只覆盖一半）"
+    );
+    // 该槽也不得重复进入 memory_reads。
+    assert!(bundle.memory_reads.is_empty());
+
+    engine.close_session(&sid).unwrap();
+    std::fs::remove_file(path).expect("remove inline trace");
+}

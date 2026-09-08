@@ -54,7 +54,7 @@ impl Phase2Archive {
     /// `data` = &mmap[HEADER_LEN..] (after 64-byte cache header)
     pub fn views_from_sections(data: &[u8]) -> Option<Phase2Views<'_>> {
         let r = SectionReader::new(data)?;
-        // V7 缓存（magic TCACHE07）布局固定为恰好 8 个 section；
+        // V7 缓存（magic TCACHE08）布局固定为恰好 8 个 section；
         // 不等于 8 = 损坏/截断缓存，整体判 miss 触发重扫重建，
         // fail-closed：不能接受半新半旧布局（ActivationTree 永久缺失）。
         // 旧 V4/更早缓存在 cache.rs 的 magic 校验处已 miss，不会到达这里。

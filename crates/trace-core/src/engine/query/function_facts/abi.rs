@@ -18,7 +18,7 @@ pub(super) fn collect_stack_arguments(
     // 写入追踪：宽度可解析的写按精确区间记录；宽度未知（向量/未覆盖助记符）
     // 的写按 UNKNOWN_WRITE_WIDTH 记录——任何与其重叠的读取都必须视为可能
     // 内产，value 置 null，不能把 callee 自己 spill 的值伪造成入口栈参数。
-    const UNKNOWN_WRITE_WIDTH: u32 = 32; // stp q 是最大单条访存（ISA 机械事实）
+    const UNKNOWN_WRITE_WIDTH: u32 = 64; // SIMD 多寄存器 store（st4 {v0-v3}）最大单条访存
     let mut writes: Vec<(u64, u32, u32)> = Vec::new();
     for insn in owned {
         if let (Some(address), Some(mnemonic), Some(operand)) = (
@@ -60,7 +60,9 @@ pub(super) fn collect_stack_arguments(
                 && *waddress < address + u64::from(size)
                 && address < *waddress + u64::from(*wsize)
         });
-        let value = if written_before {
+        let value = if written_before || size > 8 {
+            // pair 读（ldp）横跨两个寄存器，单箭头值只覆盖一半——保持 null，
+            // 与 dataflow 的守卫一致。
             None
         } else {
             insn.first_operand
