@@ -655,3 +655,35 @@ fn w_pair_values_are_not_half_forged() {
     engine.close_session(&sid).unwrap();
     std::fs::remove_file(path).expect("remove inline trace");
 }
+
+#[test]
+fn ldpsw_stack_argument_reads_keep_a_null_value() {
+    // ldpsw 访存 8 字节但写两个寄存器（箭头值只覆盖 Xt1，高 4 字节是
+    // 符号扩展）：进入 stack_arguments 但 value 必须为 null，且不重复
+    // 进入 memory_reads——钉住 is_pair_access 对 ldpsw 的覆盖。
+    let (engine, sid, path) = setup_inline_trace(&[
+        "[App] 0x1000!0x1000 sub sp, sp, #0x20; sp=0x3020 -> sp=0x3000",
+        "[App] 0x1004!0x1004 bl #0x2000; sp=0x3000",
+        "[App] 0x2000!0x2000 ldpsw x0, x1, [sp]; sp=0x3000 mem_r=0x3000 -> x0=0x14",
+        "[App] 0x2004!0x2004 ret",
+        "[App] 0x1008!0x1008 mov x0, #0x99",
+    ]);
+
+    let bundle = engine
+        .get_function_facts(&sid, 1, 2)
+        .expect("function facts");
+    assert_eq!(
+        bundle
+            .abi
+            .stack_arguments
+            .iter()
+            .map(|slot| (slot.offset, slot.size, slot.value.is_none()))
+            .collect::<Vec<_>>(),
+        vec![(0, 8, true)],
+        "ldpsw 栈参数保留读取证据但 value 为 null（箭头值只覆盖 Xt1）"
+    );
+    assert!(bundle.memory_reads.is_empty());
+
+    engine.close_session(&sid).unwrap();
+    std::fs::remove_file(path).expect("remove inline trace");
+}
