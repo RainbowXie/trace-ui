@@ -5,12 +5,12 @@ use std::collections::{BTreeMap, HashSet};
 
 use crate::api_types::{FunctionFactUnresolvedDto, FunctionMemoryFactDto};
 
-use super::super::super::super::scanner::CONTROL_DEP_BIT;
 use super::blocks::OwnedInsn;
 use super::lines::{
     access_width, arrow_register_value, exclusive_store_outcome, is_pair_access,
     line_mem_annotation, little_endian_hex, prestate_register_value, ExclusiveStoreOutcome,
 };
+use crate::scanner::LINE_MASK;
 
 /// 宽度未知写入的保守阻断半径：SIMD 多寄存器 store（st4 {v0-v3}）是
 /// arm64 最大单条访存（64 字节）。这是 ISA 机械事实而非对合法数据的
@@ -22,18 +22,18 @@ const UNKNOWN_WRITE_WIDTH: u32 = 64;
 /// 边——窗口外的生产者是外部输入（caller 提供），不属于本次调用的
 /// 内部数据流。控制依赖边（CONTROL_DEP_BIT 标记）同样计入：控制了
 /// 输出路径的读取也是影响目标的读取。
+/// Some(闭包) = 依赖索引可用，相关性可判定；None = 依赖索引缺失，
+/// 相关性不可判定（调用方必须把未覆盖访存全部转 unresolved，不得
+/// 假装「与目标无关」而静默丢弃）。
 pub(super) fn relevant_seqs(
     state: &crate::session::SessionState,
     owned: &[OwnedInsn],
     return_producer: Option<u32>,
     write_winners: &[u32],
-) -> HashSet<u32> {
+) -> Option<HashSet<u32>> {
     let mut relevant: HashSet<u32> = HashSet::new();
-    let Some(deps) = state.deps_view() else {
-        // 依赖索引缺失时不能声称任何读取相关——全部按不可判定处理，
-        // 由调用方决定（读集合为空 + 不产生半吊子筛选结果）。
-        return relevant;
-    };
+    let deps = state.deps_view()?;
+    let pair_split = state.pair_split_view();
     let lower = owned.first().map(|insn| insn.seq).unwrap_or(0);
     let upper = owned.last().map(|insn| insn.seq + 1).unwrap_or(0);
     let mut stack: Vec<u32> = Vec::new();
@@ -50,14 +50,49 @@ pub(super) fn relevant_seqs(
         }
     }
     while let Some(seq) = stack.pop() {
+        // 普通行：deps.row 给出全部生产者（寄存器 def / mem store def /
+        // 控制依赖，高位带标记）。行内 seq 用 scanner 的 LINE_MASK 剥离
+        // 标记位（控制依赖 bit29 / pair 半区 bit31 / 共享路径 bit30）。
         for producer in deps.row(seq as usize) {
-            let producer = producer & !CONTROL_DEP_BIT;
+            let producer = producer & LINE_MASK;
             if producer >= lower && producer < upper && relevant.insert(producer) {
                 stack.push(producer);
             }
         }
+        // 成对访存的依赖在 pair_split（deps.row 对 pair 行恒空）：沿
+        // shared/half1/half2 三条切片继续向上，否则 spill 链上游的读取
+        // 会被静默漏掉。
+        if let Some(split) = pair_split.as_ref().and_then(|view| view.get(&seq)) {
+            for producer in split
+                .shared
+                .iter()
+                .chain(split.half1_deps.iter())
+                .chain(split.half2_deps.iter())
+            {
+                let producer = producer & LINE_MASK;
+                if producer >= lower && producer < upper && relevant.insert(producer) {
+                    stack.push(producer);
+                }
+            }
+        }
+        // 成对访存的依赖在 pair_split（deps.row 对 pair 行恒空）：沿
+        // shared/half1/half2 三条切片继续向上，否则 spill 链上游的读取
+        // 会被静默漏掉。
+        if let Some(split) = pair_split.as_ref().and_then(|view| view.get(&seq)) {
+            for producer in split
+                .shared
+                .iter()
+                .chain(split.half1_deps.iter())
+                .chain(split.half2_deps.iter())
+            {
+                let producer = producer & LINE_MASK;
+                if producer >= lower && producer < upper && relevant.insert(producer) {
+                    stack.push(producer);
+                }
+            }
+        }
     }
-    relevant
+    Some(relevant)
 }
 
 /// 一条写入的机械结果。
@@ -253,6 +288,13 @@ pub(super) fn collect_memory_facts(
         }
     }
     let relevant = relevant_seqs(state, owned, return_producer, &write_winners);
+    // 相关性可判定时，未覆盖的「影响目标」读取才转 unresolved；依赖索引
+    // 缺失（None）时全部未覆盖访存都保留为 unresolved——不能因索引缺失
+    // 把缺口伪装成「与目标无关」。
+    let is_relevant = |seq: u32| match &relevant {
+        Some(set) => set.contains(&seq),
+        None => true,
+    };
 
     let mut reads: BTreeMap<(u64, u32), (Option<u64>, Vec<u32>)> = BTreeMap::new();
     let mut unresolved: Vec<FunctionFactUnresolvedDto> = Vec::new();
@@ -268,7 +310,7 @@ pub(super) fn collect_memory_facts(
             Some(size) => size,
             None => {
                 // 宽度未覆盖：影响目标时必须留下结构化缺口，不得静默丢弃。
-                if relevant.contains(&insn.seq) {
+                if is_relevant(insn.seq) {
                     unresolved.push(FunctionFactUnresolvedDto {
                         kind: "unsupported_instruction".to_string(),
                         seqs: vec![insn.seq],
@@ -301,7 +343,10 @@ pub(super) fn collect_memory_facts(
         .into_iter()
         .filter(|((address, size), (_, seqs))| {
             !stack_slots.contains(&(*address, *size))
-                && seqs.iter().any(|seq| relevant.contains(seq))
+                && seqs.iter().any(|seq| match &relevant {
+                    Some(set) => set.contains(seq),
+                    None => true,
+                })
         })
         .map(|((address, size), (value, seqs))| FunctionMemoryFactDto {
             address: format!("0x{address:x}"),

@@ -873,3 +873,42 @@ fn partially_overwritten_writes_split_into_final_byte_ranges() {
     engine.close_session(&sid).unwrap();
     std::fs::remove_file(path).expect("remove inline trace");
 }
+
+#[test]
+fn pair_spill_chains_keep_upstream_reads_relevant() {
+    // ldp 恢复 spill 后再读取恢复值并流入返回值：pair 行的 deps.row 恒空，
+    // 闭包必须沿 pair_split 的 shared/half 切片继续向上——上游读取不得
+    // 因 pair 标记位或空 deps.row 被静默丢弃。
+    let (engine, sid, path) = setup_inline_trace(&[
+        "[App] 0x1004!0x1004 bl #0x2000; sp=0x3000",
+        "[App] 0x2000!0x2000 ldp x0, x1, [sp]; sp=0x3000 mem_r=0x3000 -> x0=0x77 x1=0x88",
+        "[App] 0x2004!0x2004 ldr x2, [x1]; x1=0x88 mem_r=0x8800 -> x2=0x99",
+        "[App] 0x2008!0x2008 mov x0, x2; x2=0x99 -> x0=0x99",
+        "[App] 0x200c!0x200c ret",
+        "[App] 0x1008!0x1008 mov x0, #0x1",
+    ]);
+
+    let bundle = engine
+        .get_function_facts(&sid, 0, 1)
+        .expect("function facts");
+    let reads = bundle
+        .memory_reads
+        .iter()
+        .map(|read| (read.address.as_str(), read.bytes.clone()))
+        .collect::<Vec<_>>();
+    // ldp 读（外部 spill 输入）与 ldr 读（经 pair 恢复寄存器的二级外部
+    // 输入，流入返回值）都必须进入 memory_reads。
+    // ldp 读 16B：pair 值横跨两个寄存器 → bytes null（不是半值冒充）；
+    // 上游 ldr 读经 pair 恢复寄存器流入返回值 → 保留。
+    assert_eq!(
+        reads,
+        vec![
+            ("0x3000", None),
+            ("0x8800", Some("9900000000000000".to_string())),
+        ],
+        "pair 生产者链上的上游读取不得被静默丢弃：{reads:?}"
+    );
+
+    engine.close_session(&sid).unwrap();
+    std::fs::remove_file(path).expect("remove inline trace");
+}
