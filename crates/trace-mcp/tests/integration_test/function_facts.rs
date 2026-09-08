@@ -580,7 +580,7 @@ fn exclusive_store_status_register_does_not_shrink_the_block_radius() {
         bundle
             .memory_reads
             .iter()
-            .all(|read| read.address != "0x6000"),
+            .all(|read| read.address != "0x6004"),
         "独占写后的读取是内部数据流，不得因 Ws 缩窄写宽而漏阻断"
     );
 

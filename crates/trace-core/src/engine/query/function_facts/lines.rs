@@ -97,7 +97,9 @@ pub(super) fn access_width(mnemonic: &str, operand: &str) -> Option<u32> {
 /// 成对访存助记符：值横跨两个寄存器，单个 prestate/箭头值只覆盖一半，
 /// 任何宽度（含 W-pair 的 8 字节）都不能据此产出 bytes/value。
 pub(super) fn is_pair_access(mnemonic: &str) -> bool {
-    matches!(mnemonic, "ldp" | "stp" | "ldnp" | "stnp" | "ldxp")
+    // ldpsw 访存 8 字节但写两个寄存器（带符号扩展），箭头值只覆盖 Xt1
+    // ——与 pair 同样不能产出完整 bytes。
+    matches!(mnemonic, "ldp" | "stp" | "ldnp" | "stnp" | "ldxp" | "ldpsw")
 }
 
 /// 助记符之后的第一个操作数（目标寄存器，含余下操作数文本）。
