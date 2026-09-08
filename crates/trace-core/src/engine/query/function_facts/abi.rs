@@ -5,7 +5,9 @@ use std::collections::BTreeMap;
 use crate::api_types::FunctionStackArgumentDto;
 
 use super::blocks::OwnedInsn;
-use super::lines::{access_width, arrow_register_value, base_register, line_mem_annotation};
+use super::lines::{
+    access_width, arrow_register_value, base_register, is_pair_access, line_mem_annotation,
+};
 
 /// 栈参数三门合同的机械侧：entry SP 及之上、SP/FP 基址寻址、本次实际
 /// 读取、宽度可确认的单寄存器载荷。首次读取前被写回的槽保留读取证据
@@ -60,9 +62,10 @@ pub(super) fn collect_stack_arguments(
                 && *waddress < address + u64::from(size)
                 && address < *waddress + u64::from(*wsize)
         });
-        let value = if written_before || size > 8 {
-            // pair 读（ldp）横跨两个寄存器，单箭头值只覆盖一半——保持 null，
-            // 与 dataflow 的守卫一致。
+        let pair = insn.mnemonic.as_deref().is_some_and(is_pair_access);
+        let value = if written_before || pair || size > 8 {
+            // pair 读（ldp，含 W-pair 的 8 字节）横跨两个寄存器，单箭头值
+            // 只覆盖一半——保持 null，与 dataflow 的守卫一致。
             None
         } else {
             insn.first_operand

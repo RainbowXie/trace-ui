@@ -568,7 +568,7 @@ fn exclusive_store_status_register_does_not_shrink_the_block_radius() {
     let (engine, sid, path) = setup_inline_trace(&[
         "[App] 0x1004!0x1004 bl #0x2000; sp=0x5000",
         "[App] 0x2000!0x2000 stxr w1, x0, [x9]; x0=0xfeed x9=0x6000 mem_w=0x6000",
-        "[App] 0x2004!0x2004 ldr x2, [x9]; x9=0x6000 mem_r=0x6000 -> x2=0xfeed",
+        "[App] 0x2004!0x2004 ldr x2, [x9, #4]; x9=0x6000 mem_r=0x6004 -> x2=0xfeed",
         "[App] 0x2008!0x2008 ret",
         "[App] 0x1008!0x1008 mov x0, #0x1",
     ]);
@@ -621,6 +621,37 @@ fn pair_reads_of_stack_arguments_keep_a_null_value() {
     // 该槽也不得重复进入 memory_reads。
     assert!(bundle.memory_reads.is_empty());
 
+    engine.close_session(&sid).unwrap();
+    std::fs::remove_file(path).expect("remove inline trace");
+}
+
+#[test]
+fn w_pair_values_are_not_half_forged() {
+    // W-pair（stp w8, w0）总宽 8 字节：宽度守卫不触发，但值横跨两个寄存器
+    // ——bytes 必须为 null，不得把第二个寄存器的字节伪造为零。
+    let (engine, sid, path) = setup_inline_trace(&[
+        "[App] 0x1004!0x1004 bl #0x2000; sp=0x3000",
+        "[App] 0x2000!0x2000 stp w8, w0, [x19]; x19=0x7000 w8=0x14 w0=0x13 mem_w=0x7000",
+        "[App] 0x2004!0x2004 ldr x2, [x19]; x19=0x7000 mem_r=0x7000 -> x2=0x1314",
+        "[App] 0x2008!0x2008 ret",
+        "[App] 0x1008!0x1008 mov x0, #0x1",
+    ]);
+    let bundle = engine
+        .get_function_facts(&sid, 0, 1)
+        .expect("function facts");
+    let writes = bundle
+        .memory_writes
+        .iter()
+        .map(|write| (write.address.as_str(), write.size, write.bytes.is_none()))
+        .collect::<Vec<_>>();
+    assert_eq!(writes, vec![("0x7000", 8, true)], "W-pair 写 bytes 为 null");
+    assert!(
+        bundle
+            .memory_reads
+            .iter()
+            .all(|read| read.address != "0x7000"),
+        "pair 写后的读取是内部数据流"
+    );
     engine.close_session(&sid).unwrap();
     std::fs::remove_file(path).expect("remove inline trace");
 }

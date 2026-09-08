@@ -72,25 +72,32 @@ pub(super) fn access_width(mnemonic: &str, operand: &str) -> Option<u32> {
         'w' => Some(width / 2),
         _ => None,
     };
-    let width =
-        match mnemonic {
-            // 字节/半字/带符号扩展家族（普通、非缩放 ldur*、穿透 ldtr*/sttr*）。
-            "ldrb" | "ldrsb" | "strb" | "ldurb" | "ldursb" | "sturb" | "ldtrb" | "ldtrsb"
-            | "sttrb" => 1,
-            "ldrh" | "ldrsh" | "strh" | "ldurh" | "ldursh" | "sturh" | "ldtrh" | "ldtrsh"
-            | "sttrh" => 2,
-            "ldrsw" | "ldursw" | "ldtrsw" => 4,
-            // 单寄存器普通/非缩放/穿透访存与原子 LOAD（首操作数=数据寄存器）。
-            // 独占 STORE（stxr/stlxr/stxp 家族）首操作数是状态寄存器 Ws，
-            // 不能据此定宽——归入未知宽度走保守阻断。
-            "ldur" | "str" | "stur" | "ldr" | "ldtr" | "sttr" | "ldar" | "ldarh" | "ldxr"
-            | "ldaxr" | "stlr" => scalar(8)?,
-            // 成对访存（ldxp 首操作数是数据寄存器；stp 家族首操作数同为
-            // 数据寄存器）。
-            "ldp" | "stp" | "ldnp" | "stnp" | "ldpsw" | "ldxp" => scalar(16)?,
-            _ => return None,
-        };
+    let width = match mnemonic {
+        // 字节/半字/带符号扩展家族（普通、非缩放 ldur*、穿透 ldtr*/sttr*）。
+        "ldrb" | "ldrsb" | "strb" | "ldurb" | "ldursb" | "sturb" | "ldtrb" | "ldtrsb" | "sttrb" => {
+            1
+        }
+        "ldrh" | "ldrsh" | "strh" | "ldurh" | "ldursh" | "sturh" | "ldtrh" | "ldtrsh" | "sttrh"
+        | "ldarh" => 2,
+        "ldrsw" | "ldursw" | "ldtrsw" => 4,
+        // 单寄存器普通/非缩放/穿透访存与原子 LOAD（首操作数=数据寄存器）。
+        // 独占 STORE（stxr/stlxr/stxp 家族）首操作数是状态寄存器 Ws，
+        // 不能据此定宽——归入未知宽度走保守阻断。
+        "ldur" | "str" | "stur" | "ldr" | "ldtr" | "sttr" | "ldar" | "ldxr" | "ldaxr" | "stlr"
+        | "ldpsw" => scalar(8)?,
+        // 成对访存（ldxp 首操作数是数据寄存器；stp 家族首操作数同为
+        // 数据寄存器）。ldpsw 实际访存 2×4=8 字节（带符号扩展后写两个
+        // 64 位寄存器），归标量行。
+        "ldp" | "stp" | "ldnp" | "stnp" | "ldxp" => scalar(16)?,
+        _ => return None,
+    };
     Some(width)
+}
+
+/// 成对访存助记符：值横跨两个寄存器，单个 prestate/箭头值只覆盖一半，
+/// 任何宽度（含 W-pair 的 8 字节）都不能据此产出 bytes/value。
+pub(super) fn is_pair_access(mnemonic: &str) -> bool {
+    matches!(mnemonic, "ldp" | "stp" | "ldnp" | "stnp" | "ldxp")
 }
 
 /// 助记符之后的第一个操作数（目标寄存器，含余下操作数文本）。

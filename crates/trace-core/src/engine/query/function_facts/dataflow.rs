@@ -6,7 +6,7 @@ use crate::api_types::FunctionMemoryFactDto;
 
 use super::blocks::OwnedInsn;
 use super::lines::{
-    access_width, arrow_register_value, line_mem_annotation, little_endian_hex,
+    access_width, arrow_register_value, is_pair_access, line_mem_annotation, little_endian_hex,
     prestate_register_value,
 };
 
@@ -18,9 +18,10 @@ use super::lines::{
 ///   memory_reads（abi.stack_arguments 是它们的正式位置）；
 /// - 写后读属内部数据流，两表都不进入。
 ///
-/// 宽度未知写入的保守阻断半径：stp q 是 arm64 最大单条访存宽度。这是
-/// ISA 机械事实而非对合法数据的领域上限——只约束内部数据流的排除范围。
-const UNKNOWN_WRITE_WIDTH: u32 = 32;
+/// 宽度未知写入的保守阻断半径：SIMD 多寄存器 store（st4 {v0-v3}）是
+/// arm64 最大单条访存（64 字节）。这是 ISA 机械事实而非对合法数据的
+/// 领域上限——只约束内部数据流的排除范围。
+const UNKNOWN_WRITE_WIDTH: u32 = 64;
 
 pub(super) fn collect_memory_facts(
     owned: &[OwnedInsn],
@@ -45,9 +46,9 @@ pub(super) fn collect_memory_facts(
         if let Some(address) = line_mem_annotation(&insn.line, "mem_w") {
             match access_width(mnemonic, operand) {
                 Some(size) => {
-                    // pair/宽访存的值横跨两个寄存器，单个 prestate 只覆盖一半，
-                    // 不能截断冒充完整 bytes——宽度 > 8 时保持 null。
-                    let value = if size > 8 {
+                    // pair（含 W-pair 的 8 字节）与宽访存的值横跨两个寄存器，
+                    // 单个 prestate 只覆盖一半，不能截断冒充完整 bytes。
+                    let value = if size > 8 || is_pair_access(mnemonic) {
                         None
                     } else {
                         prestate_register_value(&insn.line, register)
@@ -75,7 +76,7 @@ pub(super) fn collect_memory_facts(
                     *waddress < address + u64::from(size) && address < *waddress + u64::from(*wsize)
                 });
                 if !internally_produced {
-                    let value = if size > 8 {
+                    let value = if size > 8 || is_pair_access(mnemonic) {
                         None
                     } else {
                         arrow_register_value(&insn.line, register)
