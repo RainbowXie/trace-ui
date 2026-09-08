@@ -79,7 +79,6 @@ impl SessionState {
         self.phase2_store.as_ref().map(|s| s.reg_checkpoints_view())
     }
 
-    #[allow(dead_code)]
     pub fn deps_view(&self) -> Option<DepsView<'_>> {
         self.scan_store.as_ref().map(|s| s.deps_view())
     }
@@ -88,7 +87,6 @@ impl SessionState {
         self.scan_store.as_ref().map(|s| s.mem_last_def_view())
     }
 
-    #[allow(dead_code)]
     pub fn pair_split_view(&self) -> Option<PairSplitView<'_>> {
         self.scan_store.as_ref().map(|s| s.pair_split_view())
     }

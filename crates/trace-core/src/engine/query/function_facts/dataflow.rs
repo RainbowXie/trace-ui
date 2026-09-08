@@ -53,26 +53,14 @@ pub(super) fn relevant_seqs(
         // 普通行：deps.row 给出全部生产者（寄存器 def / mem store def /
         // 控制依赖，高位带标记）。行内 seq 用 scanner 的 LINE_MASK 剥离
         // 标记位（控制依赖 bit29 / pair 半区 bit31 / 共享路径 bit30）。
-        for producer in deps.row(seq as usize) {
+        for producer in deps
+            .row(seq as usize)
+            .iter()
+            .chain(deps.patch_row(seq as usize).iter())
+        {
             let producer = producer & LINE_MASK;
             if producer >= lower && producer < upper && relevant.insert(producer) {
                 stack.push(producer);
-            }
-        }
-        // 成对访存的依赖在 pair_split（deps.row 对 pair 行恒空）：沿
-        // shared/half1/half2 三条切片继续向上，否则 spill 链上游的读取
-        // 会被静默漏掉。
-        if let Some(split) = pair_split.as_ref().and_then(|view| view.get(&seq)) {
-            for producer in split
-                .shared
-                .iter()
-                .chain(split.half1_deps.iter())
-                .chain(split.half2_deps.iter())
-            {
-                let producer = producer & LINE_MASK;
-                if producer >= lower && producer < upper && relevant.insert(producer) {
-                    stack.push(producer);
-                }
             }
         }
         // 成对访存的依赖在 pair_split（deps.row 对 pair 行恒空）：沿
