@@ -23,7 +23,7 @@ pub(super) struct OwnedInsn {
 }
 
 /// 冻结切分规则的块终止指令：条件/无条件/间接跳转、调用边界与返回。
-/// PAC 变体在 classify 的分支表之外，按同一合同显式列入。
+/// classify 已把 PAC 认证变体（braa/blraa/retaa 家族）归入对应分支类。
 fn is_control_transfer(mnemonic: &str) -> bool {
     matches!(
         trace_parser::insn_class::classify(mnemonic, None),
@@ -34,18 +34,6 @@ fn is_control_transfer(mnemonic: &str) -> bool {
             | InsnClass::BranchReg
             | InsnClass::BranchLinkReg
             | InsnClass::Return
-    ) || matches!(
-        mnemonic,
-        "braa"
-            | "braaz"
-            | "brab"
-            | "brabz"
-            | "blraa"
-            | "blraaz"
-            | "blrab"
-            | "blrabz"
-            | "retaa"
-            | "retab"
     )
 }
 

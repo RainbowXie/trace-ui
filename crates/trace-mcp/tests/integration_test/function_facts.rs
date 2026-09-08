@@ -74,7 +74,18 @@ fn confirmed_activation_returns_a_complete_function_fact_bundle() {
     assert!(bundle.global_reads.is_empty());
     assert!(bundle.memory_writes.is_empty());
     assert!(bundle.global_writes.is_empty());
-    assert!(bundle.external_call_events.is_empty());
+    // br/PLT-stub 形态的外部调用：注解 __strlen_aarch64 键在 br seq 14，
+    // resume 即本 Activation 的 resume 18，返回值 0x13（ret: 注解）。
+    assert_eq!(bundle.external_call_events.len(), 1);
+    let event = &bundle.external_call_events[0];
+    assert_eq!(event.callsite.seq, 14);
+    assert_eq!(event.callsite.offset, "libmetasec_ov.so+0x2ea9c");
+    assert_eq!(event.resume.as_ref().map(|anchor| anchor.seq), Some(18));
+    assert_eq!(event.target.symbol, Some("__strlen_aarch64".to_string()));
+    assert_eq!(
+        event.returns.get("X0"),
+        Some(&Some("0x0000000000000013".to_string()))
+    );
     assert!(bundle.unresolved.is_empty());
 
     engine.close_session(&sid).unwrap();
@@ -378,13 +389,8 @@ fn external_reads_and_final_writes_follow_the_producer_rules() {
         .collect::<Vec<_>>();
     assert_eq!(
         writes,
-        vec![(
-            "0x5000",
-            8,
-            Some("bb00000000000000".to_string()),
-            vec![3, 4]
-        )],
-        "同一地址多次写入合并为一项，bytes 为最终值，write_seqs 保留全部生产者"
+        vec![("0x5000", 8, Some("bb00000000000000".to_string()), vec![4])],
+        "同一地址多次写入合并为一项，bytes 为最终值，write_seqs 只保留对最终字节有贡献的写（前写被完全覆盖）"
     );
 
     engine.close_session(&sid).unwrap();
@@ -434,19 +440,9 @@ fn bypassed_calls_become_external_call_events() {
         Some(&Some("0x0000000000000011".to_string()))
     );
     assert_eq!(event.arguments.get("X7"), Some(&None));
-    assert_eq!(
-        event
-            .stack_arguments
-            .iter()
-            .map(|slot| (
-                slot.offset,
-                slot.size,
-                slot.value.clone(),
-                slot.evidence_seqs.clone()
-            ))
-            .collect::<Vec<_>>(),
-        vec![(0, 8, Some("0x0000000000001234".to_string()), vec![2])]
-    );
+    // Event 栈参数恒空：机械上无法区分出参准备与 spill（编译器复用同一
+    // 栈帧区），按地址收集会伪造；需要 args 注解/capture 证据后才能恢复。
+    assert!(event.stack_arguments.is_empty());
     assert_eq!(
         event.returns.get("X0"),
         Some(&Some("0x0000000000000099".to_string()))
@@ -489,6 +485,77 @@ fn a_bypassed_call_without_annotation_marks_the_missing_target() {
         .unresolved
         .iter()
         .any(|gap| gap.kind == "indirect_target_unresolved"));
+
+    engine.close_session(&sid).unwrap();
+    std::fs::remove_file(path).expect("remove inline trace");
+}
+
+#[test]
+fn ret_annotation_effects_survive_checkpoint_boundaries() {
+    // ret: 特殊行的 X0 效应必须进入检查点快照：检查点落在 ret: 与 resume
+    // 之间时，重放区间永远错过该行——修复前会把调用前值冒充为返回值。
+    // 简化版：把外层函数放前面，外部调用跨越第 1000 行检查点。
+    let mut lines: Vec<String> = vec![
+        "[App] 0x5004!0x5004 bl #0x1000; sp=0x3030".to_string(),
+        "[App] 0x1000!0x1000 mov x0, #0x11".to_string(),
+    ];
+    for _ in 2..997u32 {
+        lines.push("[App] 0x1000!0x1000 orr x9, x9, x9".to_string());
+    }
+    // index 997：bl；998：call func；999：ret:；1000：resume（检查点边界）。
+    lines.push("[App] 0x1004!0x1004 bl #0x3000; x0=0x11 sp=0x3020".to_string());
+    lines.push("call func: extfoo(0x11)".to_string());
+    lines.push("ret: 0x99".to_string());
+    lines.push("[App] 0x1008!0x1008 mov x2, #0x1".to_string());
+    lines.push("[App] 0x100c!0x100c ret".to_string());
+    lines.push("[App] 0x5008!0x5008 mov x0, #0x1".to_string());
+    let (engine, sid, path) =
+        setup_inline_trace(&lines.iter().map(String::as_str).collect::<Vec<_>>());
+
+    let bundle = engine
+        .get_function_facts(&sid, 0, 1)
+        .expect("function facts");
+    let event = bundle
+        .external_call_events
+        .iter()
+        .find(|event| event.callsite.offset == "App+0x1004")
+        .expect("bypassed event across the checkpoint boundary");
+    assert_eq!(
+        event.returns.get("X0"),
+        Some(&Some("0x0000000000000099".to_string())),
+        "ret: 效应必须跨检查点存活，不得回退为调用前值"
+    );
+
+    engine.close_session(&sid).unwrap();
+    std::fs::remove_file(path).expect("remove inline trace");
+}
+
+#[test]
+fn pair_writes_block_forged_external_values() {
+    // stp 写入后读取同槽：pair 写必须参与「写后读」判定——栈参数 value
+    // 为 null，且该地址不得作为外部输入进入 memory_reads。
+    let (engine, sid, path) = setup_inline_trace(&[
+        "[App] 0x1004!0x1004 bl #0x2000; sp=0x3000",
+        "[App] 0x2000!0x2000 sub sp, sp, #0x20; sp=0x3000 -> sp=0x2fe0",
+        "[App] 0x2004!0x2004 stp x2, x3, [sp]; sp=0x2fe0 x2=0x1111 x3=0x2222 mem_w=0x2fe0",
+        "[App] 0x2008!0x2008 ldr x0, [sp]; sp=0x2fe0 mem_r=0x2fe0 -> x0=0x1111",
+        "[App] 0x200c!0x200c ret",
+        "[App] 0x1008!0x1008 mov x0, #0x99",
+    ]);
+
+    let bundle = engine
+        .get_function_facts(&sid, 0, 1)
+        .expect("function facts");
+
+    // 0x2fe0 在 entry SP 之下（局部区）：不是栈参数，也不得作为外部读取。
+    assert!(bundle.abi.stack_arguments.is_empty());
+    assert!(
+        bundle
+            .memory_reads
+            .iter()
+            .all(|read| read.address != "0x2fe0"),
+        "pair 写后的读取是内部数据流，不得伪造为外部输入"
+    );
 
     engine.close_session(&sid).unwrap();
     std::fs::remove_file(path).expect("remove inline trace");

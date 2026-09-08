@@ -13,8 +13,9 @@ use std::sync::{Arc, RwLock};
 // V7：利用 64 字节 header 的尾部 16 字节绑定 section payload 摘要；此前
 // 只校验 trace 身份，payload 内位损坏若保持长度/结构关系会静默命中。
 // MAGIC（无后缀常量）服务于 48 字节旧 bincode 路径，与 section 缓存互不影响。
-// MAGIC_V7：section 缓存当前布局版本号（TCACHE07）。
-const MAGIC_V7: &[u8; 8] = b"TCACHE07";
+// MAGIC_V7：section 缓存当前布局版本号（TCACHE08：检查点快照开始包含
+// ret: 特殊行的 X0 效应；旧 TCACHE07 缓存因内容不同自动失效）。
+const MAGIC_V7: &[u8; 8] = b"TCACHE08";
 const MAGIC: &[u8; 8] = b"TCACHE03";
 const HEADER_LEN_V7: usize = 64;
 const SECTION_DIGEST_LEN: usize = 16;
@@ -461,7 +462,7 @@ mod magic_version_tests {
     /// 此断言锁定当前版本，避免下次格式变更漏改。
     #[test]
     fn section_magic_tracks_payload_integrity_contract() {
-        assert_eq!(MAGIC_V7, b"TCACHE07");
+        assert_eq!(MAGIC_V7, b"TCACHE08");
     }
 
     #[test]

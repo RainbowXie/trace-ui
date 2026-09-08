@@ -4,13 +4,12 @@ use std::collections::BTreeMap;
 
 use crate::api_types::{
     FunctionAnchorDto, FunctionEventUnresolvedDto, FunctionExternalCallEventDto,
-    FunctionExternalStackArgumentDto, FunctionExternalTargetDto,
+    FunctionExternalTargetDto,
 };
 use crate::error::{Result, TraceError};
 
 use super::super::activation::stable_site;
 use super::blocks::OwnedInsn;
-use super::lines::{access_width, base_register, line_mem_annotation, prestate_register_value};
 use super::{known_register, registers_at};
 
 /// 未记录函数体的调用 → caller 的 External Call Event。
@@ -69,49 +68,12 @@ pub(super) fn collect_external_call_events(
                 detail: "未记录函数体的调用没有任何目标身份证据（无注解符号）".to_string(),
             });
         }
-        // 调用方准备的栈参数：call 之前 SP/FP 基址写入且地址 ≥ call_sp。
+        // Event 栈参数：机械上无法把「出参区准备」与「callee-saved spill /
+        // 局部溢出」按地址区分（两者都落在 [call_sp, +N) 且编译器复用同一
+        // 栈帧），任何按地址/基址的收集都会伪造栈参数（合同 §7.2 要求
+        // 「调用方能够证明已为外部调用准备」）。V1 恒为空；需要 args 注解
+        // 或 capture 证据后才能恢复收集。
         let call_sp = callsite_registers[31];
-        let mut stack_slots: BTreeMap<(u64, u32), FunctionExternalStackArgumentDto> =
-            BTreeMap::new();
-        if call_sp != u64::MAX {
-            for insn in owned.iter().take_while(|insn| insn.seq < call.call_seq) {
-                let Some((mnemonic, operand)) =
-                    insn.mnemonic.as_deref().zip(insn.first_operand.as_deref())
-                else {
-                    continue;
-                };
-                let Some(address) = line_mem_annotation(&insn.line, "mem_w") else {
-                    continue;
-                };
-                if address < call_sp {
-                    continue;
-                }
-                let stack_based =
-                    base_register(operand).is_some_and(|base| base == "sp" || base == "fp");
-                let Some(size) = (stack_based)
-                    .then(|| access_width(mnemonic, operand))
-                    .flatten()
-                else {
-                    continue;
-                };
-                let value = operand
-                    .split(',')
-                    .next()
-                    .and_then(|register| prestate_register_value(&insn.line, register.trim()));
-                let slot = stack_slots.entry((address - call_sp, size)).or_insert(
-                    FunctionExternalStackArgumentDto {
-                        offset: (address - call_sp) as i64,
-                        size,
-                        value: value.map(|value| format!("0x{value:016x}")),
-                        evidence_seqs: Vec::new(),
-                    },
-                );
-                if slot.value.is_none() {
-                    slot.value = value.map(|value| format!("0x{value:016x}"));
-                }
-                slot.evidence_seqs.push(insn.seq);
-            }
-        }
         events.push(FunctionExternalCallEventDto {
             callsite: FunctionAnchorDto {
                 seq: call.call_seq,
@@ -128,13 +90,67 @@ pub(super) fn collect_external_call_events(
             },
             call_sp: (call_sp != u64::MAX).then(|| format!("0x{call_sp:016x}")),
             arguments,
-            stack_arguments: stack_slots.into_values().collect(),
+            stack_arguments: Vec::new(),
             returns,
             memory_reads: Vec::new(),
             global_reads: Vec::new(),
             memory_writes: Vec::new(),
             global_writes: Vec::new(),
             unresolved,
+        });
+    }
+    // br/PLT-stub 形态的外部调用：stub activation（adrp/ldr/add/br）没有
+    // BL/BLR，bypassed_calls 不覆盖；hook 注解（call func:）键在 br 的
+    // seq 上。resume 即本 Activation 的 resume（外部函数返回后回到
+    // caller），返回值经含 ret: 效应的检查点重放取得。
+    let bypassed_seqs: std::collections::HashSet<u32> = tree
+        .bypassed_calls
+        .iter()
+        .map(|call| call.call_seq)
+        .collect();
+    for insn in owned.iter().filter(|insn| insn.transfer) {
+        if bypassed_seqs.contains(&insn.seq) {
+            continue;
+        }
+        let Some(annotation) = state.call_annotations.get(&insn.seq) else {
+            continue;
+        };
+        let callsite_registers = registers_at(state, insn.seq)?;
+        let resume_registers = registers_at(state, activation.resume_seq)?;
+        let arguments = (0..=7)
+            .map(|register| {
+                (
+                    format!("X{register}"),
+                    known_register(&callsite_registers, register),
+                )
+            })
+            .collect();
+        let mut returns = BTreeMap::new();
+        returns.insert("X0".to_string(), known_register(&resume_registers, 0));
+        events.push(FunctionExternalCallEventDto {
+            callsite: FunctionAnchorDto {
+                seq: insn.seq,
+                offset: insn.site.clone(),
+            },
+            resume: Some(FunctionAnchorDto {
+                seq: activation.resume_seq,
+                offset: site(activation.resume_seq)?,
+            }),
+            target: FunctionExternalTargetDto {
+                module: None,
+                entry: None,
+                symbol: Some(annotation.func_name.clone()),
+            },
+            call_sp: (callsite_registers[31] != u64::MAX)
+                .then(|| format!("0x{:016x}", callsite_registers[31])),
+            arguments,
+            stack_arguments: Vec::new(),
+            returns,
+            memory_reads: Vec::new(),
+            global_reads: Vec::new(),
+            memory_writes: Vec::new(),
+            global_writes: Vec::new(),
+            unresolved: Vec::new(),
         });
     }
     Ok(events)

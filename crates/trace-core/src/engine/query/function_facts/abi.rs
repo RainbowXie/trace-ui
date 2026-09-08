@@ -15,6 +15,10 @@ pub(super) fn collect_stack_arguments(
     owned: &[OwnedInsn],
     entry_sp: u64,
 ) -> Vec<FunctionStackArgumentDto> {
+    // 写入追踪：宽度可解析的写按精确区间记录；宽度未知（向量/未覆盖助记符）
+    // 的写按 UNKNOWN_WRITE_WIDTH 记录——任何与其重叠的读取都必须视为可能
+    // 内产，value 置 null，不能把 callee 自己 spill 的值伪造成入口栈参数。
+    const UNKNOWN_WRITE_WIDTH: u32 = 32; // stp q 是最大单条访存（ISA 机械事实）
     let mut writes: Vec<(u64, u32, u32)> = Vec::new();
     for insn in owned {
         if let (Some(address), Some(mnemonic), Some(operand)) = (
@@ -22,9 +26,8 @@ pub(super) fn collect_stack_arguments(
             insn.mnemonic.as_deref(),
             insn.first_operand.as_deref(),
         ) {
-            if let Some(size) = access_width(mnemonic, operand) {
-                writes.push((address, size, insn.seq));
-            }
+            let size = access_width(mnemonic, operand).unwrap_or(UNKNOWN_WRITE_WIDTH);
+            writes.push((address, size, insn.seq));
         }
     }
     let mut slots: BTreeMap<(u64, u32), (Option<u64>, Vec<u32>)> = BTreeMap::new();

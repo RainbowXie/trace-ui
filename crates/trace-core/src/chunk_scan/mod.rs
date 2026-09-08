@@ -206,6 +206,14 @@ pub fn scan_chunk(data: &[u8], config: ScanChunkConfig) -> ChunkResult {
                     }
                     gumtrace_parser::SpecialLine::Ret { value } => {
                         reg_last_def.insert(RegId::X0, i);
+                        // ret: 行在外部调用恢复前定义 X0；检查点快照必须包含
+                        // 该效应，否则落在 ret: 与边界之间的检查点会让重放
+                        // 区间永远错过它，把调用前值冒充为返回值。
+                        if let Some(hex) = value.strip_prefix("0x") {
+                            if let Ok(parsed) = u64::from_str_radix(hex, 16) {
+                                reg_values[RegId::X0.0 as usize] = parsed;
+                            }
+                        }
                         gumtrace_annot_events.push(GumtraceAnnotEvent::SpecialLine {
                             seq: i,
                             special: SpecialLineData::Ret {

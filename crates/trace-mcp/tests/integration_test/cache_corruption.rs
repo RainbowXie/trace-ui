@@ -188,14 +188,14 @@ fn test_v6_layout_cache_rejected_by_magic_bump() {
     let path = get_trace_path();
     let dir = current_cache_dir();
 
-    // 构造：合法 V7 文件但 magic 改回 TCACHE06，只验证旧 magic 拒绝路径。
+    // 构造：合法 V8 文件但 magic 改回 TCACHE06，只验证旧 magic 拒绝路径。
     let cache_file = dir.join(format!(
         "{}{}",
         trace_core::cache::path_hash_for_test(&path),
         ".p2.cache"
     ));
     let mut bytes = std::fs::read(&cache_file).expect("cache written by first build");
-    assert_eq!(&bytes[0..8], b"TCACHE07", "current cache must be V7");
+    assert_eq!(&bytes[0..8], b"TCACHE08", "current cache must be V8");
     bytes[0..8].copy_from_slice(b"TCACHE06");
     std::fs::write(&cache_file, &bytes).unwrap();
 

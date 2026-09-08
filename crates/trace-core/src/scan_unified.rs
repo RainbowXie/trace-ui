@@ -203,6 +203,12 @@ pub fn scan_unified(
                     }
                     gumtrace_parser::SpecialLine::Ret { value } => {
                         state.reg_last_def.insert(RegId::X0, i);
+                        // 同 chunk_scan：ret: 必须进入检查点快照，见该处注释。
+                        if let Some(hex) = value.strip_prefix("0x") {
+                            if let Ok(parsed) = u64::from_str_radix(hex, 16) {
+                                reg_values[RegId::X0.0 as usize] = parsed;
+                            }
+                        }
                         if let Some((bl_seq, mut ann)) = current_annotation.take() {
                             ann.ret_value = Some(value.to_string());
                             ann.raw_lines.push(raw_line.to_string());

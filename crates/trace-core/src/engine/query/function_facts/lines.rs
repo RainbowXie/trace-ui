@@ -11,15 +11,6 @@ pub(super) fn line_mnemonic(line: &str) -> Option<&str> {
     Some(&rest[..end])
 }
 
-/// 助记符之后的第一个操作数（目标寄存器，含余下操作数文本）。
-pub(super) fn first_operand(line: &str) -> Option<String> {
-    let mnemonic = line_mnemonic(line)?;
-    let after = &line[line.find(mnemonic)? + mnemonic.len()..];
-    let operand = after.trim_start();
-    let end = operand.find(';')?;
-    Some(operand[..end].trim_end_matches(',').to_string())
-}
-
 /// 从 raw 行提取 `mem_r=0x…` / `mem_w=0x…` 注解地址。
 pub(super) fn line_mem_annotation(line: &str, key: &str) -> Option<u64> {
     let marker = format!("{key}=0x");
@@ -71,22 +62,47 @@ pub(super) fn base_register(operand: &str) -> Option<String> {
     }
 }
 
-/// 助记符 + 目标操作数 → 访存宽度（字节）。单寄存器载荷；ldp/stp 成对
-/// 访存不属于单个栈参数，返回 None 留给后续 memory facts。
+/// 助记符 + 目标操作数 → 访存宽度（字节）。覆盖整数访存家族：普通/
+/// 非缩放/穿透/原子/成对；向量寄存器（q/s/d 首字符）与未知助记符返回
+/// None——调用方必须把这类访存按「宽度未知」保守处理，不能静默丢弃。
 pub(super) fn access_width(mnemonic: &str, operand: &str) -> Option<u32> {
     let register = operand.trim().split(',').next()?.trim();
-    let width = match mnemonic {
-        "ldrb" | "ldrsb" | "strb" | "ldtrb" | "sttrb" => 1,
-        "ldrh" | "ldrsh" | "strh" => 2,
-        "ldrsw" => 4,
-        "ldur" | "str" | "stur" | "ldr" => match register.chars().next()? {
-            'x' => 8,
-            'w' => 4,
-            _ => return None,
-        },
-        _ => return None,
+    let scalar = |width: u32| match register.chars().next()? {
+        'x' => Some(width),
+        'w' => Some(width / 2),
+        _ => None,
     };
+    let width =
+        match mnemonic {
+            // 字节/半字/带符号扩展家族（普通、非缩放 ldur*、穿透 ldtr*/sttr*）。
+            "ldrb" | "ldrsb" | "strb" | "ldurb" | "ldursb" | "sturb" | "ldtrb" | "ldtrsb"
+            | "sttrb" => 1,
+            "ldrh" | "ldrsh" | "strh" | "ldurh" | "ldursh" | "sturh" | "ldtrh" | "ldtrsh"
+            | "sttrh" => 2,
+            "ldrsw" | "ldursw" | "ldtrsw" => 4,
+            // 单寄存器普通/非缩放/穿透访存与原子（独占/LSE 均为标量宽度）。
+            "ldur" | "str" | "stur" | "ldr" | "ldtr" | "sttr" | "ldar" | "ldarh" | "ldxr"
+            | "ldaxr" | "stlr" | "stlxr" | "stxr" | "stxrb" => scalar(8)?,
+            // 成对访存：两个标量寄存器，总宽 2×。
+            "ldp" | "stp" | "ldnp" | "stnp" | "ldpsw" | "ldxp" | "stxp" => scalar(16)?,
+            _ => return None,
+        };
     Some(width)
+}
+
+/// 助记符之后的第一个操作数（目标寄存器，含余下操作数文本）。
+/// 定位必须从 `!0x` 锚点出发重走助记符位置——从行首 find(助记符) 会在
+/// 模块名含助记符子串（如 libstream… 含 "str"）时错位。
+pub(super) fn first_operand(line: &str) -> Option<String> {
+    let bang = line.find("!0x")?;
+    let rest = &line[bang + 3..];
+    let hex_end = rest.find(|c: char| !c.is_ascii_hexdigit())?;
+    let after = rest[hex_end..].trim_start();
+    // 跳过助记符本身。
+    let mnemonic_end = after.find(|c: char| c.is_whitespace())?;
+    let operand = after[mnemonic_end..].trim_start();
+    let end = operand.find(';')?;
+    Some(operand[..end].trim_end_matches(',').to_string())
 }
 
 /// u64 → 按地址递增（小端）的 lowercase hex 字节串。
