@@ -258,3 +258,22 @@ fn helper_operates_on_inherited_fd_without_pathname() {
 
     let _ = std::fs::remove_dir_all(root);
 }
+
+#[test]
+fn helper_runs_on_real_gumtrace_sample() {
+    let manifest_dir = env!("CARGO_MANIFEST_DIR");
+    let trace_path = format!("{manifest_dir}/../../example-trace-gumtrace.txt");
+    let trace = std::fs::File::open(&trace_path).expect("open example gumtrace");
+
+    let output = run_fact_helper(trace.as_raw_fd(), b"{\"call_seq\":1,\"entry_seq\":2}\n");
+    assert!(
+        output.status.success(),
+        "fact helper on real gumtrace sample must succeed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let body = String::from_utf8_lossy(&output.stdout);
+    assert!(body.contains("\"function\":\"libmetasec_ov.so+0x143438\""));
+    assert!(body.contains("\"trace_anchors\""));
+    assert!(body.contains("\"abi\""));
+    assert!(body.contains("\"executed_block_sequence\""));
+}
