@@ -42,6 +42,10 @@ impl TraceEngine {
 
     pub fn create_session(&self, path: &str) -> Result<SessionInfo> {
         let file = std::fs::File::open(path).map_err(TraceError::Io)?;
+        self.create_session_from_file(file, path)
+    }
+
+    pub fn create_session_from_file(&self, file: std::fs::File, path: &str) -> Result<SessionInfo> {
         let metadata = file.metadata().map_err(TraceError::Io)?;
         let file_size = metadata.len();
         let mmap = unsafe { Mmap::map(&file) }.map_err(TraceError::Io)?;

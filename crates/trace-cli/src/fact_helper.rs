@@ -1,0 +1,232 @@
+//! The fd-based function facts helper used by the Analysis Case adapter.
+//!
+//! The adapter has already validated the trace file. It passes its open
+//! descriptor to this process so this helper never has to reopen a pathname
+//! (and therefore cannot observe a replacement file).
+
+use std::fs::File;
+use std::io::{self, Read, Write};
+use std::sync::Arc;
+
+#[cfg(unix)]
+use std::os::fd::{FromRawFd, RawFd};
+
+use serde::Deserialize;
+use trace_core::api_types::FunctionFactBundleDto;
+use trace_core::BuildOptions;
+use trace_core::TraceEngine;
+
+const MAX_FACT_BUNDLE_BYTES: usize = 64 * 1024 * 1024;
+const MAX_CONTROL_BYTES: usize = 1024 * 1024;
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct FactHelperRequest {
+    call_seq: u32,
+    entry_seq: u32,
+    #[serde(default)]
+    function: Option<String>,
+}
+
+pub(crate) fn requested() -> bool {
+    std::env::args().any(|arg| arg == "--function-facts-helper" || arg == "--function-fact-helper")
+}
+
+#[cfg(not(unix))]
+pub(crate) fn run() -> anyhow::Result<()> {
+    anyhow::bail!("fd helper is only supported on Unix")
+}
+
+#[cfg(unix)]
+pub(crate) fn run() -> anyhow::Result<()> {
+    let args: Vec<String> = std::env::args().collect();
+    let trace_fd = parse_fd_arg(&args, "--trace-fd")?;
+    validate_inherited_fd(trace_fd)?;
+
+    let trace = unsafe { File::from_raw_fd(trace_fd) };
+    ensure_regular(&trace, "trace fd")?;
+
+    let request_bytes = read_stdin_bounded()?;
+    let request: FactHelperRequest = serde_json::from_slice(&request_bytes)
+        .map_err(|error| anyhow::anyhow!("invalid fact helper request: {error}"))?;
+
+    let engine = Arc::new(TraceEngine::new());
+    let session_info = engine
+        .create_session_from_file(trace, &format!("inherited-fd:{trace_fd}"))
+        .map_err(|error| anyhow::anyhow!("failed to create session from trace fd: {error}"))?;
+    let sid = session_info.session_id;
+
+    engine
+        .build_index(
+            &sid,
+            BuildOptions {
+                force_rebuild: false,
+                skip_strings: true,
+            },
+            None,
+        )
+        .map_err(|error| anyhow::anyhow!("failed to build index: {error}"))?;
+
+    let bundle = engine
+        .get_function_facts(&sid, request.call_seq, request.entry_seq)
+        .map_err(|error| anyhow::anyhow!("get_function_facts failed: {error}"))?;
+
+    if let Some(ref expected_function) = request.function {
+        if &bundle.function != expected_function {
+            anyhow::bail!(
+                "function site mismatch: expected {expected_function}, got {}",
+                bundle.function
+            );
+        }
+    }
+
+    write_response(&bundle)?;
+    Ok(())
+}
+
+#[cfg(unix)]
+fn parse_fd_arg(args: &[String], flag: &str) -> anyhow::Result<RawFd> {
+    let position = args
+        .iter()
+        .position(|arg| arg == flag)
+        .ok_or_else(|| anyhow::anyhow!("missing required {flag} argument"))?;
+    let value = args
+        .get(position + 1)
+        .ok_or_else(|| anyhow::anyhow!("missing value after {flag}"))?;
+    value
+        .parse::<RawFd>()
+        .map_err(|error| anyhow::anyhow!("invalid descriptor '{value}' for {flag}: {error}"))
+}
+
+#[cfg(unix)]
+fn validate_inherited_fd(trace_fd: RawFd) -> anyhow::Result<()> {
+    if trace_fd < 3 {
+        anyhow::bail!("trace fd must not use reserved standard descriptors 0, 1, or 2");
+    }
+    Ok(())
+}
+
+#[cfg(unix)]
+fn ensure_regular(file: &File, label: &str) -> anyhow::Result<()> {
+    let metadata = file
+        .metadata()
+        .map_err(|error| anyhow::anyhow!("{label} metadata failed: {error}"))?;
+    if !metadata.file_type().is_file() {
+        anyhow::bail!("{label} is not a regular file");
+    }
+    Ok(())
+}
+
+#[cfg(unix)]
+fn read_stdin_bounded() -> anyhow::Result<Vec<u8>> {
+    let mut bytes = Vec::new();
+    let mut stdin = io::stdin()
+        .lock()
+        .take((MAX_CONTROL_BYTES as u64).saturating_add(1));
+    stdin
+        .read_to_end(&mut bytes)
+        .map_err(|error| anyhow::anyhow!("control request read failed: {error}"))?;
+    if bytes.len() > MAX_CONTROL_BYTES {
+        anyhow::bail!("control request exceeds {MAX_CONTROL_BYTES} byte limit");
+    }
+    Ok(bytes)
+}
+
+/// 限制写入字节总量的 Writer，超过 limit 立即报错。
+pub struct BoundedWriter<W: Write> {
+    inner: W,
+    written: usize,
+    limit: usize,
+}
+
+impl<W: Write> BoundedWriter<W> {
+    pub fn new(inner: W, limit: usize) -> Self {
+        Self {
+            inner,
+            written: 0,
+            limit,
+        }
+    }
+
+    #[cfg(test)]
+    pub fn written(&self) -> usize {
+        self.written
+    }
+
+    #[cfg(test)]
+    pub fn into_inner(self) -> W {
+        self.inner
+    }
+}
+
+impl<W: Write> Write for BoundedWriter<W> {
+    fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
+        let remaining = self
+            .limit
+            .checked_sub(self.written)
+            .ok_or_else(|| io::Error::other("byte limit exceeded"))?;
+        if buf.len() > remaining {
+            return Err(io::Error::other(format!(
+                "output exceeds {} byte limit (attempted {} bytes)",
+                self.limit,
+                self.written + buf.len()
+            )));
+        }
+        let n = self.inner.write(buf)?;
+        self.written += n;
+        Ok(n)
+    }
+
+    fn flush(&mut self) -> io::Result<()> {
+        self.inner.flush()
+    }
+}
+
+#[cfg(unix)]
+fn encode_response(bundle: &FunctionFactBundleDto) -> anyhow::Result<Vec<u8>> {
+    let mut buffer = Vec::new();
+    let mut bounded = BoundedWriter::new(&mut buffer, MAX_FACT_BUNDLE_BYTES);
+    serde_json::to_writer(&mut bounded, bundle)
+        .map_err(|error| anyhow::anyhow!("response encoding failed: {error}"))?;
+    bounded
+        .write_all(b"\n")
+        .map_err(|error| anyhow::anyhow!("trailing newline failed: {error}"))?;
+    Ok(buffer)
+}
+
+#[cfg(unix)]
+fn write_response(bundle: &FunctionFactBundleDto) -> anyhow::Result<()> {
+    let encoded = encode_response(bundle)?;
+    let mut stdout = io::stdout().lock();
+    stdout
+        .write_all(&encoded)
+        .and_then(|_| stdout.flush())
+        .map_err(|error| anyhow::anyhow!("response write failed: {error}"))?;
+    Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn bounded_writer_aborts_when_exceeding_limit() {
+        let mut out = Vec::new();
+        let mut writer = BoundedWriter::new(&mut out, 10);
+        assert!(writer.write_all(b"12345").is_ok());
+        assert_eq!(writer.written(), 5);
+        let err = writer.write_all(b"123456").unwrap_err();
+        assert_eq!(err.kind(), io::ErrorKind::Other);
+        assert!(err.to_string().contains("output exceeds 10 byte limit"));
+    }
+
+    #[test]
+    fn bounded_writer_succeeds_within_limit() {
+        let mut out = Vec::new();
+        let mut writer = BoundedWriter::new(&mut out, 10);
+        assert!(writer.write_all(b"1234567890").is_ok());
+        assert_eq!(writer.written(), 10);
+        let inner = writer.into_inner();
+        assert_eq!(inner, b"1234567890");
+    }
+}
