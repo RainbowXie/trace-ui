@@ -119,10 +119,20 @@ pub(super) fn access_width(mnemonic: &str, operand: &str) -> Option<u32> {
         // 单寄存器普通/非缩放/穿透访存与原子 LOAD（首操作数=数据寄存器）。
         // ldpsw 实际访存 2×4=8 字节（带符号扩展后写两个 64 位寄存器）。
         "ldur" | "str" | "stur" | "ldr" | "ldtr" | "sttr" | "ldar" | "ldxr" | "ldaxr" | "stlr"
-        | "ldpsw" => scalar(8)?,
+        | "ldpsw" => match register.chars().next()? {
+            'q' => 16,
+            'd' => 8,
+            's' => 4,
+            _ => scalar(8)?,
+        },
         // 成对访存（ldxp 首操作数是数据寄存器；stp 家族首操作数同为
-        // 数据寄存器）。
-        "ldp" | "stp" | "ldnp" | "stnp" | "ldxp" => scalar(16)?,
+        // 数据寄存器）。支持 q/d/s 向量/浮点成对访存。
+        "ldp" | "stp" | "ldnp" | "stnp" | "ldxp" => match register.chars().next()? {
+            'q' => 32,
+            'd' => 16,
+            's' => 8,
+            _ => scalar(16)?,
+        },
         _ => return None,
     };
     Some(width)

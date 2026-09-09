@@ -362,3 +362,40 @@ fn pair_spill_chains_keep_upstream_reads_relevant() {
     engine.close_session(&sid).unwrap();
     std::fs::remove_file(path).expect("remove inline trace");
 }
+
+#[test]
+fn simd_vector_writes_generate_real_records_and_missing_definitions() {
+    // 验证 HIGH-003：stp q0, q1 写入 32 字节且值未完整时，
+    // 必须物化为 bytes=null 的 memory_writes 并在 unresolved 中产出
+    // 匹配的 missing_memory_definition，绝不静默消失。
+    let (engine, sid, path) = setup_inline_trace(&[
+        "[App] 0x1004!0x1004 bl #0x2000; sp=0x3000",
+        "[App] 0x2000!0x2000 stp q0, q1, [x9]; x9=0xa000 mem_w=0xa000",
+        "[App] 0x2004!0x2004 ret",
+        "[App] 0x1008!0x1008 mov x0, #0x1",
+    ]);
+
+    let bundle = engine
+        .get_function_facts(&sid, 0, 1)
+        .expect("function facts");
+
+    assert_eq!(bundle.memory_writes.len(), 1);
+    let write = &bundle.memory_writes[0];
+    assert_eq!(write.address, "0xa000");
+    assert_eq!(write.size, 32);
+    assert_eq!(write.bytes, None);
+    assert_eq!(write.write_seqs, vec![1]);
+
+    assert!(
+        bundle.unresolved.iter().any(|u| {
+            u.kind == "missing_memory_definition"
+                && u.location.as_deref() == Some("0xa000")
+                && u.seqs == vec![1]
+        }),
+        "stp q0, q1 未完整写入必须产出 matching missing_memory_definition: {:?}",
+        bundle.unresolved
+    );
+
+    engine.close_session(&sid).unwrap();
+    std::fs::remove_file(path).expect("remove inline trace");
+}

@@ -253,6 +253,7 @@ pub(super) fn collect_memory_facts(
     let mut blocked: Vec<(u64, u32)> = Vec::new();
     let mut final_bytes = FinalByteMap::default();
     let mut write_winners: Vec<u32> = Vec::new();
+    let mut write_unresolved: Vec<FunctionFactUnresolvedDto> = Vec::new();
     for insn in owned {
         let Some((mnemonic, operand)) = insn.mnemonic.as_deref().zip(insn.first_operand.as_deref())
         else {
@@ -269,6 +270,14 @@ pub(super) fn collect_memory_facts(
                 }
                 Some(WriteEffect::BlockOnly { size }) => {
                     blocked.push((address, size));
+                    write_unresolved.push(FunctionFactUnresolvedDto {
+                        kind: "unsupported_instruction".to_string(),
+                        seqs: vec![insn.seq],
+                        location: Some(format!("0x{address:x}")),
+                        detail: format!(
+                            "{mnemonic} 写入访存宽度未覆盖，已保守阻断后续读取并记录缺口"
+                        ),
+                    });
                     continue;
                 }
                 None => continue,
@@ -368,5 +377,6 @@ pub(super) fn collect_memory_facts(
         }
     }
 
+    unresolved.extend(write_unresolved);
     (memory_reads, memory_writes, unresolved)
 }
