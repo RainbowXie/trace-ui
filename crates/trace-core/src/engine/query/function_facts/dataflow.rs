@@ -3,7 +3,7 @@
 
 use std::collections::{BTreeMap, HashSet};
 
-use crate::api_types::{FunctionFactUnresolvedDto, FunctionMemoryFactDto};
+use crate::api_types::{FunctionFactUnresolvedDto, FunctionMemoryReadDto, FunctionMemoryWriteDto};
 
 use super::blocks::OwnedInsn;
 use super::lines::{
@@ -170,7 +170,7 @@ impl FinalByteMap {
         }
     }
 
-    fn materialize(&self) -> Vec<FunctionMemoryFactDto> {
+    fn materialize(&self) -> Vec<FunctionMemoryWriteDto> {
         let mut writes = Vec::new();
         let mut pending: Option<ByteRange> = None;
         for (&address, &(known, byte, winner)) in &self.bytes {
@@ -212,7 +212,7 @@ impl FinalByteMap {
         writes
     }
 
-    fn emit(range: ByteRange) -> FunctionMemoryFactDto {
+    fn emit(range: ByteRange) -> FunctionMemoryWriteDto {
         let ByteRange {
             start,
             size,
@@ -220,14 +220,14 @@ impl FinalByteMap {
             uniform_known,
             seqs,
         } = range;
-        FunctionMemoryFactDto {
+        FunctionMemoryWriteDto {
             address: format!("0x{start:x}"),
             size,
             // 范围内字节全部已知才产出 bytes；含未知字节的范围整体 null，
             // 不用部分字节冒充完整内容。
             bytes: (uniform_known)
                 .then(|| bytes.iter().map(|byte| format!("{byte:02x}")).collect()),
-            seqs,
+            write_seqs: seqs,
         }
     }
 }
@@ -246,8 +246,8 @@ pub(super) fn collect_memory_facts(
     stack_slots: &HashSet<(u64, u32)>,
     return_producer: Option<u32>,
 ) -> (
-    Vec<FunctionMemoryFactDto>,
-    Vec<FunctionMemoryFactDto>,
+    Vec<FunctionMemoryReadDto>,
+    Vec<FunctionMemoryWriteDto>,
     Vec<FunctionFactUnresolvedDto>,
 ) {
     let mut blocked: Vec<(u64, u32)> = Vec::new();
@@ -327,7 +327,7 @@ pub(super) fn collect_memory_facts(
         }
         slot.1.push(insn.seq);
     }
-    let memory_reads = reads
+    let memory_reads: Vec<FunctionMemoryReadDto> = reads
         .into_iter()
         .filter(|((address, size), (_, seqs))| {
             !stack_slots.contains(&(*address, *size))
@@ -336,12 +336,37 @@ pub(super) fn collect_memory_facts(
                     None => true,
                 })
         })
-        .map(|((address, size), (value, seqs))| FunctionMemoryFactDto {
+        .map(|((address, size), (value, seqs))| FunctionMemoryReadDto {
             address: format!("0x{address:x}"),
             size,
             bytes: value.map(|value| little_endian_hex(value, size)),
-            seqs,
+            read_seqs: seqs,
         })
         .collect();
-    (memory_reads, final_bytes.materialize(), unresolved)
+
+    let memory_writes = final_bytes.materialize();
+
+    // 冻结合同要求：任何 bytes = null 的读写记录都必须有对应的 unresolved 证据
+    for read in &memory_reads {
+        if read.bytes.is_none() {
+            unresolved.push(FunctionFactUnresolvedDto {
+                kind: "missing_memory_definition".to_string(),
+                seqs: read.read_seqs.clone(),
+                location: Some(read.address.clone()),
+                detail: format!("内存读取 {} 字节值未完全确定", read.address),
+            });
+        }
+    }
+    for write in &memory_writes {
+        if write.bytes.is_none() {
+            unresolved.push(FunctionFactUnresolvedDto {
+                kind: "missing_memory_definition".to_string(),
+                seqs: write.write_seqs.clone(),
+                location: Some(write.address.clone()),
+                detail: format!("内存写入 {} 字节值未完全确定", write.address),
+            });
+        }
+    }
+
+    (memory_reads, memory_writes, unresolved)
 }

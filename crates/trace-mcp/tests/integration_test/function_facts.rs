@@ -344,7 +344,7 @@ fn external_reads_and_final_writes_follow_the_producer_rules() {
                 read.address.as_str(),
                 read.size,
                 read.bytes.clone(),
-                read.seqs.clone(),
+                read.read_seqs.clone(),
             )
         })
         .collect::<Vec<_>>();
@@ -368,7 +368,7 @@ fn external_reads_and_final_writes_follow_the_producer_rules() {
                 write.address.as_str(),
                 write.size,
                 write.bytes.clone(),
-                write.seqs.clone(),
+                write.write_seqs.clone(),
             )
         })
         .collect::<Vec<_>>();
@@ -766,7 +766,7 @@ fn successful_exclusive_stores_write_the_data_register_width() {
                 write.address.as_str(),
                 write.size,
                 write.bytes.clone(),
-                write.seqs.clone()
+                write.write_seqs.clone()
             ))
             .collect::<Vec<_>>(),
         vec![("0x6000", 8, Some("edfe000000000000".to_string()), vec![1])],
@@ -858,7 +858,7 @@ fn partially_overwritten_writes_split_into_final_byte_ranges() {
                 write.address.as_str(),
                 write.size,
                 write.bytes.clone(),
-                write.seqs.clone()
+                write.write_seqs.clone()
             ))
             .collect::<Vec<_>>(),
         vec![(

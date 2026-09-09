@@ -276,4 +276,25 @@ fn helper_runs_on_real_gumtrace_sample() {
     assert!(body.contains("\"trace_anchors\""));
     assert!(body.contains("\"abi\""));
     assert!(body.contains("\"executed_block_sequence\""));
+
+    let json_val: serde_json::Value = serde_json::from_str(&body).expect("parse JSON");
+    let writes = json_val["memory_writes"]
+        .as_array()
+        .expect("memory_writes array");
+    assert!(!writes.is_empty(), "real sample should have memory writes");
+    for w in writes {
+        assert!(
+            w.get("write_seqs").is_some(),
+            "write must have write_seqs: {w}"
+        );
+        assert!(w.get("seqs").is_none(), "write must NOT have seqs: {w}");
+        if w["bytes"].is_null() {
+            let addr = w["address"].as_str().unwrap();
+            let unres = json_val["unresolved"].as_array().expect("unresolved array");
+            assert!(
+                unres.iter().any(|u| u["location"] == addr && u["kind"] == "missing_memory_definition"),
+                "bytes=null write must have matching missing_memory_definition unresolved for {addr}"
+            );
+        }
+    }
 }

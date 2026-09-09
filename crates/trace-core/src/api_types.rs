@@ -263,10 +263,10 @@ pub struct FunctionFactBundleDto {
     pub trace_anchors: FunctionTraceAnchorsDto,
     pub abi: FunctionAbiDto,
     pub executed_block_sequence: Vec<ExecutedBlockEntryDto>,
-    pub memory_reads: Vec<FunctionMemoryFactDto>,
-    pub global_reads: Vec<FunctionGlobalFactDto>,
-    pub memory_writes: Vec<FunctionMemoryFactDto>,
-    pub global_writes: Vec<FunctionGlobalFactDto>,
+    pub memory_reads: Vec<FunctionMemoryReadDto>,
+    pub global_reads: Vec<FunctionGlobalReadDto>,
+    pub memory_writes: Vec<FunctionMemoryWriteDto>,
+    pub global_writes: Vec<FunctionGlobalWriteDto>,
     pub external_call_events: Vec<FunctionExternalCallEventDto>,
     pub unresolved: Vec<FunctionFactUnresolvedDto>,
 }
@@ -307,20 +307,36 @@ pub struct ExecutedBlockEntryDto {
     pub entry_seq: u32,
 }
 
-#[derive(Serialize, Debug)]
-pub struct FunctionMemoryFactDto {
+#[derive(Serialize, Debug, Clone, PartialEq, Eq)]
+pub struct FunctionMemoryReadDto {
     pub address: String,
     pub size: u32,
     pub bytes: Option<String>,
-    pub seqs: Vec<u32>,
+    pub read_seqs: Vec<u32>,
 }
 
-#[derive(Serialize)]
-pub struct FunctionGlobalFactDto {
+#[derive(Serialize, Debug, Clone, PartialEq, Eq)]
+pub struct FunctionMemoryWriteDto {
+    pub address: String,
+    pub size: u32,
+    pub bytes: Option<String>,
+    pub write_seqs: Vec<u32>,
+}
+
+#[derive(Serialize, Debug, Clone, PartialEq, Eq)]
+pub struct FunctionGlobalReadDto {
     pub global: String,
     pub size: u32,
     pub bytes: Option<String>,
-    pub seqs: Vec<u32>,
+    pub read_seqs: Vec<u32>,
+}
+
+#[derive(Serialize, Debug, Clone, PartialEq, Eq)]
+pub struct FunctionGlobalWriteDto {
+    pub global: String,
+    pub size: u32,
+    pub bytes: Option<String>,
+    pub write_seqs: Vec<u32>,
 }
 
 #[derive(Serialize, Debug)]
