@@ -912,3 +912,46 @@ fn pair_spill_chains_keep_upstream_reads_relevant() {
     engine.close_session(&sid).unwrap();
     std::fs::remove_file(path).expect("remove inline trace");
 }
+
+#[test]
+fn fail_closed_rejects_unresolved_activation_and_missing_stable_sites() {
+    // 任务 2.9 RED 测试：
+    // 1. 未闭合（unresolved_reason != None）的 Activation 必须拒绝并 fail-closed，不产出事实；
+    // 2. 存在畸形指令地址/无稳定 module+offset 的行，必须拒绝或返回错误，严禁输出运行时裸地址充当稳定身份。
+    let (engine, sid, path) = setup_inline_trace(&[
+        "[App] 0x1004!0x1004 bl #0x2000; sp=0x3000",
+        "[App] 0x2000!0x2000 mov x0, #0x1; sp=0x3000",
+        // 注意：没有 ret / resume，trace 直接结束，导致 activation 处于未闭合状态 (TraceEndStillActive)
+    ]);
+
+    let res = engine.get_function_facts(&sid, 0, 1);
+    assert!(
+        res.is_err(),
+        "未闭合（截断/未正常返回）的 activation 必须 fail-closed 拒绝"
+    );
+
+    engine.close_session(&sid).unwrap();
+    std::fs::remove_file(path).expect("remove inline trace");
+}
+
+#[test]
+fn fail_closed_rejects_lines_without_stable_module_offset() {
+    // 任务 2.9 RED 测试：
+    // 指令行缺少稳定 module+offset（如没有 [module] 前缀或缺少 !0x offset）
+    // 必须 fail-closed 报错，不能把运行时虚拟地址当作稳定身份伪造。
+    let (engine, sid, path) = setup_inline_trace(&[
+        "[App] 0x1004!0x1004 bl #0x2000; sp=0x3000",
+        "0x2000 mov x0, #0x1; sp=0x3000", // 缺少 [module] 和 !0x
+        "[App] 0x2004!0x2004 ret; sp=0x3000",
+        "[App] 0x1008!0x1008 mov x0, #0x2",
+    ]);
+
+    let res = engine.get_function_facts(&sid, 0, 1);
+    assert!(
+        res.is_err(),
+        "缺少稳定 module+offset 的指令行必须 fail-closed 拒绝"
+    );
+
+    engine.close_session(&sid).unwrap();
+    std::fs::remove_file(path).expect("remove inline trace");
+}
