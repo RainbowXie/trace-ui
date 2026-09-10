@@ -7,6 +7,7 @@ use crate::parallel_types::{
     UnresolvedRegUse,
 };
 use crate::scanner::{push_unique, PairSplitDeps, RegLastDef, CONTROL_DEP_BIT};
+use crate::utils::checked_mem_addr;
 
 /// Resolve a fully unresolved load using global state.
 /// Determines pass-through exactly as single-threaded scan would.
@@ -23,7 +24,12 @@ pub fn resolve_unresolved_load(
     let mut has_init_mem = false;
 
     for offset in 0..load.width as u64 {
-        if let Some(&(def_line, def_val)) = global_mem_last_def.get(&(load.addr + offset)) {
+        let Some(addr) = checked_mem_addr(load.addr, offset) else {
+            has_init_mem = true;
+            all_same_store = false;
+            continue;
+        };
+        if let Some(&(def_line, def_val)) = global_mem_last_def.get(&addr) {
             patch_edges.push((load.line, def_line));
             match first_store_raw {
                 None => {
@@ -99,14 +105,20 @@ pub fn resolve_unresolved_pair_load(
 
     // half1 mem deps (first elem_width bytes)
     for offset in 0..ew as u64 {
-        if let Some(&(raw, _)) = global_mem_last_def.get(&(pair.addr + offset)) {
+        let Some(addr) = checked_mem_addr(pair.addr, offset) else {
+            continue;
+        };
+        if let Some(&(raw, _)) = global_mem_last_def.get(&addr) {
             push_unique(&mut split.half1_deps, raw);
             patch_edges.push((pair.line, raw));
         }
     }
     // half2 mem deps (second elem_width bytes)
     for offset in ew as u64..2 * ew as u64 {
-        if let Some(&(raw, _)) = global_mem_last_def.get(&(pair.addr + offset)) {
+        let Some(addr) = checked_mem_addr(pair.addr, offset) else {
+            continue;
+        };
+        if let Some(&(raw, _)) = global_mem_last_def.get(&addr) {
             push_unique(&mut split.half2_deps, raw);
             patch_edges.push((pair.line, raw));
         }
@@ -142,7 +154,10 @@ pub fn resolve_partial_pair_load(
 
     if partial.half1_unresolved {
         for offset in 0..ew as u64 {
-            if let Some(&(raw, _)) = global_mem_last_def.get(&(partial.addr + offset)) {
+            let Some(addr) = checked_mem_addr(partial.addr, offset) else {
+                continue;
+            };
+            if let Some(&(raw, _)) = global_mem_last_def.get(&addr) {
                 push_unique(&mut split.half1_deps, raw);
                 patch_edges.push((partial.line, raw));
             }
@@ -150,7 +165,10 @@ pub fn resolve_partial_pair_load(
     }
     if partial.half2_unresolved {
         for offset in ew as u64..2 * ew as u64 {
-            if let Some(&(raw, _)) = global_mem_last_def.get(&(partial.addr + offset)) {
+            let Some(addr) = checked_mem_addr(partial.addr, offset) else {
+                continue;
+            };
+            if let Some(&(raw, _)) = global_mem_last_def.get(&addr) {
                 push_unique(&mut split.half2_deps, raw);
                 patch_edges.push((partial.line, raw));
             }

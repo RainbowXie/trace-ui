@@ -11,6 +11,7 @@ use crate::query::registers::RegCheckpoints;
 use crate::query::strings::StringRw;
 use crate::scan_unified::{Phase2State, ScanResult};
 use crate::scanner::{push_unique, MemLastDef, PairSplitDeps, RegLastDef, ScanState};
+use crate::utils::checked_mem_addr;
 use trace_parser::types::{RegId, TraceFormat};
 
 use super::{
@@ -101,9 +102,10 @@ pub fn merge_all_chunks(
 
                     if partial.half1_unresolved {
                         for offset in 0..partial.elem_width as u64 {
-                            if let Some(&(raw, _)) =
-                                global_mem_last_def.get(&(partial.addr + offset))
-                            {
+                            let Some(addr) = checked_mem_addr(partial.addr, offset) else {
+                                continue;
+                            };
+                            if let Some(&(raw, _)) = global_mem_last_def.get(&addr) {
                                 push_unique(&mut extra_half1, raw);
                                 all_patch_edges.push((partial.line, raw));
                             }
@@ -111,9 +113,10 @@ pub fn merge_all_chunks(
                     }
                     if partial.half2_unresolved {
                         for offset in partial.elem_width as u64..2 * partial.elem_width as u64 {
-                            if let Some(&(raw, _)) =
-                                global_mem_last_def.get(&(partial.addr + offset))
-                            {
+                            let Some(addr) = checked_mem_addr(partial.addr, offset) else {
+                                continue;
+                            };
+                            if let Some(&(raw, _)) = global_mem_last_def.get(&addr) {
                                 push_unique(&mut extra_half2, raw);
                                 all_patch_edges.push((partial.line, raw));
                             }
