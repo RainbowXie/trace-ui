@@ -7,6 +7,7 @@ use crate::browse::{parse_trace_line, parse_trace_line_gumtrace};
 use crate::error::{Result, TraceError};
 use crate::flat::line_index::LineIndexView;
 use crate::phase2::extract_insn_offset;
+use crate::utils::checked_mem_addr;
 use trace_parser::types::{RegId, TraceFormat};
 use trace_parser::{def_use, insn_class, parser};
 
@@ -123,7 +124,7 @@ impl crate::engine::TraceEngine {
 
         let mem_view = state.mem_accesses_view().ok_or(TraceError::IndexNotReady)?;
 
-        // 对齐到 16 字节边界
+        // 对齐到 16 字节边界。完整窗口必须可寻址，禁止截断或 overflow panic（ISSUE-H14）。
         let base = addr & !0xF;
         let len = length.max(16) as usize;
 
@@ -131,7 +132,11 @@ impl crate::engine::TraceEngine {
         let mut known = vec![false; len];
 
         for offset in 0..len {
-            let byte_addr = base + offset as u64;
+            let Some(byte_addr) = checked_mem_addr(base, offset as u64) else {
+                return Err(TraceError::InvalidArgument(format!(
+                    "memory window 0x{base:x}+{len} overflows address space"
+                )));
+            };
 
             // 检查 byte_addr-7 .. byte_addr 共 8 个可能的基地址
             let mut best_seq: Option<u32> = None;

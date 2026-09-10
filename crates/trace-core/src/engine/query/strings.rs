@@ -7,6 +7,7 @@ use crate::browse::{parse_trace_line, parse_trace_line_gumtrace};
 use crate::error::{Result, TraceError};
 use crate::phase2::extract_insn_offset;
 use crate::query::strings::{StringBuilder, StringEncoding, StringRw};
+use crate::utils::checked_mem_addr;
 use trace_parser::types::TraceFormat;
 
 impl crate::engine::TraceEngine {
@@ -90,7 +91,11 @@ impl crate::engine::TraceEngine {
         let mut seen_seqs = std::collections::HashSet::new();
 
         for offset in 0..byte_len as u64 {
-            let target = addr + offset;
+            let Some(target) = checked_mem_addr(addr, offset) else {
+                return Err(TraceError::InvalidArgument(format!(
+                    "string xref range 0x{addr:x}+{byte_len} overflows address space"
+                )));
+            };
             if let Some(records) = mem_view.query(target) {
                 for rec in records {
                     if seen_seqs.insert(rec.seq) {

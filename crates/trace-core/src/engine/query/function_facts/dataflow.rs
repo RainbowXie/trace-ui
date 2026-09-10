@@ -152,12 +152,17 @@ struct FinalByteMap {
 }
 
 impl FinalByteMap {
-    fn apply(&mut self, address: u64, size: u32, value: Option<u64>, seq: u32) {
+    fn apply(&mut self, address: u64, size: u32, value: Option<u64>, seq: u32) -> bool {
+        // 无法形成完整半开范围时整条放弃，禁止把已写下的前缀当成 known write（ISSUE-H15）。
+        if size == 0 {
+            return false;
+        }
+        if checked_mem_addr(address, u64::from(size) - 1).is_none() {
+            return false;
+        }
         let le = value.map(|value| value.to_le_bytes());
         for offset in 0..u64::from(size) {
-            let Some(byte_addr) = checked_mem_addr(address, offset) else {
-                break;
-            };
+            let byte_addr = address + offset;
             let slot = self.bytes.entry(byte_addr).or_insert((false, 0, seq));
             let (known, byte, winner) = slot;
             *winner = seq;
@@ -169,6 +174,7 @@ impl FinalByteMap {
                 None => *known = false,
             }
         }
+        true
     }
 
     fn materialize(&self) -> Vec<FunctionMemoryWriteDto> {
@@ -177,7 +183,8 @@ impl FinalByteMap {
         for (&address, &(known, byte, winner)) in &self.bytes {
             match &mut pending {
                 Some(range) => {
-                    let contiguous = address == range.start + u64::from(range.size)
+                    let contiguous = checked_mem_addr(range.start, u64::from(range.size))
+                        == Some(address)
                         && known == range.uniform_known;
                     // 未知范围按最终写入者拆段；已知范围可跨 winner 合并。
                     let same_owner = known || winner == range.last_winner;
@@ -271,9 +278,17 @@ pub(super) fn collect_memory_facts(
             match write_effect(insn, mnemonic, operand) {
                 Some(WriteEffect::None) => continue,
                 Some(WriteEffect::Applied { size, value }) => {
-                    final_bytes.apply(address, size, value, insn.seq);
-                    write_winners.push(insn.seq);
-                    blocked.push((address, size, insn.seq));
+                    if final_bytes.apply(address, size, value, insn.seq) {
+                        write_winners.push(insn.seq);
+                        blocked.push((address, size, insn.seq));
+                    } else {
+                        write_unresolved.push(FunctionFactUnresolvedDto {
+                            kind: "unsupported_instruction".to_string(),
+                            seqs: vec![insn.seq],
+                            location: Some(format!("0x{address:x}")),
+                            detail: format!("{mnemonic} 写入访存地址加宽度溢出，拒绝该写入事实"),
+                        });
+                    }
                     continue;
                 }
                 Some(WriteEffect::BlockOnly { size }) => {
@@ -378,11 +393,11 @@ pub(super) fn collect_memory_facts(
 }
 
 fn write_covers_byte(waddress: u64, wsize: u32, byte: u64) -> bool {
-    // 无法形成完整半开区间时不把剩余地址空间当成内部生产（ISSUE-H14）。
-    let Some(wend) = checked_mem_addr(waddress, u64::from(wsize)) else {
+    // 用偏移而不是排他终点：完整写到 u64::MAX 时 MAX+1 溢出，不能因此把已写下的字节当成外部。
+    if byte < waddress {
         return false;
-    };
-    waddress <= byte && byte < wend
+    }
+    byte - waddress < u64::from(wsize)
 }
 
 /// ISSUE-H12：按字节判断该读取前是否已有本调用写入。只输出外部来源连续子范围；

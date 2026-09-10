@@ -200,3 +200,54 @@ fn partial_write_before_read_keeps_only_external_bytes() {
     engine.close_session(&sid).unwrap();
     std::fs::remove_file(path).expect("remove inline trace");
 }
+
+#[test]
+fn overflowing_store_does_not_emit_truncated_known_write() {
+    // ISSUE-H15：顶端地址 8 字节 str 无法形成完整半开范围，不得 emit size<8 的 known write，
+    // 也不得把该写字节标成外部 MemoryRead。
+    let (engine, sid, path) = setup_inline_trace(&[
+        "[App] 0x1004!0x1004 bl #0x2000; sp=0x3000",
+        "[App] 0x2000!0x2000 str x1, [x8]; x1=0x22 x8=0xffffffffffffffff mem_w=0xffffffffffffffff",
+        "[App] 0x2004!0x2004 ldr x0, [x8]; x8=0xffffffffffffffff mem_r=0xffffffffffffffff -> x0=0x22",
+        "[App] 0x2008!0x2008 ret",
+        "[App] 0x1008!0x1008 mov x0, #0x1",
+    ]);
+
+    let bundle = engine
+        .get_function_facts(&sid, 0, 1)
+        .expect("function facts");
+    assert!(
+        !bundle.memory_writes.iter().any(|write| {
+            write.address == "0xffffffffffffffff" && write.size < 8 && write.bytes.is_some()
+        }),
+        "不得出现 size<8 的 known write：{:?}",
+        bundle.memory_writes
+    );
+    assert!(
+        bundle
+            .memory_writes
+            .iter()
+            .all(|write| { write.address != "0xffffffffffffffff" || write.bytes.is_none() }),
+        "溢出 store 不得留下截断 known bytes：{:?}",
+        bundle.memory_writes
+    );
+    assert!(
+        bundle
+            .memory_reads
+            .iter()
+            .all(|read| read.address != "0xffffffffffffffff"),
+        "溢出写入字节不得标成外部 MemoryRead：{:?}",
+        bundle.memory_reads
+    );
+    assert!(
+        bundle
+            .unresolved
+            .iter()
+            .any(|item| item.seqs.contains(&1) || item.seqs.contains(&2)),
+        "溢出访存必须 unresolved：{:?}",
+        bundle.unresolved
+    );
+
+    engine.close_session(&sid).unwrap();
+    std::fs::remove_file(path).expect("remove inline trace");
+}

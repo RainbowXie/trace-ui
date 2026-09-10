@@ -1,8 +1,11 @@
 //! ISSUE-H14：访存地址加宽度必须 checked，越界不得 panic。
 
+use std::sync::atomic::{AtomicU32, Ordering};
+
 use trace_core::chunk_scan::{scan_chunk, ScanChunkConfig};
 use trace_core::merge::merge_all_chunks;
 use trace_core::scan_unified::scan_unified;
+use trace_core::{BuildOptions, TraceEngine};
 use trace_parser::types::TraceFormat;
 
 #[test]
@@ -125,5 +128,83 @@ fn two_chunk_merge_pair_top_address_does_not_panic() {
                 .map(|e| e.to_string())
                 .unwrap_or_default()
         );
+    }
+}
+
+fn setup_query_session(skip_strings: bool) -> (TraceEngine, String, std::path::PathBuf) {
+    static SEQ: AtomicU32 = AtomicU32::new(0);
+    let n = SEQ.fetch_add(1, Ordering::Relaxed);
+    let path = std::env::temp_dir().join(format!(
+        "trace-ui-h14-query-{}-{}.log",
+        std::process::id(),
+        n
+    ));
+    std::fs::write(
+        &path,
+        "[App] 0x1000!0x1000 mov x0, #0x1; x0=0x0 -> x0=0x1\n",
+    )
+    .expect("write query fixture");
+    let _guard = trace_core::cache::cache_dir_override_test_lock();
+    let dir = std::env::temp_dir().join(format!(
+        "trace-ui-h14-query-cache-{}-{}",
+        std::process::id(),
+        n
+    ));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).expect("create cache dir");
+    trace_core::cache::set_cache_dir_override(Some(dir));
+    let engine = TraceEngine::new();
+    let sid = engine
+        .create_session(path.to_str().expect("utf8"))
+        .expect("session")
+        .session_id;
+    engine
+        .build_index(
+            &sid,
+            BuildOptions {
+                force_rebuild: true,
+                skip_strings,
+            },
+            None,
+        )
+        .expect("build_index");
+    (engine, sid, path)
+}
+
+#[test]
+fn query_apis_top_address_return_error_not_panic() {
+    // ISSUE-H14：生产查询面必须 checked；完整窗口无法形成时返回 TraceError。
+    for skip_strings in [true, false] {
+        let (engine, sid, path) = setup_query_session(skip_strings);
+        for length in [16u32, 256] {
+            let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                engine.get_memory_at(&sid, u64::MAX, 0, length)
+            }));
+            let inner = result.unwrap_or_else(|_| {
+                panic!(
+                    "get_memory_at length={length} skip_strings={skip_strings} 不得 overflow panic"
+                )
+            });
+            if length == 16 {
+                assert!(inner.is_ok(), "对齐后 16 字节窗口落在可寻址末端，应成功");
+            } else {
+                assert!(
+                    inner.is_err(),
+                    "get_memory_at(u64::MAX, {length}) 越过地址空间必须 TraceError"
+                );
+            }
+        }
+        let xref = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            engine.get_string_xrefs(&sid, u64::MAX, 16)
+        }));
+        let xref = xref.unwrap_or_else(|_| {
+            panic!("get_string_xrefs skip_strings={skip_strings} 不得 overflow panic")
+        });
+        assert!(
+            xref.is_err(),
+            "get_string_xrefs(u64::MAX, 16) 无法形成完整范围"
+        );
+        engine.close_session(&sid).ok();
+        let _ = std::fs::remove_file(path);
     }
 }
