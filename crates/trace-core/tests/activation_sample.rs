@@ -1,8 +1,9 @@
 //! Confirmed Activation 真实样本验证（生产路径 scan_unified / scan_unified_parallel）。
 //!
-//! 默认 ignore：样本是本机 445MB 大文件，CI/其他环境不存在。本地验证：
-//! `cargo test -p trace-core --test activation_sample -- --ignored`
-//! （需设置 TRACE_UI_SAMPLE_TRACE 指向 gumtrace 格式 trace）。
+//! 当前权威样本：`/mnt/data/Work/Frida/frida-agent-example-17/project/snapchat_ios/logs/scan_probe/Snapchat_scan_full.log`
+//! （1,209,882,558 bytes / 12,905,567 行，SHA-256 `333fe7dc2576c8333d7a5a50cf03c6503fc3525d6b1537a1f74e301de287adb8`）。
+//! 默认 ignore：样本是本机 GB 级大文件，CI/其他环境不存在。本地验证：
+//! `TRACE_UI_SAMPLE_TRACE=<上述路径> cargo test -p trace-core --test activation_sample -- --ignored`。
 
 use std::io::Read;
 
@@ -13,7 +14,7 @@ fn sample_path() -> Option<String> {
     std::env::var("TRACE_UI_SAMPLE_TRACE").ok()
 }
 
-/// 截取样本前 `lines` 行（避免 445MB 全量进测试）。
+/// 截取样本前 `lines` 行（避免 GB 级全量进测试）。
 fn sample_head(path: &str, lines: usize) -> Vec<u8> {
     let mut file = std::fs::File::open(path).expect("sample trace must exist");
     let mut buf = Vec::new();
@@ -40,10 +41,10 @@ fn sample_head(path: &str, lines: usize) -> Vec<u8> {
 
 /// 生产路径（单线程 scan_unified）上的 Confirmed Activation 统计。
 ///
-/// det1_trace.log 前 500000 行实测：114 BL + 1072 BLR = 1186 个调用；
-/// 确认 activation 699，bypassed（无函数体）477，截断 10。
-/// 699 + 477 + 10 = 1186 全部有归属，无静默丢失。
-/// 旧模型把这 477 个无函数体调用伪造成 ConfirmedActivation。
+/// Snapchat_scan_full.log 前 500000 行实测：789 个调用（BL/BLR 合计）；
+/// 确认 activation 720，bypassed（无函数体）68，trace 结尾仍在执行 1。
+/// 720 + 68 + 1 = 789 全部有归属，无静默丢失。
+/// 旧模型会把无函数体调用伪造成 ConfirmedActivation。
 #[test]
 #[ignore = "需要本机样本：设置 TRACE_UI_SAMPLE_TRACE 指向真实 gumtrace trace"]
 fn confirmed_activation_on_real_sample_scan_unified() {
