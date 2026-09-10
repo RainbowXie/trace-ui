@@ -23,6 +23,7 @@ use crate::scanner::{
     mem_access_width, push_unique, CompactDeps, MemLastDef, PairSplitDeps, RegLastDef,
     CONTROL_DEP_BIT, PAIR_HALF2_BIT, PAIR_SHARED_BIT,
 };
+use crate::utils::checked_mem_addr;
 use trace_parser::gumtrace as gumtrace_parser;
 use trace_parser::insn_class::{self, InsnClass};
 use trace_parser::parser;
@@ -305,7 +306,9 @@ pub fn scan_chunk(data: &[u8], config: ScanChunkConfig) -> ChunkResult {
             let mut has_init_mem = false;
 
             for offset in 0..width as u64 {
-                if let Some((def_line, def_val)) = mem_last_def.get(&(mem.abs + offset)) {
+                if let Some((def_line, def_val)) =
+                    checked_mem_addr(mem.abs, offset).and_then(|addr| mem_last_def.get(&addr))
+                {
                     fully_unresolved = false;
                     deps.push_unique(def_line);
                     match first_store_raw {
@@ -322,7 +325,9 @@ pub fn scan_chunk(data: &[u8], config: ScanChunkConfig) -> ChunkResult {
                     any_byte_unresolved = true;
                     has_init_mem = true;
                     all_same_store = false;
-                    missing_addrs.push(mem.abs + offset);
+                    if let Some(addr) = checked_mem_addr(mem.abs, offset) {
+                        missing_addrs.push(addr);
+                    }
                 }
             }
 
@@ -395,7 +400,9 @@ pub fn scan_chunk(data: &[u8], config: ScanChunkConfig) -> ChunkResult {
                 let width = mem_access_width(class, mem.elem_width, &line);
                 let mut has_init_mem = false;
                 for offset in 0..width as u64 {
-                    if let Some((def_line, _)) = mem_last_def.get(&(mem.abs + offset)) {
+                    if let Some((def_line, _)) =
+                        checked_mem_addr(mem.abs, offset).and_then(|addr| mem_last_def.get(&addr))
+                    {
                         if !is_pair {
                             deps.push_unique(def_line);
                         }
@@ -433,14 +440,18 @@ pub fn scan_chunk(data: &[u8], config: ScanChunkConfig) -> ChunkResult {
 
                         // half1 mem deps (first elem_width bytes)
                         for offset in 0..ew as u64 {
-                            if let Some((raw, _)) = mem_last_def.get(&(mem.abs + offset)) {
+                            if let Some((raw, _)) = checked_mem_addr(mem.abs, offset)
+                                .and_then(|addr| mem_last_def.get(&addr))
+                            {
                                 half1_unresolved = false;
                                 push_unique(&mut half1_deps_local, raw);
                             }
                         }
                         // half2 mem deps (second elem_width bytes)
                         for offset in ew as u64..2 * ew as u64 {
-                            if let Some((raw, _)) = mem_last_def.get(&(mem.abs + offset)) {
+                            if let Some((raw, _)) = checked_mem_addr(mem.abs, offset)
+                                .and_then(|addr| mem_last_def.get(&addr))
+                            {
                                 half2_unresolved = false;
                                 push_unique(&mut half2_deps_local, raw);
                             }
@@ -600,15 +611,21 @@ pub fn scan_chunk(data: &[u8], config: ScanChunkConfig) -> ChunkResult {
                 if class == InsnClass::StorePair {
                     let ew = mem.elem_width;
                     for offset in 0..ew as u64 {
-                        mem_last_def.insert(mem.abs + offset, (i, masked_val));
+                        if let Some(addr) = checked_mem_addr(mem.abs, offset) {
+                            mem_last_def.insert(addr, (i, masked_val));
+                        }
                     }
                     for offset in ew as u64..2 * ew as u64 {
-                        mem_last_def.insert(mem.abs + offset, (i | PAIR_HALF2_BIT, 0));
+                        if let Some(addr) = checked_mem_addr(mem.abs, offset) {
+                            mem_last_def.insert(addr, (i | PAIR_HALF2_BIT, 0));
+                        }
                     }
                 } else {
                     let width = mem_access_width(class, mem.elem_width, &line);
                     for offset in 0..width as u64 {
-                        mem_last_def.insert(mem.abs + offset, (i, masked_val));
+                        if let Some(addr) = checked_mem_addr(mem.abs, offset) {
+                            mem_last_def.insert(addr, (i, masked_val));
+                        }
                     }
                 }
             }

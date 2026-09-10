@@ -15,6 +15,12 @@ pub fn ascii_contains(haystack: &[u8], needle: &[u8]) -> bool {
     })
 }
 
+/// 访存地址加偏移：溢出时返回 None，调用方必须拒绝该字节事实而不是 panic（ISSUE-H14）。
+#[inline]
+pub fn checked_mem_addr(base: u64, offset: u64) -> Option<u64> {
+    base.checked_add(offset)
+}
+
 /// Parse a hex address string (with or without 0x/0X prefix) to u64.
 pub fn parse_hex_addr(s: &str) -> Result<u64, String> {
     let hex = s

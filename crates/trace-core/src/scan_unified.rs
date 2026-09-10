@@ -12,6 +12,7 @@ use crate::scanner::{
     self as scanner, mem_access_width, push_unique, PairSplitDeps, RegLastDef, ScanState,
     PAIR_HALF2_BIT, PAIR_SHARED_BIT,
 };
+use crate::utils::checked_mem_addr;
 use trace_parser::{
     def_use, gumtrace as gumtrace_parser, insn_class,
     insn_class::InsnClass,
@@ -317,7 +318,12 @@ pub fn scan_unified(
             let mut store_val: Option<u64> = None;
 
             for offset in 0..width as u64 {
-                if let Some((def_line, def_val)) = state.mem_last_def.get(&(mem.abs + offset)) {
+                let Some(addr) = checked_mem_addr(mem.abs, offset) else {
+                    has_init_mem = true;
+                    all_same_store = false;
+                    continue;
+                };
+                if let Some((def_line, def_val)) = state.mem_last_def.get(&addr) {
                     state.deps.push_unique(def_line);
                     match first_store_raw {
                         None => {
@@ -366,7 +372,11 @@ pub fn scan_unified(
                 let width = mem_access_width(class, mem.elem_width, &line);
                 let mut has_init_mem = false;
                 for offset in 0..width as u64 {
-                    if let Some((def_line, _)) = state.mem_last_def.get(&(mem.abs + offset)) {
+                    let Some(addr) = checked_mem_addr(mem.abs, offset) else {
+                        has_init_mem = true;
+                        continue;
+                    };
+                    if let Some((def_line, _)) = state.mem_last_def.get(&addr) {
                         if !is_pair {
                             state.deps.push_unique(def_line);
                         }
@@ -397,13 +407,19 @@ pub fn scan_unified(
                     InsnClass::LoadPair => {
                         // half1 mem deps (first elem_width bytes)
                         for offset in 0..ew as u64 {
-                            if let Some((raw, _)) = state.mem_last_def.get(&(mem.abs + offset)) {
+                            let Some(addr) = checked_mem_addr(mem.abs, offset) else {
+                                continue;
+                            };
+                            if let Some((raw, _)) = state.mem_last_def.get(&addr) {
                                 push_unique(&mut split.half1_deps, raw);
                             }
                         }
                         // half2 mem deps (second elem_width bytes)
                         for offset in ew as u64..2 * ew as u64 {
-                            if let Some((raw, _)) = state.mem_last_def.get(&(mem.abs + offset)) {
+                            let Some(addr) = checked_mem_addr(mem.abs, offset) else {
+                                continue;
+                            };
+                            if let Some((raw, _)) = state.mem_last_def.get(&addr) {
                                 push_unique(&mut split.half2_deps, raw);
                             }
                         }
@@ -486,17 +502,24 @@ pub fn scan_unified(
                     // StorePair: tag second half bytes with PAIR_HALF2_BIT
                     let ew = mem.elem_width;
                     for offset in 0..ew as u64 {
-                        state.mem_last_def.insert(mem.abs + offset, (i, masked_val));
+                        let Some(addr) = checked_mem_addr(mem.abs, offset) else {
+                            continue;
+                        };
+                        state.mem_last_def.insert(addr, (i, masked_val));
                     }
                     for offset in ew as u64..2 * ew as u64 {
-                        state
-                            .mem_last_def
-                            .insert(mem.abs + offset, (i | PAIR_HALF2_BIT, 0));
+                        let Some(addr) = checked_mem_addr(mem.abs, offset) else {
+                            continue;
+                        };
+                        state.mem_last_def.insert(addr, (i | PAIR_HALF2_BIT, 0));
                     }
                 } else {
                     let width = mem_access_width(class, mem.elem_width, &line);
                     for offset in 0..width as u64 {
-                        state.mem_last_def.insert(mem.abs + offset, (i, masked_val));
+                        let Some(addr) = checked_mem_addr(mem.abs, offset) else {
+                            continue;
+                        };
+                        state.mem_last_def.insert(addr, (i, masked_val));
                     }
                 }
             }

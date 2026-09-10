@@ -179,10 +179,3 @@ pub(super) fn exclusive_store_outcome(
     })
     .or(Some(ExclusiveStoreOutcome::Unknown))
 }
-
-/// u64 → 按地址递增（小端）的 lowercase hex 字节串。
-pub(super) fn little_endian_hex(value: u64, size: u32) -> String {
-    let bytes = value.to_le_bytes();
-    let used = &bytes[..size as usize];
-    used.iter().map(|byte| format!("{byte:02x}")).collect()
-}

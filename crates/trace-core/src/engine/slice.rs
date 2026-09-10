@@ -144,7 +144,9 @@ fn resolve_mem_store(
                     if let Some(ref mem) = parsed.mem_op {
                         if mem.is_write {
                             let width = mem.elem_width as u64;
-                            if (0..width).any(|off| mem.abs + off == target_addr) {
+                            if (0..width).any(|off| {
+                                crate::utils::checked_mem_addr(mem.abs, off) == Some(target_addr)
+                            }) {
                                 return Ok(s);
                             }
                         }

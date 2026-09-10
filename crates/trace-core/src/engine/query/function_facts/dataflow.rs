@@ -8,9 +8,10 @@ use crate::api_types::{FunctionFactUnresolvedDto, FunctionMemoryReadDto, Functio
 use super::blocks::OwnedInsn;
 use super::lines::{
     access_width, arrow_register_value, exclusive_store_outcome, is_pair_access,
-    line_mem_annotation, little_endian_hex, prestate_register_value, ExclusiveStoreOutcome,
+    line_mem_annotation, prestate_register_value, ExclusiveStoreOutcome,
 };
 use crate::scanner::LINE_MASK;
+use crate::utils::checked_mem_addr;
 
 /// 宽度未知写入的保守阻断半径：SIMD 多寄存器 store（st4 {v0-v3}）是
 /// arm64 最大单条访存（64 字节）。这是 ISA 机械事实而非对合法数据的
@@ -154,10 +155,10 @@ impl FinalByteMap {
     fn apply(&mut self, address: u64, size: u32, value: Option<u64>, seq: u32) {
         let le = value.map(|value| value.to_le_bytes());
         for offset in 0..u64::from(size) {
-            let slot = self
-                .bytes
-                .entry(address + offset)
-                .or_insert((false, 0, seq));
+            let Some(byte_addr) = checked_mem_addr(address, offset) else {
+                break;
+            };
+            let slot = self.bytes.entry(byte_addr).or_insert((false, 0, seq));
             let (known, byte, winner) = slot;
             *winner = seq;
             match &le {
@@ -300,7 +301,7 @@ pub(super) fn collect_memory_facts(
         None => true,
     };
 
-    let mut reads: BTreeMap<(u64, u32, u32), Option<u64>> = BTreeMap::new();
+    let mut observations: Vec<FunctionMemoryReadDto> = Vec::new();
     let mut unresolved: Vec<FunctionFactUnresolvedDto> = Vec::new();
     for insn in owned {
         let Some((mnemonic, operand)) = insn.mnemonic.as_deref().zip(insn.first_operand.as_deref())
@@ -325,19 +326,10 @@ pub(super) fn collect_memory_facts(
                 continue;
             }
         };
-        // ISSUE-H10：只有 write_seq < read_seq 且覆盖该读取每一个字节的写，才是内部生产。
-        // 未来写不得吞掉进入函数前的外部输入；部分重叠保守保留整条 read。
-        let internally_produced = (0..u64::from(size)).all(|offset| {
-            let byte = address + offset;
-            blocked.iter().any(|(waddress, wsize, wseq)| {
-                *wseq < insn.seq && *waddress <= byte && byte < *waddress + u64::from(*wsize)
-            })
-        });
-        if internally_produced {
+        if !is_relevant(insn.seq) {
             continue;
         }
-        // ISSUE-H8：先按相关性过滤，再按观察聚合。
-        if !is_relevant(insn.seq) {
+        if stack_slots.contains(&(address, size)) {
             continue;
         }
         let register = operand.split(',').next().unwrap_or("").trim();
@@ -346,21 +338,16 @@ pub(super) fn collect_memory_facts(
         } else {
             arrow_register_value(&insn.line, register)
         };
-        if stack_slots.contains(&(address, size)) {
-            continue;
-        }
-        // ISSUE-H11：每个相关读取时点单独成记录，不得把不同动态值压进同一 read_seqs。
-        reads.entry((address, size, insn.seq)).or_insert(value);
-    }
-    let memory_reads: Vec<FunctionMemoryReadDto> = reads
-        .into_iter()
-        .map(|((address, size, seq), value)| FunctionMemoryReadDto {
-            address: format!("0x{address:x}"),
+        observations.extend(external_read_ranges(
+            address,
             size,
-            bytes: value.map(|value| little_endian_hex(value, size)),
-            read_seqs: vec![seq],
-        })
-        .collect();
+            insn.seq,
+            value,
+            &blocked,
+            &mut unresolved,
+        ));
+    }
+    let memory_reads = normalize_memory_reads(observations);
 
     let memory_writes = final_bytes.materialize();
 
@@ -388,4 +375,117 @@ pub(super) fn collect_memory_facts(
 
     unresolved.extend(write_unresolved);
     (memory_reads, memory_writes, unresolved)
+}
+
+fn write_covers_byte(waddress: u64, wsize: u32, byte: u64) -> bool {
+    let Some(wend) = checked_mem_addr(waddress, u64::from(wsize)) else {
+        return byte >= waddress;
+    };
+    waddress <= byte && byte < wend
+}
+
+/// ISSUE-H12：按字节判断该读取前是否已有本调用写入。只输出外部来源连续子范围；
+/// 无法安全重建外部字节时 bytes 置 null 并留下 unresolved，不得把内部字节标成入口输入。
+fn external_read_ranges(
+    address: u64,
+    size: u32,
+    seq: u32,
+    value: Option<u64>,
+    blocked: &[(u64, u32, u32)],
+    unresolved: &mut Vec<FunctionFactUnresolvedDto>,
+) -> Vec<FunctionMemoryReadDto> {
+    let le = value.map(|value| value.to_le_bytes());
+    let mut external: Vec<(u64, Option<u8>)> = Vec::new();
+    let mut overflow = false;
+    for offset in 0..u64::from(size) {
+        let Some(byte) = checked_mem_addr(address, offset) else {
+            overflow = true;
+            break;
+        };
+        let internal = blocked.iter().any(|(waddress, wsize, wseq)| {
+            *wseq < seq && write_covers_byte(*waddress, *wsize, byte)
+        });
+        if internal {
+            continue;
+        }
+        let known = le.as_ref().map(|bytes| bytes[offset as usize]);
+        external.push((byte, known));
+    }
+    if overflow {
+        unresolved.push(FunctionFactUnresolvedDto {
+            kind: "unsupported_instruction".to_string(),
+            seqs: vec![seq],
+            location: Some(format!("0x{address:x}")),
+            detail: "访存地址加宽度溢出，拒绝该读取事实".to_string(),
+        });
+        return Vec::new();
+    }
+    if external.is_empty() {
+        return Vec::new();
+    }
+    let mut ranges = Vec::new();
+    let mut start = external[0].0;
+    let mut bytes: Vec<Option<u8>> = vec![external[0].1];
+    for window in external.windows(2) {
+        let (prev, next) = (window[0].0, window[1].0);
+        if checked_mem_addr(prev, 1) == Some(next) {
+            bytes.push(window[1].1);
+            continue;
+        }
+        ranges.push(emit_external_read(start, &bytes, seq));
+        start = next;
+        bytes = vec![window[1].1];
+    }
+    ranges.push(emit_external_read(start, &bytes, seq));
+    ranges
+}
+
+fn emit_external_read(start: u64, bytes: &[Option<u8>], seq: u32) -> FunctionMemoryReadDto {
+    let all_known = bytes.iter().all(Option::is_some);
+    FunctionMemoryReadDto {
+        address: format!("0x{start:x}"),
+        size: bytes.len() as u32,
+        bytes: all_known.then(|| {
+            bytes
+                .iter()
+                .map(|byte| format!("{:02x}", byte.expect("known")))
+                .collect()
+        }),
+        read_seqs: vec![seq],
+    }
+}
+
+/// ISSUE-H13：相同 address/size/bytes 合并 read_seqs；不同动态值压成一条 bytes=null，
+/// 并保留不可被单时点 capture 整体补齐的 unresolved。
+fn normalize_memory_reads(observations: Vec<FunctionMemoryReadDto>) -> Vec<FunctionMemoryReadDto> {
+    let mut by_range: BTreeMap<(u64, u32), Vec<FunctionMemoryReadDto>> = BTreeMap::new();
+    for read in observations {
+        let Ok(addr) = crate::parse_hex_addr(&read.address) else {
+            continue;
+        };
+        by_range.entry((addr, read.size)).or_default().push(read);
+    }
+    let mut out = Vec::new();
+    for ((addr, size), mut group) in by_range {
+        group.sort_by_key(|read| read.read_seqs.first().copied().unwrap_or(0));
+        let same_bytes = group.windows(2).all(|pair| pair[0].bytes == pair[1].bytes);
+        let mut seqs: Vec<u32> = group
+            .iter()
+            .flat_map(|read| read.read_seqs.iter().copied())
+            .collect();
+        seqs.sort_unstable();
+        seqs.dedup();
+        let bytes = if same_bytes {
+            group.first().and_then(|read| read.bytes.clone())
+        } else {
+            None
+        };
+        out.push(FunctionMemoryReadDto {
+            address: format!("0x{addr:x}"),
+            size,
+            bytes,
+            read_seqs: seqs,
+        });
+    }
+    out
 }
