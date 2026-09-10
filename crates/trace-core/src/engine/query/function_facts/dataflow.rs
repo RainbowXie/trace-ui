@@ -282,6 +282,8 @@ pub(super) fn collect_memory_facts(
                         write_winners.push(insn.seq);
                         blocked.push((address, size, insn.seq));
                     } else {
+                        // 无法 emit known write，但仍按声明宽度挡住后续短读（ISSUE-H16）。
+                        blocked.push((address, size, insn.seq));
                         write_unresolved.push(FunctionFactUnresolvedDto {
                             kind: "unsupported_instruction".to_string(),
                             seqs: vec![insn.seq],

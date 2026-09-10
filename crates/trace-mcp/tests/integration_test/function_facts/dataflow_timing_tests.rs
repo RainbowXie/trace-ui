@@ -251,3 +251,43 @@ fn overflowing_store_does_not_emit_truncated_known_write() {
     engine.close_session(&sid).unwrap();
     std::fs::remove_file(path).expect("remove inline trace");
 }
+
+#[test]
+fn overflowing_store_still_blocks_later_short_read() {
+    // ISSUE-H16：溢出 Applied store 不得 emit known write，但仍须挡住后续可寻址短读。
+    // 该字节由本调用写出，不得作为入口 MemoryRead。
+    let (engine, sid, path) = setup_inline_trace(&[
+        "[App] 0x1004!0x1004 bl #0x2000; sp=0x3000",
+        "[App] 0x2000!0x2000 str x1, [x8]; x1=0x22 x8=0xffffffffffffffff mem_w=0xffffffffffffffff",
+        "[App] 0x2004!0x2004 ldrb w0, [x8]; x8=0xffffffffffffffff mem_r=0xffffffffffffffff -> x0=0x22",
+        "[App] 0x2008!0x2008 ret",
+        "[App] 0x1008!0x1008 mov x0, #0x1",
+    ]);
+
+    let bundle = engine
+        .get_function_facts(&sid, 0, 1)
+        .expect("function facts");
+    assert!(
+        bundle
+            .memory_reads
+            .iter()
+            .all(|read| read.address != "0xffffffffffffffff"),
+        "溢出写入的短读必须视为内部生产，不得进入 memory_reads：{:?}",
+        bundle.memory_reads
+    );
+    assert!(
+        bundle.unresolved.iter().any(|item| item.seqs.contains(&1)),
+        "seq 1 溢出 store 必须 unresolved：{:?}",
+        bundle.unresolved
+    );
+    assert!(
+        !bundle.memory_writes.iter().any(|write| {
+            write.address == "0xffffffffffffffff" && write.size < 8 && write.bytes.is_some()
+        }),
+        "仍不得出现截断 known write：{:?}",
+        bundle.memory_writes
+    );
+
+    engine.close_session(&sid).unwrap();
+    std::fs::remove_file(path).expect("remove inline trace");
+}
