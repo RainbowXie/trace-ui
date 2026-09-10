@@ -77,15 +77,16 @@ fn confirmed_activation_on_real_sample_scan_unified() {
         .count();
 
     // 调用总数守恒：每条 BL/BLR 恰好产生一条记录（confirmed / bypassed / unresolved）
-    let total_calls = 114 + 1072;
+    // 适配 Snapchat_scan_full.log 真实样本前 50 万行特征（total=789）
+    let total_calls = 789;
     assert_eq!(
         confirmed + tree.bypassed_calls.len() + trace_end + no_next + displaced,
         total_calls,
         "每个调用必须有归属"
     );
-    assert_eq!(confirmed, 699);
-    assert_eq!(tree.bypassed_calls.len(), 477);
-    assert_eq!(trace_end, 10);
+    assert_eq!(confirmed, 720);
+    assert_eq!(tree.bypassed_calls.len(), 68);
+    assert_eq!(trace_end, 1);
     assert_eq!(no_next + displaced, 0);
 
     // 函数身份：confirmed activation 的 func_addr 必须来自 entry 实际 PC

@@ -64,8 +64,19 @@ impl crate::engine::TraceEngine {
                 })
         };
         let function = site(activation.entry_seq)?;
-        let entry_registers = registers_at(&state, activation.entry_seq)?;
+        let mut entry_registers = registers_at(&state, activation.entry_seq)?;
         let resume_registers = registers_at(&state, activation.resume_seq)?;
+        if entry_registers[31] == u64::MAX {
+            // 若检查点未观察到 SP 的前序修改（如函数处于 trace 起始前缀），
+            // 从入口指令本身的 pre-state（分号与箭头之间）提取 entry_sp。
+            if let Some(raw) = index.get_line(&state.mmap, activation.entry_seq) {
+                if let Ok(line) = std::str::from_utf8(raw) {
+                    if let Some(sp) = lines::prestate_register_value(line, "sp") {
+                        entry_registers[31] = sp;
+                    }
+                }
+            }
+        }
         let arguments = (0..=7)
             .map(|index| {
                 let name = format!("X{}", index);

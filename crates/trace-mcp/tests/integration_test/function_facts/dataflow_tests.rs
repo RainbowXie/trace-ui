@@ -331,7 +331,7 @@ fn pair_spill_chains_keep_upstream_reads_relevant() {
     // 因 pair 标记位或空 deps.row 被静默丢弃。
     let (engine, sid, path) = setup_inline_trace(&[
         "[App] 0x1004!0x1004 bl #0x2000; sp=0x3000",
-        "[App] 0x2000!0x2000 ldp x0, x1, [sp]; sp=0x3000 mem_r=0x3000 -> x0=0x77 x1=0x88",
+        "[App] 0x2000!0x2000 ldp x0, x1, [x9]; x9=0x3000 mem_r=0x3000 -> x0=0x77 x1=0x88",
         "[App] 0x2004!0x2004 ldr x2, [x1]; x1=0x88 mem_r=0x8800 -> x2=0x99",
         "[App] 0x2008!0x2008 mov x0, x2; x2=0x99 -> x0=0x99",
         "[App] 0x200c!0x200c ret",
