@@ -8,6 +8,18 @@ use super::blocks::OwnedInsn;
 use super::lines::{
     access_width, arrow_register_value, base_register, is_pair_access, line_mem_annotation,
 };
+use crate::utils::checked_mem_addr;
+
+fn ranges_overlap(a: u64, a_size: u32, b: u64, b_size: u32) -> bool {
+    // 无法形成完整半开区间时不把剩余地址空间当成重叠（ISSUE-H14）。
+    let Some(a_end) = checked_mem_addr(a, u64::from(a_size)) else {
+        return false;
+    };
+    let Some(b_end) = checked_mem_addr(b, u64::from(b_size)) else {
+        return false;
+    };
+    a < b_end && b < a_end
+}
 
 /// 栈参数三门合同的机械侧：entry SP 及之上、SP/FP 基址寻址、本次实际
 /// 读取、宽度可确认的单寄存器载荷。首次读取前被写回的槽保留读取证据
@@ -58,9 +70,7 @@ pub(super) fn collect_stack_arguments(
             continue;
         };
         let written_before = writes.iter().any(|(waddress, wsize, wseq)| {
-            *wseq < insn.seq
-                && *waddress < address + u64::from(size)
-                && address < *waddress + u64::from(*wsize)
+            *wseq < insn.seq && ranges_overlap(*waddress, *wsize, address, size)
         });
         let pair = insn.mnemonic.as_deref().is_some_and(is_pair_access);
         let value = if written_before || pair || size > 8 {

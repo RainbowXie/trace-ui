@@ -596,18 +596,20 @@ pub fn scan_unified(
                     },
                 );
 
-                // Pair 指令：在 abs + elem_width 处创建第二条记录
+                // Pair 指令：在 abs + elem_width 处创建第二条记录；溢出则跳过该半。
                 if let Some(val2) = mem_op.value2 {
-                    mem_idx.add(
-                        mem_op.abs + mem_op.elem_width as u64,
-                        MemAccessRecord {
-                            seq: i,
-                            insn_addr,
-                            rw,
-                            data: val2,
-                            size: mem_op.elem_width,
-                        },
-                    );
+                    if let Some(addr) = checked_mem_addr(mem_op.abs, mem_op.elem_width as u64) {
+                        mem_idx.add(
+                            addr,
+                            MemAccessRecord {
+                                seq: i,
+                                insn_addr,
+                                rw,
+                                data: val2,
+                                size: mem_op.elem_width,
+                            },
+                        );
+                    }
                 }
             } else if mem_op.elem_width == 16 {
                 // 128-bit: 拆为两条 size=8 的记录
@@ -624,41 +626,47 @@ pub fn scan_unified(
                     );
                 }
                 if let Some(hi) = mem_op.value_hi {
-                    mem_idx.add(
-                        mem_op.abs + 8,
-                        MemAccessRecord {
-                            seq: i,
-                            insn_addr,
-                            rw,
-                            data: hi,
-                            size: 8,
-                        },
-                    );
+                    if let Some(addr) = checked_mem_addr(mem_op.abs, 8) {
+                        mem_idx.add(
+                            addr,
+                            MemAccessRecord {
+                                seq: i,
+                                insn_addr,
+                                rw,
+                                data: hi,
+                                size: 8,
+                            },
+                        );
+                    }
                 }
                 // Pair 128-bit: 第二个寄存器
                 if let Some(lo2) = mem_op.value2_lo {
-                    mem_idx.add(
-                        mem_op.abs + 16,
-                        MemAccessRecord {
-                            seq: i,
-                            insn_addr,
-                            rw,
-                            data: lo2,
-                            size: 8,
-                        },
-                    );
+                    if let Some(addr) = checked_mem_addr(mem_op.abs, 16) {
+                        mem_idx.add(
+                            addr,
+                            MemAccessRecord {
+                                seq: i,
+                                insn_addr,
+                                rw,
+                                data: lo2,
+                                size: 8,
+                            },
+                        );
+                    }
                 }
                 if let Some(hi2) = mem_op.value2_hi {
-                    mem_idx.add(
-                        mem_op.abs + 24,
-                        MemAccessRecord {
-                            seq: i,
-                            insn_addr,
-                            rw,
-                            data: hi2,
-                            size: 8,
-                        },
-                    );
+                    if let Some(addr) = checked_mem_addr(mem_op.abs, 24) {
+                        mem_idx.add(
+                            addr,
+                            MemAccessRecord {
+                                seq: i,
+                                insn_addr,
+                                rw,
+                                data: hi2,
+                                size: 8,
+                            },
+                        );
+                    }
                 }
             }
 

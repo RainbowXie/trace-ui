@@ -171,7 +171,7 @@ pub fn scan_pass1_bytes_with_progress(
                                 return false;
                             }
                             let width = mem_access_width(class, m.elem_width, &line);
-                            (0..width as u64).any(|off| m.abs + off == *addr)
+                            (0..width as u64).any(|off| checked_mem_addr(m.abs, off) == Some(*addr))
                         });
                         if is_store {
                             state.resolved_targets.insert((i, target.clone()), i);

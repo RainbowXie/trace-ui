@@ -18,3 +18,37 @@ fn max_address_load_does_not_panic_and_completes_scan() {
     let result = result.expect("scan");
     assert_eq!(result.scan_state.line_count, 1);
 }
+
+fn assert_scan_ok(label: &str, line: &str) {
+    let result = scan_unified(line.as_bytes(), false, false, true, None);
+    assert!(
+        result.is_ok(),
+        "{label} 顶端地址不得让索引 panic：{}",
+        result
+            .as_ref()
+            .err()
+            .map(|e| e.to_string())
+            .unwrap_or_default()
+    );
+}
+
+#[test]
+fn pair_and_simd_top_addresses_do_not_panic() {
+    // ISSUE-H14：pair 第二半与 SIMD 高半用 abs+width 建索引，顶端地址必须 checked。
+    assert_scan_ok(
+        "stp @ u64::MAX",
+        "[App] 0x1000!0x1000 stp x0, x1, [x8]; x8=0xffffffffffffffff mem_w=0xffffffffffffffff x0=0x1 x1=0x2\n",
+    );
+    assert_scan_ok(
+        "ldp @ u64::MAX-8",
+        "[App] 0x1000!0x1000 ldp x0, x1, [x8]; x8=0xfffffffffffffff8 mem_r=0xfffffffffffffff8 -> x0=0x1 x1=0x2\n",
+    );
+    assert_scan_ok(
+        "str q @ u64::MAX",
+        "[App] 0x1000!0x1000 str q0, [x8]; x8=0xffffffffffffffff mem_w=0xffffffffffffffff\n",
+    );
+    assert_scan_ok(
+        "stp @ u64::MAX-8",
+        "[App] 0x1000!0x1000 stp x0, x1, [x8]; x8=0xfffffffffffffff8 mem_w=0xfffffffffffffff8 x0=0x1 x1=0x2\n",
+    );
+}
