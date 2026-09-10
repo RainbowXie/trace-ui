@@ -399,3 +399,79 @@ fn simd_vector_writes_generate_real_records_and_missing_definitions() {
     engine.close_session(&sid).unwrap();
     std::fs::remove_file(path).expect("remove inline trace");
 }
+
+#[test]
+fn same_address_irrelevant_read_must_not_override_relevant_bytes() {
+    // ISSUE-H8：同址同宽一条无关读取（值进 x1 后死亡）和一条相关读取
+    // （流入返回值）观察值不同时，不得先按 (address, size) 聚合再筛选，
+    // 否则无关首值 0x1111 会覆盖相关 0x2222。
+    let (engine, sid, path) = setup_inline_trace(&[
+        "[App] 0x1004!0x1004 bl #0x2000; sp=0x3000",
+        "[App] 0x2000!0x2000 ldr x1, [x8]; x8=0x6000 mem_r=0x6000 -> x1=0x1111",
+        "[App] 0x2004!0x2004 ldr x0, [x8]; x8=0x6000 mem_r=0x6000 -> x0=0x2222",
+        "[App] 0x2008!0x2008 ret",
+        "[App] 0x1008!0x1008 mov x0, #0x1",
+    ]);
+
+    let bundle = engine
+        .get_function_facts(&sid, 0, 1)
+        .expect("function facts");
+    assert_eq!(
+        bundle
+            .memory_reads
+            .iter()
+            .map(|read| {
+                (
+                    read.address.as_str(),
+                    read.bytes.clone(),
+                    read.read_seqs.clone(),
+                )
+            })
+            .collect::<Vec<_>>(),
+        vec![("0x6000", Some("2222000000000000".to_string()), vec![2])],
+        "只保留相关 seq 及其 bytes，不得混入无关首值：{:?}",
+        bundle.memory_reads
+    );
+
+    engine.close_session(&sid).unwrap();
+    std::fs::remove_file(path).expect("remove inline trace");
+}
+
+#[test]
+fn unknown_overlapping_writes_split_by_final_winner() {
+    // ISSUE-H9：未知 stp q 写 32 字节后被未知 str q 覆盖后半，不得合成
+    // 单条 {0xa000, size=32, write_seqs=[1,2]}——winner 改变时必须拆段，
+    // 否则 gumtrace 只能对整段取 max(last_write)，中间时点 capture 无法
+    // 只补已完成字节。
+    let (engine, sid, path) = setup_inline_trace(&[
+        "[App] 0x1004!0x1004 bl #0x2000; sp=0x3000",
+        "[App] 0x2000!0x2000 stp q0, q1, [x9]; x9=0xa000 mem_w=0xa000",
+        "[App] 0x2004!0x2004 str q2, [x9]; x9=0xa010 mem_w=0xa010",
+        "[App] 0x2008!0x2008 ret",
+        "[App] 0x1008!0x1008 mov x0, #0x1",
+    ]);
+
+    let bundle = engine
+        .get_function_facts(&sid, 0, 1)
+        .expect("function facts");
+    assert_eq!(
+        bundle
+            .memory_writes
+            .iter()
+            .map(|write| {
+                (
+                    write.address.as_str(),
+                    write.size,
+                    write.bytes.clone(),
+                    write.write_seqs.clone(),
+                )
+            })
+            .collect::<Vec<_>>(),
+        vec![("0xa000", 16, None, vec![1]), ("0xa010", 16, None, vec![2]),],
+        "未知范围必须按最终 winner 拆段：{:?}",
+        bundle.memory_writes
+    );
+
+    engine.close_session(&sid).unwrap();
+    std::fs::remove_file(path).expect("remove inline trace");
+}

@@ -133,15 +133,15 @@ fn write_effect(insn: &OwnedInsn, mnemonic: &str, operand: &str) -> Option<Write
 }
 
 /// 字节粒度的最终写入追踪：每个地址记录 (值是否已知, 字节值, 最终生产者)。
-/// 相邻、已知性一致的字节在物化时合并为范围；范围 seqs 保留对最终字节
-/// 仍有贡献的全部生产者（合同 write_seqs 语义）。
-/// 一个待合并的字节区间：起始地址、长度、字节值、是否全部已知、
-/// 贡献者 seq 集合。
+/// 相邻且已知性一致的字节在物化时合并；未知范围还必须 winner 相同才合并——
+/// 否则 gumtrace 只能对整段取 max(last_write)，中间时点 capture 无法只补已完成字节（ISSUE-H9）。
+/// 已知范围可跨 winner 合并：最终字节已由 trace 确定，capture 只作核对，不再需要逐字节时点。
 struct ByteRange {
     start: u64,
     size: u32,
     bytes: Vec<u8>,
     uniform_known: bool,
+    last_winner: u32,
     seqs: Vec<u32>,
 }
 
@@ -176,11 +176,14 @@ impl FinalByteMap {
         for (&address, &(known, byte, winner)) in &self.bytes {
             match &mut pending {
                 Some(range) => {
-                    if address == range.start + u64::from(range.size)
-                        && known == range.uniform_known
-                    {
+                    let contiguous = address == range.start + u64::from(range.size)
+                        && known == range.uniform_known;
+                    // 未知范围按最终写入者拆段；已知范围可跨 winner 合并。
+                    let same_owner = known || winner == range.last_winner;
+                    if contiguous && same_owner {
                         range.size += 1;
                         range.bytes.push(byte);
+                        range.last_winner = winner;
                         if !range.seqs.contains(&winner) {
                             range.seqs.push(winner);
                         }
@@ -191,6 +194,7 @@ impl FinalByteMap {
                             size: 1,
                             bytes: vec![byte],
                             uniform_known: known,
+                            last_winner: winner,
                             seqs: vec![winner],
                         });
                     }
@@ -201,6 +205,7 @@ impl FinalByteMap {
                         size: 1,
                         bytes: vec![byte],
                         uniform_known: known,
+                        last_winner: winner,
                         seqs: vec![winner],
                     });
                 }
@@ -218,6 +223,7 @@ impl FinalByteMap {
             size,
             bytes,
             uniform_known,
+            last_winner: _,
             seqs,
         } = range;
         FunctionMemoryWriteDto {
@@ -324,6 +330,11 @@ pub(super) fn collect_memory_facts(
         if internally_produced {
             continue;
         }
+        // ISSUE-H8：先按相关性过滤，再按 (address, size) 聚合。否则无关读取的
+        // 首值会覆盖真正相关读取，错误 bytes 进入不可变记录。
+        if !is_relevant(insn.seq) {
+            continue;
+        }
         let register = operand.split(',').next().unwrap_or("").trim();
         let value = if size > 8 || is_pair_access(mnemonic) {
             None
@@ -331,8 +342,9 @@ pub(super) fn collect_memory_facts(
             arrow_register_value(&insn.line, register)
         };
         let slot = reads.entry((address, size)).or_insert((value, Vec::new()));
-        if slot.0.is_none() {
-            slot.0 = value;
+        if slot.0 != value {
+            // 同址同宽的相关读取观察值不同：不得用任一值冒充整段。
+            slot.0 = None;
         }
         slot.1.push(insn.seq);
     }
