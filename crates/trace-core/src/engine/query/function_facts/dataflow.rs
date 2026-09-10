@@ -256,7 +256,8 @@ pub(super) fn collect_memory_facts(
     Vec<FunctionMemoryWriteDto>,
     Vec<FunctionFactUnresolvedDto>,
 ) {
-    let mut blocked: Vec<(u64, u32)> = Vec::new();
+    // (address, size, seq)：只有更早的重叠写才算本调用内部生产（ISSUE-H10）。
+    let mut blocked: Vec<(u64, u32, u32)> = Vec::new();
     let mut final_bytes = FinalByteMap::default();
     let mut write_winners: Vec<u32> = Vec::new();
     let mut write_unresolved: Vec<FunctionFactUnresolvedDto> = Vec::new();
@@ -271,11 +272,11 @@ pub(super) fn collect_memory_facts(
                 Some(WriteEffect::Applied { size, value }) => {
                     final_bytes.apply(address, size, value, insn.seq);
                     write_winners.push(insn.seq);
-                    blocked.push((address, size));
+                    blocked.push((address, size, insn.seq));
                     continue;
                 }
                 Some(WriteEffect::BlockOnly { size }) => {
-                    blocked.push((address, size));
+                    blocked.push((address, size, insn.seq));
                     write_unresolved.push(FunctionFactUnresolvedDto {
                         kind: "unsupported_instruction".to_string(),
                         seqs: vec![insn.seq],
@@ -299,7 +300,7 @@ pub(super) fn collect_memory_facts(
         None => true,
     };
 
-    let mut reads: BTreeMap<(u64, u32), (Option<u64>, Vec<u32>)> = BTreeMap::new();
+    let mut reads: BTreeMap<(u64, u32, u32), Option<u64>> = BTreeMap::new();
     let mut unresolved: Vec<FunctionFactUnresolvedDto> = Vec::new();
     for insn in owned {
         let Some((mnemonic, operand)) = insn.mnemonic.as_deref().zip(insn.first_operand.as_deref())
@@ -324,14 +325,18 @@ pub(super) fn collect_memory_facts(
                 continue;
             }
         };
-        let internally_produced = blocked.iter().any(|(waddress, wsize)| {
-            *waddress < address + u64::from(size) && address < *waddress + u64::from(*wsize)
+        // ISSUE-H10：只有 write_seq < read_seq 且覆盖该读取每一个字节的写，才是内部生产。
+        // 未来写不得吞掉进入函数前的外部输入；部分重叠保守保留整条 read。
+        let internally_produced = (0..u64::from(size)).all(|offset| {
+            let byte = address + offset;
+            blocked.iter().any(|(waddress, wsize, wseq)| {
+                *wseq < insn.seq && *waddress <= byte && byte < *waddress + u64::from(*wsize)
+            })
         });
         if internally_produced {
             continue;
         }
-        // ISSUE-H8：先按相关性过滤，再按 (address, size) 聚合。否则无关读取的
-        // 首值会覆盖真正相关读取，错误 bytes 进入不可变记录。
+        // ISSUE-H8：先按相关性过滤，再按观察聚合。
         if !is_relevant(insn.seq) {
             continue;
         }
@@ -341,27 +346,19 @@ pub(super) fn collect_memory_facts(
         } else {
             arrow_register_value(&insn.line, register)
         };
-        let slot = reads.entry((address, size)).or_insert((value, Vec::new()));
-        if slot.0 != value {
-            // 同址同宽的相关读取观察值不同：不得用任一值冒充整段。
-            slot.0 = None;
+        if stack_slots.contains(&(address, size)) {
+            continue;
         }
-        slot.1.push(insn.seq);
+        // ISSUE-H11：每个相关读取时点单独成记录，不得把不同动态值压进同一 read_seqs。
+        reads.entry((address, size, insn.seq)).or_insert(value);
     }
     let memory_reads: Vec<FunctionMemoryReadDto> = reads
         .into_iter()
-        .filter(|((address, size), (_, seqs))| {
-            !stack_slots.contains(&(*address, *size))
-                && seqs.iter().any(|seq| match &relevant {
-                    Some(set) => set.contains(seq),
-                    None => true,
-                })
-        })
-        .map(|((address, size), (value, seqs))| FunctionMemoryReadDto {
+        .map(|((address, size, seq), value)| FunctionMemoryReadDto {
             address: format!("0x{address:x}"),
             size,
             bytes: value.map(|value| little_endian_hex(value, size)),
-            read_seqs: seqs,
+            read_seqs: vec![seq],
         })
         .collect();
 

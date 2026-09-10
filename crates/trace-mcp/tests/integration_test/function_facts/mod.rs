@@ -7,6 +7,7 @@
 
 use super::*;
 mod dataflow_tests;
+mod dataflow_timing_tests;
 mod events_tests;
 
 pub(super) fn setup_inline_trace(lines: &[&str]) -> (Arc<TraceEngine>, String, std::path::PathBuf) {
