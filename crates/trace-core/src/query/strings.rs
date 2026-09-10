@@ -1,6 +1,8 @@
 use rustc_hash::FxHashMap;
 use serde::{Deserialize, Serialize};
 
+use crate::utils::checked_mem_addr;
+
 // ── 持久化数据结构 ──
 
 #[derive(Serialize, Deserialize, Clone, Copy, PartialEq, Eq, Debug)]
@@ -195,21 +197,32 @@ impl StringBuilder {
         self.active.len()
     }
 
-    /// 处理一条内存访问操作（READ 或 WRITE）
+    /// 处理一条内存访问操作（READ 或 WRITE）。
+    /// 无法形成完整半开范围时跳过该次访问，禁止 panic（ISSUE-H14）。
     pub fn process_access(&mut self, addr: u64, data: u64, size: u8, seq: u32, rw: StringRw) {
+        if size == 0 {
+            return;
+        }
+        let Some(last) = checked_mem_addr(addr, u64::from(size) - 1) else {
+            return;
+        };
         // Fast path: skip if all bytes unchanged (avoids duplicate snapshots from repeated READs)
         // Note: is_valid returns false for unset bytes, so unset != val correctly proceeds
         let mut all_same = true;
         {
             let pg_addr = addr & PAGE_MASK;
-            let end_pg_addr = (addr + size as u64 - 1) & PAGE_MASK;
+            let end_pg_addr = last & PAGE_MASK;
 
             if pg_addr == end_pg_addr {
                 // Common case: all bytes on same page
                 if let Some(pg) = self.byte_image.get_page(pg_addr) {
                     for i in 0..size as u64 {
+                        let Some(byte_addr) = checked_mem_addr(addr, i) else {
+                            all_same = false;
+                            break;
+                        };
                         let byte_val = ((data >> (i * 8)) & 0xFF) as u8;
-                        let off = ((addr + i) & !PAGE_MASK) as usize;
+                        let off = (byte_addr & !PAGE_MASK) as usize;
                         if !pg.is_valid(off) || pg.data[off] != byte_val {
                             all_same = false;
                             break;
@@ -221,8 +234,12 @@ impl StringBuilder {
             } else {
                 // Rare: cross-page boundary (size<=8, only near page edge)
                 for i in 0..size as u64 {
+                    let Some(byte_addr) = checked_mem_addr(addr, i) else {
+                        all_same = false;
+                        break;
+                    };
                     let byte_val = ((data >> (i * 8)) & 0xFF) as u8;
-                    if self.byte_image.get_byte(addr + i) != Some(byte_val) {
+                    if self.byte_image.get_byte(byte_addr) != Some(byte_val) {
                         all_same = false;
                         break;
                     }
@@ -235,20 +252,26 @@ impl StringBuilder {
 
         // 1. 展开 data 为字节（小端序），更新 byte_image
         for i in 0..size as u64 {
+            let Some(byte_addr) = checked_mem_addr(addr, i) else {
+                return;
+            };
             let byte_val = ((data >> (i * 8)) & 0xFF) as u8;
-            self.byte_image.set_byte(addr + i, byte_val);
+            self.byte_image.set_byte(byte_addr, byte_val);
         }
 
         // 2. 收集受影响的活跃字符串 id（页级访问优化）
         let mut affected_ids: Vec<u32> = Vec::new();
         {
             let pg_addr = addr & PAGE_MASK;
-            let end_pg_addr = (addr + size as u64 - 1) & PAGE_MASK;
+            let end_pg_addr = last & PAGE_MASK;
 
             if pg_addr == end_pg_addr {
                 if let Some(pg) = self.byte_image.get_page(pg_addr) {
                     for i in 0..size as u64 {
-                        let off = ((addr + i) & !PAGE_MASK) as usize;
+                        let Some(byte_addr) = checked_mem_addr(addr, i) else {
+                            continue;
+                        };
+                        let off = (byte_addr & !PAGE_MASK) as usize;
                         let owner_id = pg.get_owner(off);
                         if owner_id != 0 && !affected_ids.contains(&owner_id) {
                             affected_ids.push(owner_id);
@@ -257,7 +280,10 @@ impl StringBuilder {
                 }
             } else {
                 for i in 0..size as u64 {
-                    let owner_id = self.byte_image.get_owner(addr + i);
+                    let Some(byte_addr) = checked_mem_addr(addr, i) else {
+                        continue;
+                    };
+                    let owner_id = self.byte_image.get_owner(byte_addr);
                     if owner_id != 0 && !affected_ids.contains(&owner_id) {
                         affected_ids.push(owner_id);
                     }
@@ -280,14 +306,16 @@ impl StringBuilder {
                     });
                 }
                 for j in 0..old.byte_len as u64 {
-                    self.byte_image.clear_owner(old.addr + j);
+                    if let Some(byte_addr) = checked_mem_addr(old.addr, j) {
+                        self.byte_image.clear_owner(byte_addr);
+                    }
                 }
             }
         }
 
         // 4. 局部扫描
         let scan_start = self.scan_backward(addr);
-        let scan_end = self.scan_forward(addr + size as u64 - 1);
+        let scan_end = self.scan_forward(last);
 
         // 5. 提取字符串
         self.extract_strings_in_range(scan_start, scan_end, seq, rw);
@@ -426,15 +454,23 @@ impl StringBuilder {
             let id = self.next_id;
             self.next_id += 1;
             for j in 0..byte_len as u64 {
-                let a = str_start + j;
+                let Some(a) = checked_mem_addr(str_start, j) else {
+                    continue;
+                };
                 let old_id = self.byte_image.get_owner(a);
                 self.byte_image.set_owner(a, id);
                 if old_id != 0 && old_id != id {
                     if let Some(old) = self.active.remove(&old_id) {
                         // 清理被驱逐字符串在新字符串覆盖范围外的残留 owner 条目
                         for k in 0..old.byte_len as u64 {
-                            let old_a = old.addr + k;
-                            if old_a < str_start || old_a >= str_start + byte_len as u64 {
+                            let Some(old_a) = checked_mem_addr(old.addr, k) else {
+                                continue;
+                            };
+                            let Some(new_end) = checked_mem_addr(str_start, byte_len as u64) else {
+                                self.byte_image.clear_owner(old_a);
+                                continue;
+                            };
+                            if old_a < str_start || old_a >= new_end {
                                 // 仅清理新字符串覆盖范围外的条目；
                                 // 范围内的条目已被/将被当前循环覆写。
                                 self.byte_image.clear_owner(old_a);
@@ -509,10 +545,9 @@ impl StringBuilder {
         for record in &mut index.strings {
             let mut count = 0u32;
             for offset in 0..record.byte_len as u64 {
-                count += read_counts
-                    .get(&(record.addr + offset))
-                    .copied()
-                    .unwrap_or(0);
+                if let Some(byte_addr) = checked_mem_addr(record.addr, offset) {
+                    count += read_counts.get(&byte_addr).copied().unwrap_or(0);
+                }
             }
             record.xref_count = count;
         }
@@ -564,10 +599,9 @@ impl StringBuilder {
         index.strings.par_iter_mut().for_each(|record| {
             let mut count = 0u32;
             for offset in 0..record.byte_len as u64 {
-                count += read_counts
-                    .get(&(record.addr + offset))
-                    .copied()
-                    .unwrap_or(0);
+                if let Some(byte_addr) = checked_mem_addr(record.addr, offset) {
+                    count += read_counts.get(&byte_addr).copied().unwrap_or(0);
+                }
             }
             record.xref_count = count;
         });

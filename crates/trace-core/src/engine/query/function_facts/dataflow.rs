@@ -378,8 +378,9 @@ pub(super) fn collect_memory_facts(
 }
 
 fn write_covers_byte(waddress: u64, wsize: u32, byte: u64) -> bool {
+    // 无法形成完整半开区间时不把剩余地址空间当成内部生产（ISSUE-H14）。
     let Some(wend) = checked_mem_addr(waddress, u64::from(wsize)) else {
-        return byte >= waddress;
+        return false;
     };
     waddress <= byte && byte < wend
 }

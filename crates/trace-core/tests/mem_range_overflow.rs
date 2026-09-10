@@ -1,6 +1,8 @@
 //! ISSUE-H14：访存地址加宽度必须 checked，越界不得 panic。
 
+use trace_core::chunk_scan::{scan_chunk, ScanChunkConfig};
 use trace_core::scan_unified::scan_unified;
+use trace_parser::types::TraceFormat;
 
 #[test]
 fn max_address_load_does_not_panic_and_completes_scan() {
@@ -20,15 +22,31 @@ fn max_address_load_does_not_panic_and_completes_scan() {
 }
 
 fn assert_scan_ok(label: &str, line: &str) {
-    let result = scan_unified(line.as_bytes(), false, false, true, None);
-    assert!(
-        result.is_ok(),
-        "{label} 顶端地址不得让索引 panic：{}",
-        result
-            .as_ref()
-            .err()
-            .map(|e| e.to_string())
-            .unwrap_or_default()
+    for skip_strings in [true, false] {
+        let result = scan_unified(line.as_bytes(), false, false, skip_strings, None);
+        assert!(
+            result.is_ok(),
+            "{label} skip_strings={skip_strings} 不得让索引 panic：{}",
+            result
+                .as_ref()
+                .err()
+                .map(|e| e.to_string())
+                .unwrap_or_default()
+        );
+    }
+    let data = line.as_bytes();
+    let _chunk = scan_chunk(
+        data,
+        ScanChunkConfig {
+            start_byte: 0,
+            end_byte: data.len(),
+            start_line: 0,
+            format: TraceFormat::Gumtrace,
+            data_only: false,
+            no_prune: false,
+            skip_strings: false,
+            progress_cb: None,
+        },
     );
 }
 
