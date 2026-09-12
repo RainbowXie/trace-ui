@@ -67,6 +67,44 @@ pub(crate) fn stable_site(line: &str) -> Option<String> {
 }
 
 /// 按稳定模块位置语法拼装身份；模块名或 offset 不合法时返回 None。
+pub(crate) fn stable_runtime_site(line: &str) -> Option<(String, u64, u64)> {
+    if let Some(bracket_end) = line.find("] 0x") {
+        let rest = &line[bracket_end + 4..];
+        if let Some(bang) = rest.find("!0x") {
+            let module_start = line[..bracket_end].find('[')?;
+            let module = &line[module_start + 1..bracket_end];
+            if !is_valid_module(module) {
+                return None;
+            }
+            let runtime_hex = &rest[..bang];
+            let offset_hex = &rest[bang + 3..];
+            let offset_end = offset_hex
+                .find(|c: char| !c.is_ascii_hexdigit())
+                .unwrap_or(offset_hex.len());
+            return Some((
+                module.to_owned(),
+                u64::from_str_radix(runtime_hex, 16).ok()?,
+                u64::from_str_radix(&offset_hex[..offset_end], 16).ok()?,
+            ));
+        }
+    }
+    let runtime_end = line.find(": \"").or_else(|| line.find(": \""))?;
+    let runtime_start = line[..runtime_end].rfind("0x")? + 2;
+    let runtime = u64::from_str_radix(&line[runtime_start..runtime_end], 16).ok()?;
+    let before_runtime = &line[..runtime_start];
+    let fields = before_runtime.match_indices('[').collect::<Vec<_>>();
+    let module_start = fields.get(1)?.0;
+    let module_end = line[module_start..].find(']')? + module_start;
+    let module_info = &line[module_start + 1..module_end];
+    let space = module_info.rfind(" 0x")?;
+    let module = &module_info[..space];
+    if !is_valid_module(module) {
+        return None;
+    }
+    let offset = u64::from_str_radix(&module_info[space + 3..], 16).ok()?;
+    Some((module.to_owned(), runtime, offset))
+}
+
 fn build_site(module: &str, offset_hex: &str) -> Option<String> {
     if !is_valid_module(module) {
         return None;
@@ -447,6 +485,16 @@ mod tests {
     }
 
     /// stable_site：畸形行回退 None（不产生错误拼接的身份）。
+    #[test]
+    fn stable_runtime_site_parses_unidbg_runtime_and_offset() {
+        assert_eq!(
+            stable_runtime_site(
+                "[07:17:13 488][libtiny.so 0x174250] [fd7bbaa9] 0x40174250: \"stp\""
+            ),
+            Some(("libtiny.so".to_owned(), 0x40174250, 0x174250))
+        );
+    }
+
     #[test]
     fn stable_site_rejects_malformed_lines() {
         assert_eq!(stable_site("[mod] 0x1!yy nop"), None, "! 后无 0x 前缀");

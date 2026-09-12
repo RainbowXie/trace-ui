@@ -31,6 +31,28 @@ impl crate::engine::TraceEngine {
         target_rw: Option<&str>,
         activation_selectors: &[GraphActivationSelectorDto],
     ) -> Result<AlgorithmGraphFactBundleDto> {
+        self.get_algorithm_graph_facts_for_modules(
+            session_id,
+            target_seq,
+            target_address,
+            target_size,
+            target_rw,
+            activation_selectors,
+            &[],
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub fn get_algorithm_graph_facts_for_modules(
+        &self,
+        session_id: &str,
+        target_seq: u32,
+        target_address: u64,
+        target_size: u32,
+        target_rw: Option<&str>,
+        activation_selectors: &[GraphActivationSelectorDto],
+        target_modules: &[String],
+    ) -> Result<AlgorithmGraphFactBundleDto> {
         let handle = self.get_handle(session_id)?;
         let state = handle
             .state
@@ -58,7 +80,10 @@ impl crate::engine::TraceEngine {
         target_seeds.dedup();
 
         let closure = deps::backward_closure(&deps, &pair_split, &target_seeds);
-        let mut boundary_index = collect_boundaries(&state, tree, &selectors, &closure)?;
+        let global_map =
+            super::function_facts::global_map::StableGlobalMap::collect(&state, target_modules)?;
+        let mut boundary_index =
+            collect_boundaries(&state, tree, &selectors, &closure, &global_map)?;
         attach_unowned_boundaries(&state, tree, &selectors, &closure, &mut boundary_index)?;
         let mut dependency_edges = deps::dependency_edges(
             &state,

@@ -39,9 +39,20 @@ pub(super) fn first_operand(line: &str) -> Option<String> {
 }
 
 /// 从 raw 行提取 `mem_r=0x…` / `mem_w=0x…` 注解地址。
-pub(super) fn line_mem_annotation(line: &str, key: &str) -> Option<u64> {
+pub(crate) fn line_mem_annotation(line: &str, key: &str) -> Option<u64> {
     let marker = format!("{key}=0x");
-    let start = line.find(&marker)? + marker.len();
+    let gumtrace_marker = match key {
+        "mem_r" => Some("mem[READ] abs=0x"),
+        "mem_w" => Some("mem[WRITE] abs=0x"),
+        _ => None,
+    };
+    let (start, marker_len) = line
+        .find(&marker)
+        .map(|start| (start, marker.len()))
+        .or_else(|| {
+            gumtrace_marker.and_then(|marker| line.find(marker).map(|start| (start, marker.len())))
+        })?;
+    let start = start + marker_len;
     let hex = &line[start..];
     let end = hex
         .find(|c: char| !c.is_ascii_hexdigit())
@@ -51,7 +62,10 @@ pub(super) fn line_mem_annotation(line: &str, key: &str) -> Option<u64> {
 
 /// 提取箭头后目标寄存器的值：`-> x0=0x41`（指令执行后的状态）。
 pub(super) fn arrow_register_value(line: &str, register: &str) -> Option<u64> {
-    let arrow = line.find("-> ")? + 3;
+    let arrow = line
+        .find("-> ")
+        .map(|position| position + 3)
+        .or_else(|| line.find("=> ").map(|position| position + 3))?;
     let tail = &line[arrow..];
     let pattern = format!("{register}=0x");
     let start = tail.find(&pattern)? + pattern.len();
@@ -65,7 +79,10 @@ pub(super) fn arrow_register_value(line: &str, register: &str) -> Option<u64> {
 /// 分号与箭头之间的 pre-state 区段里提取 `xN=0x…`（写入值的来源寄存器）。
 pub(super) fn prestate_register_value(line: &str, register: &str) -> Option<u64> {
     let semicolon = line.find(';')?;
-    let region_end = line.find(" -> ").unwrap_or(line.len());
+    let region_end = line
+        .find(" -> ")
+        .or_else(|| line.find(" => "))
+        .unwrap_or(line.len());
     let region = &line[semicolon..region_end];
     let pattern = format!("{register}=0x");
     let start = region.find(&pattern)? + pattern.len();
@@ -101,7 +118,7 @@ pub(super) fn is_pair_access(mnemonic: &str) -> bool {
 /// 非缩放/穿透/原子 LOAD/成对；向量寄存器（q/s/d 首字符）、独占 STORE
 /// 与未知助记符返回 None——调用方必须按「宽度未知」保守处理，不能静默
 /// 丢弃。独占 STORE 走 exclusive_store_outcome（状态寄存器定成败）。
-pub(super) fn access_width(mnemonic: &str, operand: &str) -> Option<u32> {
+pub(crate) fn access_width(mnemonic: &str, operand: &str) -> Option<u32> {
     let register = operand.trim().split(',').next()?.trim();
     let scalar = |width: u32| match register.chars().next()? {
         'x' => Some(width),

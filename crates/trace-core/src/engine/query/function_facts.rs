@@ -8,7 +8,9 @@ mod abi;
 pub(crate) mod blocks;
 pub(crate) mod dataflow;
 pub(crate) mod events;
-mod lines;
+pub(crate) mod global_map;
+pub(crate) mod globals;
+pub(crate) mod lines;
 
 use std::collections::BTreeMap;
 
@@ -28,6 +30,16 @@ impl crate::engine::TraceEngine {
         session_id: &str,
         call_seq: u32,
         entry_seq: u32,
+    ) -> Result<FunctionFactBundleDto> {
+        self.get_function_facts_for_modules(session_id, call_seq, entry_seq, &[])
+    }
+
+    pub fn get_function_facts_for_modules(
+        &self,
+        session_id: &str,
+        call_seq: u32,
+        entry_seq: u32,
+        target_modules: &[String],
     ) -> Result<FunctionFactBundleDto> {
         let handle = self.get_handle(session_id)?;
         let state = handle
@@ -107,6 +119,9 @@ impl crate::engine::TraceEngine {
             .map(|insn| insn.seq);
         let (memory_reads, memory_writes, access_unresolved) =
             collect_memory_facts(&state, &owned, &stack_argument_slots, return_producer);
+        let global_map = global_map::StableGlobalMap::collect(&state, target_modules)?;
+        let (memory_reads, global_reads, memory_writes, global_writes) =
+            globals::partition_memory_facts(&owned, &global_map, memory_reads, memory_writes);
         let external_call_events = collect_external_call_events(&state, tree, activation, &owned)?;
 
         Ok(FunctionFactBundleDto {
@@ -141,9 +156,9 @@ impl crate::engine::TraceEngine {
             },
             executed_block_sequence,
             memory_reads,
-            global_reads: Vec::new(),
+            global_reads,
             memory_writes,
-            global_writes: Vec::new(),
+            global_writes,
             external_call_events,
             unresolved: access_unresolved,
         })

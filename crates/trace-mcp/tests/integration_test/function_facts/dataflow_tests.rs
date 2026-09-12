@@ -228,6 +228,163 @@ fn successful_exclusive_stores_write_the_data_register_width() {
 }
 
 #[test]
+fn pc_relative_target_module_accesses_become_stable_global_facts() {
+    let (engine, sid, path) = setup_inline_trace(&[
+        "[App] 0x401000!0x1000 bl #0x402000; x0=0x1122334455667788 sp=0x5000",
+        "[App] 0x402000!0x2000 adrp x8, #0x404000; x8=0x0 -> x8=0x404000",
+        "[App] 0x402004!0x2004 ldr x0, [x8, #0x20]; x8=0x404000 mem_r=0x404020 -> x0=0x8877665544332211",
+        "[App] 0x402008!0x2008 str x0, [x8, #0x28]; x0=0x8877665544332211 x8=0x404000 mem_w=0x404028",
+        "[App] 0x40200c!0x200c ret; x0=0x8877665544332211 sp=0x5000",
+        "[App] 0x401004!0x1004 mov x0, x0; x0=0x8877665544332211 -> x0=0x8877665544332211",
+    ]);
+
+    let bundle = engine
+        .get_function_facts_for_modules(&sid, 0, 1, &["App".to_owned()])
+        .expect("function facts");
+
+    assert!(bundle.memory_reads.is_empty());
+    assert!(bundle.memory_writes.is_empty());
+    assert_eq!(
+        bundle
+            .global_reads
+            .iter()
+            .map(|read| (
+                read.global.as_str(),
+                read.size,
+                read.bytes.clone(),
+                read.read_seqs.clone(),
+            ))
+            .collect::<Vec<_>>(),
+        vec![(
+            "App+0x4020",
+            8,
+            Some("1122334455667788".to_owned()),
+            vec![2],
+        )]
+    );
+    assert_eq!(
+        bundle
+            .global_writes
+            .iter()
+            .map(|write| (
+                write.global.as_str(),
+                write.size,
+                write.bytes.clone(),
+                write.write_seqs.clone(),
+            ))
+            .collect::<Vec<_>>(),
+        vec![(
+            "App+0x4028",
+            8,
+            Some("1122334455667788".to_owned()),
+            vec![3],
+        )]
+    );
+
+    engine.close_session(&sid).unwrap();
+    std::fs::remove_file(path).expect("remove inline trace");
+}
+
+#[test]
+fn pc_relative_global_mapping_accepts_separate_add_destination_and_rejects_dynamic_offset() {
+    let (engine, sid, path) = setup_inline_trace(&[
+        "[App] 0x401000!0x1000 bl #0x402000; sp=0x5000",
+        "[App] 0x402000!0x2000 adrp x8, #0x404000; x8=0x0 -> x8=0x404000",
+        "[App] 0x402004!0x2004 add x9, x8, #0x20; x8=0x404000 -> x9=0x404020",
+        "[App] 0x402008!0x2008 ldr x0, [x9]; x9=0x404020 mem_r=0x404020 -> x0=0x7",
+        "[App] 0x40200c!0x200c adrp x10, #0x404000; x10=0x0 -> x10=0x404000",
+        "[App] 0x402010!0x2010 add x10, x10, x11; x10=0x404000 x11=0x30 -> x10=0x404030",
+        "[App] 0x402014!0x2014 ldr x1, [x10]; x10=0x404030 mem_r=0x404030 -> x1=0x9",
+        "[App] 0x402018!0x2018 add x0, x0, x1; x0=0x7 x1=0x9 -> x0=0x10",
+        "[App] 0x40201c!0x201c ret; x0=0x10 sp=0x5000",
+        "[App] 0x401004!0x1004 mov x0, x0; x0=0x10 -> x0=0x10",
+    ]);
+    let bundle = engine
+        .get_function_facts_for_modules(&sid, 0, 1, &["App".to_owned()])
+        .expect("function facts");
+    assert_eq!(bundle.global_reads.len(), 1);
+    assert_eq!(bundle.global_reads[0].global, "App+0x4020");
+    assert_eq!(bundle.memory_reads.len(), 1);
+    assert_eq!(bundle.memory_reads[0].address, "0x404030");
+    engine.close_session(&sid).unwrap();
+    std::fs::remove_file(path).expect("remove inline trace");
+}
+
+#[test]
+fn literal_load_keeps_a_complete_memory_record_for_constant_sources() {
+    let (engine, sid, path) = setup_inline_trace(&[
+        "[App] 0x401000!0x1000 bl #0x402000; sp=0x5000",
+        "[App] 0x402000!0x2000 ldr w0, #0x404020; w0=0x0 mem_r=0x404020 -> w0=0x12345678",
+        "[App] 0x402002!0x2002 add w0, w0, #1; w0=0x12345678 -> w0=0x12345679",
+        "[App] 0x402004!0x2004 ret; x0=0x12345679 sp=0x5000",
+        "[App] 0x401004!0x1004 mov x0, x0; x0=0x12345679 -> x0=0x12345679",
+    ]);
+
+    let bundle = engine
+        .get_function_facts_for_modules(&sid, 0, 1, &["App".to_owned()])
+        .expect("function facts");
+
+    assert!(bundle.global_reads.is_empty());
+    assert_eq!(
+        bundle
+            .memory_reads
+            .iter()
+            .map(|read| (
+                read.address.as_str(),
+                read.size,
+                read.bytes.clone(),
+                read.read_seqs.clone(),
+            ))
+            .collect::<Vec<_>>(),
+        vec![("0x404020", 4, Some("78563412".to_owned()), vec![1],)]
+    );
+
+    engine.close_session(&sid).unwrap();
+    std::fs::remove_file(path).expect("remove inline trace");
+}
+
+#[test]
+fn literal_load_after_an_internal_write_is_not_an_external_constant_source() {
+    let (engine, sid, path) = setup_inline_trace(&[
+        "[App] 0x401000!0x1000 bl #0x402000; sp=0x5000",
+        "[App] 0x402000!0x2000 str w1, [x8]; w1=0x12345678 x8=0x404020 mem_w=0x404020",
+        "[App] 0x402004!0x2004 ldr w0, #0x404020; w0=0x0 mem_r=0x404020 -> w0=0x12345678",
+        "[App] 0x402008!0x2008 ret; x0=0x12345678 sp=0x5000",
+        "[App] 0x401004!0x1004 mov x0, x0; x0=0x12345678 -> x0=0x12345678",
+    ]);
+
+    let bundle = engine
+        .get_function_facts_for_modules(&sid, 0, 1, &["App".to_owned()])
+        .expect("function facts");
+
+    assert!(bundle.memory_reads.is_empty());
+    assert!(bundle.global_reads.is_empty());
+
+    engine.close_session(&sid).unwrap();
+    std::fs::remove_file(path).expect("remove inline trace");
+}
+
+#[test]
+fn unrelated_literal_load_does_not_enter_function_facts() {
+    let (engine, sid, path) = setup_inline_trace(&[
+        "[App] 0x401000!0x1000 bl #0x402000; sp=0x5000",
+        "[App] 0x402000!0x2000 ldr w9, #0x404020; w9=0x0 mem_r=0x404020 -> w9=0x12345678",
+        "[App] 0x402004!0x2004 mov x0, #0x5; x0=0x0 -> x0=0x5",
+        "[App] 0x402008!0x2008 ret; x0=0x5 sp=0x5000",
+        "[App] 0x401004!0x1004 mov x0, x0; x0=0x5 -> x0=0x5",
+    ]);
+
+    let bundle = engine
+        .get_function_facts_for_modules(&sid, 0, 1, &["App".to_owned()])
+        .expect("function facts");
+
+    assert!(bundle.memory_reads.is_empty());
+
+    engine.close_session(&sid).unwrap();
+    std::fs::remove_file(path).expect("remove inline trace");
+}
+
+#[test]
 fn irrelevant_reads_do_not_enter_memory_facts() {
     // 同一 Activation：流入返回值的读取相关（进入）；与任何输出无关的
     // 读取（值进 x3 后死亡）不进入。

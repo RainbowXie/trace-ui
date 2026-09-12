@@ -25,6 +25,8 @@ struct GraphHelperRequest {
     target_size: u32,
     target_rw: Option<String>,
     activations: Vec<GraphActivationSelectorDto>,
+    #[serde(default)]
+    target_modules: Vec<String>,
 }
 
 pub(crate) fn requested() -> bool {
@@ -60,13 +62,14 @@ pub(crate) fn run() -> anyhow::Result<()> {
         },
         None,
     )?;
-    let facts = engine.get_algorithm_graph_facts(
+    let facts = engine.get_algorithm_graph_facts_for_modules(
         &session.session_id,
         request.target_seq,
         request.target_address,
         request.target_size,
         request.target_rw.as_deref(),
         &request.activations,
+        &request.target_modules,
     )?;
     write_response(&facts)
 }

@@ -343,13 +343,24 @@ pub(crate) fn collect_memory_facts(
                 continue;
             }
         };
-        if !is_relevant(insn.seq) {
+        let register = operand.split(',').next().unwrap_or("").trim();
+        let literal_address = literal_load_address(mnemonic, operand);
+        let literal_relevant = literal_address == Some(address)
+            && owned.iter().any(|consumer| {
+                consumer.seq > insn.seq
+                    && consumer.first_operand.as_deref().is_some_and(|operands| {
+                        operands
+                            .split(',')
+                            .skip(1)
+                            .any(|part| part.trim() == register)
+                    })
+            });
+        if !is_relevant(insn.seq) && !literal_relevant {
             continue;
         }
         if stack_slots.contains(&(address, size)) {
             continue;
         }
-        let register = operand.split(',').next().unwrap_or("").trim();
         let value = if size > 8 || is_pair_access(mnemonic) {
             None
         } else {
@@ -392,6 +403,23 @@ pub(crate) fn collect_memory_facts(
 
     unresolved.extend(write_unresolved);
     (memory_reads, memory_writes, unresolved)
+}
+
+pub(crate) fn literal_load_address(mnemonic: &str, operand: &str) -> Option<u64> {
+    if !matches!(mnemonic, "ldr" | "ldrsw") || operand.contains('[') {
+        return None;
+    }
+    let mut parts = operand.split(',');
+    parts.next()?;
+    let source = parts.next()?.trim().strip_prefix('#')?;
+    if parts.next().is_some() {
+        return None;
+    }
+    let hex = source.strip_prefix("0x")?;
+    if hex.is_empty() || !hex.bytes().all(|byte| byte.is_ascii_hexdigit()) {
+        return None;
+    }
+    u64::from_str_radix(hex, 16).ok()
 }
 
 fn write_covers_byte(waddress: u64, wsize: u32, byte: u64) -> bool {

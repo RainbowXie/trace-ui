@@ -27,6 +27,7 @@ pub(super) fn collect_boundaries(
     tree: &ActivationTree,
     selectors: &BTreeMap<u32, GraphActivationSelectorDto>,
     closure: &BTreeSet<u32>,
+    global_map: &super::super::function_facts::global_map::StableGlobalMap,
 ) -> Result<BoundaryIndex> {
     let mut index = BoundaryIndex::default();
     for (activation_id, selector) in selectors {
@@ -86,24 +87,164 @@ pub(super) fn collect_boundaries(
             .iter()
             .rfind(|insn| line_arrow_register_value(&insn.line, "x0").is_some())
             .map(|insn| insn.seq);
-        let (memory_reads, _, memory_unresolved) =
+        let (memory_reads, memory_writes, memory_unresolved) =
             super::super::function_facts::dataflow::collect_memory_facts(
                 state,
                 &owned,
                 &Default::default(),
                 return_producer,
             );
+        let literal_reads = memory_reads.clone();
+        let (memory_reads, global_reads, _, global_writes) =
+            super::super::function_facts::globals::partition_memory_facts(
+                &owned,
+                global_map,
+                memory_reads,
+                memory_writes,
+            );
         for (read_index, read) in memory_reads.iter().enumerate() {
             for seq in &read.read_seqs {
+                if owned
+                    .iter()
+                    .find(|insn| insn.seq == *seq)
+                    .is_some_and(|insn| literal_load_address(insn) == parse_address(&read.address))
+                {
+                    continue;
+                }
                 let endpoint = GraphMechanicalEndpointDto::DynamicSource {
                     owner: selector.clone(),
                     read_index: u32::try_from(read_index).map_err(|_| {
                         TraceError::InvalidArgument("memory read index exceeds u32".to_owned())
                     })?,
                     seq: *seq,
+                    address: read.address.clone(),
+                    size: read.size,
+                    bytes: read.bytes.clone(),
                 };
                 if closure.contains(seq) {
                     index.by_seq.insert(*seq, endpoint);
+                }
+            }
+        }
+        for (access_index, read) in global_reads.iter().enumerate() {
+            for seq in &read.read_seqs {
+                if closure.contains(seq) {
+                    index.by_seq.insert(
+                        *seq,
+                        GraphMechanicalEndpointDto::GlobalReference {
+                            owner: selector.clone(),
+                            access_index: u32::try_from(access_index).map_err(|_| {
+                                TraceError::InvalidArgument(
+                                    "global read index exceeds u32".to_owned(),
+                                )
+                            })?,
+                            seq: *seq,
+                            access: "read".to_owned(),
+                            global: read.global.clone(),
+                            size: read.size,
+                            bytes: read.bytes.clone(),
+                        },
+                    );
+                }
+            }
+        }
+        let write_base = global_reads.len();
+        for (write_index, write) in global_writes.iter().enumerate() {
+            for seq in &write.write_seqs {
+                if closure.contains(seq) {
+                    index.by_seq.insert(
+                        *seq,
+                        GraphMechanicalEndpointDto::GlobalReference {
+                            owner: selector.clone(),
+                            access_index: u32::try_from(write_base + write_index).map_err(
+                                |_| {
+                                    TraceError::InvalidArgument(
+                                        "global write index exceeds u32".to_owned(),
+                                    )
+                                },
+                            )?,
+                            seq: *seq,
+                            access: "write".to_owned(),
+                            global: write.global.clone(),
+                            size: write.size,
+                            bytes: write.bytes.clone(),
+                        },
+                    );
+                }
+            }
+        }
+        let mut literal_sources = BTreeMap::<u32, Vec<usize>>::new();
+        for insn in &owned {
+            if closure.contains(&insn.seq) && literal_load_address(insn).is_some() {
+                literal_sources.entry(insn.seq).or_default();
+            }
+        }
+        for (source_index, read) in literal_reads.iter().enumerate() {
+            for seq in &read.read_seqs {
+                if owned
+                    .iter()
+                    .find(|insn| insn.seq == *seq)
+                    .is_some_and(|insn| literal_load_address(insn) == parse_address(&read.address))
+                {
+                    literal_sources.entry(*seq).or_default().push(source_index);
+                }
+            }
+        }
+        for (seq, sources) in &literal_sources {
+            if sources.len() != 1 {
+                index.unresolved.push(UnresolvedBoundary {
+                    kind: "literal_source_incomplete".to_owned(),
+                    seq: *seq,
+                    detail: "literal load does not resolve to one complete FunctionCallRecord memory_read".to_owned(),
+                });
+                continue;
+            }
+            let source_index = sources[0];
+            let read = &literal_reads[source_index];
+            let Some(insn) = owned.iter().find(|insn| insn.seq == *seq) else {
+                continue;
+            };
+            let Some(width) = insn
+                .mnemonic
+                .as_deref()
+                .zip(insn.first_operand.as_deref())
+                .and_then(|(mnemonic, operand)| {
+                    super::super::function_facts::lines::access_width(mnemonic, operand)
+                })
+            else {
+                continue;
+            };
+            if read.bytes.is_none() || read.size != width {
+                index.unresolved.push(UnresolvedBoundary {
+                    kind: "literal_source_incomplete".to_owned(),
+                    seq: *seq,
+                    detail: "literal load source does not cover the complete instruction width"
+                        .to_owned(),
+                });
+                continue;
+            }
+            for seq in &read.read_seqs {
+                let Some(insn) = owned.iter().find(|insn| insn.seq == *seq) else {
+                    continue;
+                };
+                if closure.contains(seq)
+                    && literal_load_address(insn) == parse_address(&read.address)
+                {
+                    index.by_seq.insert(
+                        *seq,
+                        GraphMechanicalEndpointDto::Constant {
+                            owner: selector.clone(),
+                            source_index: u32::try_from(source_index).map_err(|_| {
+                                TraceError::InvalidArgument(
+                                    "constant source index exceeds u32".to_owned(),
+                                )
+                            })?,
+                            seq: *seq,
+                            address: read.address.clone(),
+                            size: read.size,
+                            bytes: read.bytes.clone().expect("checked constant bytes"),
+                        },
+                    );
                 }
             }
         }
@@ -116,6 +257,7 @@ pub(super) fn collect_boundaries(
                 .any(|read| read.read_seqs.contains(&insn.seq));
             if closure.contains(&insn.seq)
                 && reads_memory
+                && literal_load_address(insn).is_none()
                 && (has_complete_record
                     || gumtrace_read
                     || initial_loads
@@ -139,6 +281,9 @@ pub(super) fn collect_boundaries(
                             owner: selector.clone(),
                             read_index,
                             seq: insn.seq,
+                            address: memory_reads[read_index as usize].address.clone(),
+                            size: memory_reads[read_index as usize].size,
+                            bytes: memory_reads[read_index as usize].bytes.clone(),
                         },
                     );
                 } else {
@@ -210,6 +355,22 @@ pub(super) fn map_endpoint(
         seq,
         owner: selector.clone(),
     })
+}
+
+fn literal_load_address(insn: &super::super::function_facts::blocks::OwnedInsn) -> Option<u64> {
+    let address = insn
+        .mnemonic
+        .as_deref()
+        .zip(insn.first_operand.as_deref())
+        .and_then(|(mnemonic, operand)| {
+            super::super::function_facts::dataflow::literal_load_address(mnemonic, operand)
+        })?;
+    (super::super::function_facts::lines::line_mem_annotation(&insn.line, "mem_r") == Some(address))
+        .then_some(address)
+}
+
+fn parse_address(address: &str) -> Option<u64> {
+    crate::parse_hex_addr(address).ok()
 }
 
 fn event_special_seqs(

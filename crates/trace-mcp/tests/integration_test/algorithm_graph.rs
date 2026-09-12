@@ -195,6 +195,195 @@ fn graph_facts_materialize_a_target_related_dynamic_source() {
 }
 
 #[test]
+fn graph_facts_materialize_target_related_global_and_literal_boundaries() {
+    let (engine, sid, path) = function_facts::setup_inline_trace(&[
+        "[App] 0x401000!0x1000 bl #0x402000; x4=0x5000 sp=0x6000",
+        "[App] 0x402000!0x2000 adrp x8, #0x404000; x8=0x0 -> x8=0x404000",
+        "[App] 0x402004!0x2004 ldr x0, [x8, #0x20]; x8=0x404000 mem_r=0x404020 -> x0=0x7",
+        "[App] 0x402008!0x2008 ldr x1, #0x404100; x1=0x0 mem_r=0x404100 -> x1=0x5",
+        "[App] 0x40200c!0x200c eor x2, x0, x1; x0=0x7 x1=0x5 -> x2=0x2",
+        "[App] 0x402010!0x2010 str x2, [x4]; x2=0x2 x4=0x5000 ; mem[WRITE] abs=0x5000 x2=0x2",
+        "[App] 0x402014!0x2014 ret; sp=0x6000",
+        "[App] 0x401004!0x1004 mov x0, x0; x0=0x2 -> x0=0x2",
+    ]);
+    let owner = selector("App+0x2000", 0, 1, 6, 7);
+
+    let facts = engine
+        .get_algorithm_graph_facts_for_modules(
+            &sid,
+            5,
+            0x5000,
+            8,
+            Some("write"),
+            std::slice::from_ref(&owner),
+            &["App".to_owned()],
+        )
+        .expect("algorithm graph facts");
+
+    assert!(facts.dependency_edges.iter().any(|edge| {
+        matches!(
+            &edge.producer,
+            GraphMechanicalEndpointDto::GlobalReference {
+                owner: endpoint_owner,
+                access_index: 0,
+                seq: 2,
+                global,
+                ..
+            } if *endpoint_owner == owner && global == "App+0x4020"
+        ) && edge.consumer.seq() == Some(4)
+    }));
+    assert!(facts.dependency_edges.iter().any(|edge| {
+        matches!(
+            &edge.producer,
+            GraphMechanicalEndpointDto::Constant {
+                owner: endpoint_owner,
+                source_index: 1,
+                seq: 3,
+                size: 8,
+                bytes,
+                ..
+            } if *endpoint_owner == owner && bytes == "0500000000000000"
+        ) && edge.consumer.seq() == Some(4)
+    }));
+
+    engine.close_session(&sid).unwrap();
+    std::fs::remove_file(path).expect("remove inline trace");
+}
+
+#[test]
+fn graph_facts_keep_pure_immediate_sources_fail_closed() {
+    let (engine, sid, path) = function_facts::setup_inline_trace(&[
+        "[App] 0x401000!0x1000 bl #0x402000; x4=0x5000 sp=0x6000",
+        "[App] 0x402000!0x2000 mov x0, #0x5; x0=0x0 -> x0=0x5",
+        "[App] 0x402004!0x2004 str x0, [x4]; x0=0x5 x4=0x5000 ; mem[WRITE] abs=0x5000 x0=0x5",
+        "[App] 0x402008!0x2008 ret; sp=0x6000",
+        "[App] 0x401004!0x1004 mov x0, x0; x0=0x5 -> x0=0x5",
+    ]);
+    let owner = selector("App+0x2000", 0, 1, 3, 4);
+
+    let facts = engine
+        .get_algorithm_graph_facts_for_modules(
+            &sid,
+            2,
+            0x5000,
+            8,
+            Some("write"),
+            std::slice::from_ref(&owner),
+            &["App".to_owned()],
+        )
+        .expect("algorithm graph facts");
+
+    assert!(!facts
+        .dependency_edges
+        .iter()
+        .any(|edge| matches!(edge.producer, GraphMechanicalEndpointDto::Constant { .. })));
+
+    engine.close_session(&sid).unwrap();
+    std::fs::remove_file(path).expect("remove inline trace");
+}
+
+#[test]
+fn graph_facts_do_not_materialize_an_internal_literal_read_as_constant() {
+    let (engine, sid, path) = function_facts::setup_inline_trace(&[
+        "[App] 0x401000!0x1000 bl #0x402000; x4=0x5000 sp=0x6000",
+        "[App] 0x402000!0x2000 str w1, [x8]; w1=0x5 x8=0x404100 mem_w=0x404100",
+        "[App] 0x402004!0x2004 ldr w0, #0x404100; w0=0x0 mem_r=0x404100 -> w0=0x5",
+        "[App] 0x402008!0x2008 str x0, [x4]; x0=0x5 x4=0x5000 ; mem[WRITE] abs=0x5000 x0=0x5",
+        "[App] 0x40200c!0x200c ret; sp=0x6000",
+        "[App] 0x401004!0x1004 mov x0, x0; x0=0x5 -> x0=0x5",
+    ]);
+    let owner = selector("App+0x2000", 0, 1, 4, 5);
+
+    let facts = engine
+        .get_algorithm_graph_facts_for_modules(
+            &sid,
+            3,
+            0x5000,
+            8,
+            Some("write"),
+            std::slice::from_ref(&owner),
+            &["App".to_owned()],
+        )
+        .expect("algorithm graph facts");
+
+    assert!(!facts
+        .dependency_edges
+        .iter()
+        .any(|edge| matches!(edge.producer, GraphMechanicalEndpointDto::Constant { .. })));
+
+    engine.close_session(&sid).unwrap();
+    std::fs::remove_file(path).expect("remove inline trace");
+}
+
+#[test]
+fn graph_facts_fail_closed_for_partially_internal_literal_reads() {
+    let (engine, sid, path) = function_facts::setup_inline_trace(&[
+        "[App] 0x401000!0x1000 bl #0x402000; x4=0x5000 sp=0x6000",
+        "[App] 0x402000!0x2000 strb w1, [x8, #1]; w1=0xaa x8=0x404100 mem_w=0x404101",
+        "[App] 0x402004!0x2004 ldr w0, #0x404100; w0=0x0 mem_r=0x404100 -> w0=0x0506aa08",
+        "[App] 0x402008!0x2008 str x0, [x4]; x0=0x0506aa08 x4=0x5000 ; mem[WRITE] abs=0x5000 x0=0x0506aa08",
+        "[App] 0x40200c!0x200c ret; sp=0x6000",
+        "[App] 0x401004!0x1004 mov x0, x0; x0=0x0506aa08 -> x0=0x0506aa08",
+    ]);
+    let owner = selector("App+0x2000", 0, 1, 4, 5);
+    let facts = engine
+        .get_algorithm_graph_facts_for_modules(
+            &sid,
+            3,
+            0x5000,
+            8,
+            Some("write"),
+            std::slice::from_ref(&owner),
+            &["App".to_owned()],
+        )
+        .expect("algorithm graph facts");
+    assert!(!facts
+        .dependency_edges
+        .iter()
+        .any(|edge| matches!(edge.producer, GraphMechanicalEndpointDto::Constant { .. })));
+    engine.close_session(&sid).unwrap();
+    std::fs::remove_file(path).expect("remove inline trace");
+}
+
+#[test]
+fn graph_facts_reject_malformed_or_mismatched_literal_addresses_as_constants() {
+    for literal in ["#symbol", "#0x404100junk", "#0x404100"] {
+        let memory = if literal == "#0x404100" {
+            "0x505000"
+        } else {
+            "0x404100"
+        };
+        let line =
+            format!("[App] 0x402000!0x2000 ldr x0, {literal}; x0=0x0 mem_r={memory} -> x0=0x5");
+        let (engine, sid, path) = function_facts::setup_inline_trace(&[
+            "[App] 0x401000!0x1000 bl #0x402000; x4=0x5000 sp=0x6000",
+            &line,
+            "[App] 0x402004!0x2004 str x0, [x4]; x0=0x5 x4=0x5000 ; mem[WRITE] abs=0x5000 x0=0x5",
+            "[App] 0x402008!0x2008 ret; sp=0x6000",
+            "[App] 0x401004!0x1004 mov x0, x0; x0=0x5 -> x0=0x5",
+        ]);
+        let owner = selector("App+0x2000", 0, 1, 3, 4);
+        let facts = engine
+            .get_algorithm_graph_facts_for_modules(
+                &sid,
+                2,
+                0x5000,
+                8,
+                Some("write"),
+                std::slice::from_ref(&owner),
+                &["App".to_owned()],
+            )
+            .expect("algorithm graph facts");
+        assert!(!facts
+            .dependency_edges
+            .iter()
+            .any(|edge| matches!(edge.producer, GraphMechanicalEndpointDto::Constant { .. })));
+        engine.close_session(&sid).unwrap();
+        std::fs::remove_file(path).expect("remove inline trace");
+    }
+}
+
+#[test]
 fn graph_facts_exclude_an_independent_root_event() {
     let (engine, sid, path) = function_facts::setup_inline_trace(&[
         "[App] 0x5000!0x5000 bl #0x1000; sp=0x3000",

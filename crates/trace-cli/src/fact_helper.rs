@@ -26,6 +26,8 @@ struct FactHelperRequest {
     entry_seq: u32,
     #[serde(default)]
     function: Option<String>,
+    #[serde(default)]
+    target_modules: Vec<String>,
 }
 
 pub(crate) fn requested() -> bool {
@@ -68,7 +70,12 @@ pub(crate) fn run() -> anyhow::Result<()> {
         .map_err(|error| anyhow::anyhow!("failed to build index: {error}"))?;
 
     let bundle = engine
-        .get_function_facts(&sid, request.call_seq, request.entry_seq)
+        .get_function_facts_for_modules(
+            &sid,
+            request.call_seq,
+            request.entry_seq,
+            &request.target_modules,
+        )
         .map_err(|error| anyhow::anyhow!("get_function_facts failed: {error}"))?;
 
     if let Some(ref expected_function) = request.function {
