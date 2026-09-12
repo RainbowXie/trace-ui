@@ -398,6 +398,55 @@ pub struct FunctionFactUnresolvedDto {
     pub detail: String,
 }
 
+// ── Algorithm Graph mechanical facts ──
+
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
+pub struct GraphActivationDto {
+    pub function: String,
+    pub call_seq: u32,
+    pub entry_seq: u32,
+    pub exit_seq: u32,
+    pub resume_seq: u32,
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
+pub struct AlgorithmGraphFactBundleDto {
+    pub target_seq: u32,
+    pub activations: Vec<GraphActivationDto>,
+    pub call_edges: Vec<GraphCallEdgeDto>,
+    pub dependency_edges: Vec<GraphDependencyEdgeDto>,
+    pub unresolved: Vec<GraphFactUnresolvedDto>,
+    pub content_identity: String,
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
+pub struct GraphCallEdgeDto {
+    pub caller: GraphActivationDto,
+    pub callee: GraphActivationDto,
+    pub call_seq: u32,
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
+pub struct GraphInstructionEndpointDto {
+    pub seq: u32,
+    pub activation: Option<GraphActivationDto>,
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
+pub struct GraphDependencyEdgeDto {
+    pub producer: GraphInstructionEndpointDto,
+    pub consumer: GraphInstructionEndpointDto,
+    pub kind: String,
+    pub pair_part: Option<String>,
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
+pub struct GraphFactUnresolvedDto {
+    pub kind: String,
+    pub seqs: Vec<u32>,
+    pub detail: String,
+}
+
 // ── Strings ──
 
 pub struct StringQueryOptions {

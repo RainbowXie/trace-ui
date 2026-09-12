@@ -11,6 +11,7 @@ use trace_core::TraceEngine;
 // verifying the actual logic paths that MCP tools exercise.
 
 mod activation;
+mod algorithm_graph;
 mod analysis;
 mod cache_corruption;
 mod cache_semantic_corruption;
