@@ -270,16 +270,19 @@ fn attach_unowned_boundaries(
         if boundaries.by_seq.contains_key(seq) || tree.activation_for_seq(*seq).is_some() {
             continue;
         }
-        let owner = selectors
+        let mut owners = selectors
             .values()
-            .find(|selector| selector.entry_seq <= *seq && *seq <= selector.exit_seq)
-            .cloned()
-            .or_else(|| selectors.values().next().cloned());
-        let Some(owner) = owner else {
-            return Err(TraceError::InvalidArgument(format!(
+            .filter(|selector| selector.entry_seq <= *seq && *seq <= selector.exit_seq);
+        let owner = owners.next().cloned().ok_or_else(|| {
+            TraceError::InvalidArgument(format!(
                 "Graph occurrence seq {seq} has no requested Activation owner"
+            ))
+        })?;
+        if owners.next().is_some() {
+            return Err(TraceError::InvalidArgument(format!(
+                "Graph occurrence seq {seq} matches more than one requested Activation owner"
             )));
-        };
+        }
         let line = state
             .line_index_view()
             .and_then(|lines| lines.get_line(&state.mmap, *seq))

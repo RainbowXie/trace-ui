@@ -122,20 +122,26 @@ pub(super) fn collect_boundaries(
                         .as_ref()
                         .is_none_or(|loads| loads.get(insn.seq as usize)))
             {
-                let read_index = memory_reads
+                if let Some(read_index) = memory_reads
                     .iter()
                     .position(|read| read.read_seqs.contains(&insn.seq))
-                    .and_then(|index| u32::try_from(index).ok())
-                    .unwrap_or(u32::MAX);
-                index.by_seq.insert(
-                    insn.seq,
-                    GraphMechanicalEndpointDto::DynamicSource {
-                        owner: selector.clone(),
-                        read_index,
-                        seq: insn.seq,
-                    },
-                );
-                if read_index == u32::MAX {
+                    .map(u32::try_from)
+                    .transpose()
+                    .map_err(|_| {
+                        TraceError::InvalidArgument(
+                            "dynamic source memory_read index exceeds u32".to_owned(),
+                        )
+                    })?
+                {
+                    index.by_seq.insert(
+                        insn.seq,
+                        GraphMechanicalEndpointDto::DynamicSource {
+                            owner: selector.clone(),
+                            read_index,
+                            seq: insn.seq,
+                        },
+                    );
+                } else {
                     index.unresolved.push(UnresolvedBoundary {
                         kind: "dynamic_source_record_unresolved".to_owned(),
                         seq: insn.seq,
