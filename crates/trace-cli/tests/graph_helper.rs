@@ -46,20 +46,20 @@ fn run_graph_helper(trace_fd: RawFd, request: &[u8]) -> Output {
 }
 
 #[test]
-fn graph_helper_reads_inherited_fd_and_returns_mechanical_facts() {
+fn graph_helper_reads_inherited_fd_and_echoes_complete_activation_selectors() {
     let path = std::env::temp_dir().join(format!(
         "trace-ui-graph-helper-{}-valid.log",
         std::process::id()
     ));
     std::fs::write(
         &path,
-        "[App] 0x1000!0x1000 mov x0, #1; x0=0x0 -> x0=0x1\n[App] 0x1004!0x1004 str x0, [x1]; x0=0x1 x1=0x1000 ; mem[WRITE] abs=0x1000 x0=0x1\n",
+        "[App] 0x5000!0x5000 bl #0x1000; sp=0x3000\n[App] 0x1000!0x1000 mov x0, #1; x0=0x0 -> x0=0x1\n[App] 0x1004!0x1004 str x0, [x1]; x0=0x1 x1=0x1000 ; mem[WRITE] abs=0x1000 x0=0x1\n[App] 0x1008!0x1008 ret; sp=0x3000\n[App] 0x5004!0x5004 mov x0, x0; x0=0x1 -> x0=0x1\n",
     )
     .expect("trace");
     let trace = std::fs::File::open(&path).expect("open trace");
     let output = run_graph_helper(
         trace.as_raw_fd(),
-        br#"{"target_seq":1,"target_address":4096,"target_size":8,"target_rw":"write"}"#,
+        br#"{"target_seq":2,"target_address":4096,"target_size":8,"target_rw":"write","activations":[{"trace":{"artifact":"request.json","pointer":"/trace_files/0"},"function":"App+0x1000","call_seq":0,"entry_seq":1,"exit_seq":3,"resume_seq":4}]}"#,
     );
     assert!(
         output.status.success(),
@@ -67,11 +67,16 @@ fn graph_helper_reads_inherited_fd_and_returns_mechanical_facts() {
         String::from_utf8_lossy(&output.stderr)
     );
     let value: serde_json::Value = serde_json::from_slice(&output.stdout).expect("json response");
-    assert_eq!(value["target_seq"], 1);
-    assert_eq!(value["dependency_edges"][0]["producer"]["seq"], 0);
+    assert_eq!(value["target_seq"], 2);
+    assert_eq!(value["target"]["kind"], "instruction");
+    assert_eq!(
+        value["target"]["owner"]["trace"]["pointer"],
+        "/trace_files/0"
+    );
+    assert_eq!(value["activations"][0]["function"], "App+0x1000");
     assert!(value["content_identity"]
         .as_str()
-        .is_some_and(|id| !id.is_empty()));
+        .is_some_and(|identity| !identity.is_empty()));
     std::fs::remove_file(path).expect("remove trace");
 }
 
@@ -85,7 +90,7 @@ fn graph_helper_rejects_unknown_control_fields_without_partial_stdout() {
     let trace = std::fs::File::open(&path).expect("open trace");
     let output = run_graph_helper(
         trace.as_raw_fd(),
-        br#"{"target_seq":0,"target_address":4096,"target_size":8,"target_rw":null,"nodes":[]}"#,
+        br#"{"target_seq":0,"target_address":4096,"target_size":8,"target_rw":null,"activations":[],"nodes":[]}"#,
     );
     assert!(!output.status.success());
     assert!(

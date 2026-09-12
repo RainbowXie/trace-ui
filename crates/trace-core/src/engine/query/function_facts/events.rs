@@ -20,7 +20,7 @@ use super::{known_register, registers_at};
 /// 恒为空。截断（resume 未观察）的调用在 Activation 模型里必然伴随
 /// 包含它的 Activation 未闭合，confirmed-only 查询不可达；该形状由
 /// 状态机侧（build/merge 校验）负责。
-pub(super) fn collect_external_call_events(
+pub(crate) fn collect_external_call_events(
     state: &crate::session::SessionState,
     tree: &crate::query::activation::ActivationTree,
     activation: &crate::query::activation::ConfirmedActivation,

@@ -400,8 +400,17 @@ pub struct FunctionFactUnresolvedDto {
 
 // ── Algorithm Graph mechanical facts ──
 
-#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
-pub struct GraphActivationDto {
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[serde(deny_unknown_fields)]
+pub struct GraphTraceReferenceDto {
+    pub artifact: String,
+    pub pointer: String,
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[serde(deny_unknown_fields)]
+pub struct GraphActivationSelectorDto {
+    pub trace: GraphTraceReferenceDto,
     pub function: String,
     pub call_seq: u32,
     pub entry_seq: u32,
@@ -410,37 +419,108 @@ pub struct GraphActivationDto {
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
 pub struct AlgorithmGraphFactBundleDto {
     pub target_seq: u32,
-    pub activations: Vec<GraphActivationDto>,
+    pub target: GraphMechanicalEndpointDto,
+    pub activations: Vec<GraphActivationSelectorDto>,
     pub call_edges: Vec<GraphCallEdgeDto>,
+    pub external_call_events: Vec<GraphExternalCallEventDto>,
     pub dependency_edges: Vec<GraphDependencyEdgeDto>,
     pub unresolved: Vec<GraphFactUnresolvedDto>,
     pub content_identity: String,
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
 pub struct GraphCallEdgeDto {
-    pub caller: GraphActivationDto,
-    pub callee: GraphActivationDto,
+    pub caller: GraphActivationSelectorDto,
+    pub callee: GraphActivationSelectorDto,
     pub call_seq: u32,
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
-pub struct GraphInstructionEndpointDto {
-    pub seq: u32,
-    pub activation: Option<GraphActivationDto>,
+#[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
+pub enum GraphMechanicalEndpointDto {
+    Instruction {
+        seq: u32,
+        owner: GraphActivationSelectorDto,
+    },
+    ExternalCallEvent {
+        owner: GraphActivationSelectorDto,
+        event_index: u32,
+        call_seq: u32,
+        resume_seq: u32,
+    },
+    DynamicSource {
+        owner: GraphActivationSelectorDto,
+        read_index: u32,
+        seq: u32,
+    },
+    GlobalReference {
+        owner: GraphActivationSelectorDto,
+        access_index: u32,
+        seq: u32,
+        global: String,
+    },
+    Constant {
+        owner: GraphActivationSelectorDto,
+        source_index: u32,
+        seq: u32,
+        size: u32,
+        bytes: String,
+    },
+    Unresolved {
+        owner: GraphActivationSelectorDto,
+        unresolved_index: u32,
+        seq: u32,
+    },
+}
+
+impl GraphMechanicalEndpointDto {
+    pub fn seq(&self) -> Option<u32> {
+        Some(match self {
+            Self::Instruction { seq, .. }
+            | Self::DynamicSource { seq, .. }
+            | Self::GlobalReference { seq, .. }
+            | Self::Constant { seq, .. }
+            | Self::Unresolved { seq, .. } => *seq,
+            Self::ExternalCallEvent { .. } => return None,
+        })
+    }
+
+    pub fn owner(&self) -> &GraphActivationSelectorDto {
+        match self {
+            Self::Instruction { owner, .. }
+            | Self::ExternalCallEvent { owner, .. }
+            | Self::DynamicSource { owner, .. }
+            | Self::GlobalReference { owner, .. }
+            | Self::Constant { owner, .. }
+            | Self::Unresolved { owner, .. } => owner,
+        }
+    }
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
+#[serde(deny_unknown_fields)]
+pub struct GraphExternalCallEventDto {
+    pub owner: GraphActivationSelectorDto,
+    pub event_index: u32,
+    pub call_seq: u32,
+    pub resume_seq: u32,
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
 pub struct GraphDependencyEdgeDto {
-    pub producer: GraphInstructionEndpointDto,
-    pub consumer: GraphInstructionEndpointDto,
+    pub producer: GraphMechanicalEndpointDto,
+    pub consumer: GraphMechanicalEndpointDto,
     pub kind: String,
     pub pair_part: Option<String>,
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
 pub struct GraphFactUnresolvedDto {
     pub kind: String,
     pub seqs: Vec<u32>,

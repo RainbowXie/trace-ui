@@ -5,9 +5,9 @@
 //! consumer 读写）、`events`（External Call Event）。
 
 mod abi;
-mod blocks;
-mod dataflow;
-mod events;
+pub(crate) mod blocks;
+pub(crate) mod dataflow;
+pub(crate) mod events;
 mod lines;
 
 use std::collections::BTreeMap;

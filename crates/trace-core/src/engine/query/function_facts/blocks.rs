@@ -13,13 +13,13 @@ use super::lines::{first_operand, line_mnemonic};
 /// 本 Activation 窗口内属于它自己的一条指令：稳定身份 + 是否控制转移 +
 /// 栈参数机械查询需要的行内片段（V1 保存行文本；有界 serializer 任务
 /// 到来时改为流式两遍扫描）。
-pub(super) struct OwnedInsn {
-    pub(super) seq: u32,
-    pub(super) site: String,
-    pub(super) transfer: bool,
-    pub(super) line: String,
-    pub(super) mnemonic: Option<String>,
-    pub(super) first_operand: Option<String>,
+pub(crate) struct OwnedInsn {
+    pub(crate) seq: u32,
+    pub(crate) site: String,
+    pub(crate) transfer: bool,
+    pub(crate) line: String,
+    pub(crate) mnemonic: Option<String>,
+    pub(crate) first_operand: Option<String>,
 }
 
 /// 冻结切分规则的块终止指令：条件/无条件/间接跳转、调用边界与返回。
@@ -40,7 +40,7 @@ fn is_control_transfer(mnemonic: &str) -> bool {
 /// 窗口内属于本 Activation 的指令序列：嵌套 Activation（含未闭合者，
 /// 只要窗口严格包含）的指令不属于 caller，按区间排除；BL 与 resume 指令
 /// 仍属 caller。
-pub(super) fn owned_instructions(
+pub(crate) fn owned_instructions(
     state: &crate::session::SessionState,
     tree: &crate::query::activation::ActivationTree,
     activation: &crate::query::activation::ConfirmedActivation,

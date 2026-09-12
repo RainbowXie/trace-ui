@@ -254,7 +254,7 @@ impl FinalByteMap {
 /// - 已确认为栈参数的槽不重复进入 memory_reads；
 /// - 影响目标但宽度未覆盖的访存产生 unsupported_instruction unresolved，
 ///   不得「空 reads + 空 unresolved」静默消失。
-pub(super) fn collect_memory_facts(
+pub(crate) fn collect_memory_facts(
     state: &crate::session::SessionState,
     owned: &[OwnedInsn],
     stack_slots: &HashSet<(u64, u32)>,

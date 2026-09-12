@@ -11,7 +11,7 @@ use std::sync::Arc;
 use std::os::fd::{FromRawFd, RawFd};
 
 use serde::Deserialize;
-use trace_core::api_types::AlgorithmGraphFactBundleDto;
+use trace_core::api_types::{AlgorithmGraphFactBundleDto, GraphActivationSelectorDto};
 use trace_core::{BuildOptions, TraceEngine};
 
 const MAX_GRAPH_FACT_BUNDLE_BYTES: usize = 64 * 1024 * 1024;
@@ -24,6 +24,7 @@ struct GraphHelperRequest {
     target_address: u64,
     target_size: u32,
     target_rw: Option<String>,
+    activations: Vec<GraphActivationSelectorDto>,
 }
 
 pub(crate) fn requested() -> bool {
@@ -65,6 +66,7 @@ pub(crate) fn run() -> anyhow::Result<()> {
         request.target_address,
         request.target_size,
         request.target_rw.as_deref(),
+        &request.activations,
     )?;
     write_response(&facts)
 }
