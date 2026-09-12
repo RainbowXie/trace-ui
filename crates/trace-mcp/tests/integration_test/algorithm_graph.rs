@@ -157,7 +157,7 @@ fn graph_facts_echo_full_selectors_and_map_external_return_to_event_endpoint() {
 fn graph_facts_materialize_a_target_related_dynamic_source() {
     let (engine, sid, path) = function_facts::setup_inline_trace(&[
         "[App] 0x5000!0x5000 bl #0x1000; sp=0x3000",
-        "[App] 0x1000!0x1000 ldr x0, [x1]; x1=0x6000 ; mem[READ] abs=0x6000 x0=0x42 -> x0=0x42",
+        "[App] 0x1000!0x1000 ldr x0, [x1]; x1=0x6000 mem_r=0x6000 -> x0=0x42",
         "[App] 0x1004!0x1004 str x0, [x4]; x0=0x42 x4=0x4000 ; mem[WRITE] abs=0x4000 x0=0x42",
         "[App] 0x1008!0x1008 ret; sp=0x3000",
         "[App] 0x5004!0x5004 mov x0, x0; x0=0x42 -> x0=0x42",
