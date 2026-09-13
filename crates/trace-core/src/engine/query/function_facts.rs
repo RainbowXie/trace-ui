@@ -117,8 +117,33 @@ impl crate::engine::TraceEngine {
             .iter()
             .rfind(|insn| arrow_register_value(&insn.line, "x0").is_some())
             .map(|insn| insn.seq);
-        let (memory_reads, memory_writes, access_unresolved) =
+        let (memory_reads, memory_writes, mut access_unresolved) =
             collect_memory_facts(&state, &owned, &stack_argument_slots, return_producer);
+        for insn in &owned {
+            if insn.mnemonic.as_deref().is_some_and(|mnemonic| {
+                matches!(mnemonic, "mov" | "movz" | "movn")
+                    && insn
+                        .first_operand
+                        .as_deref()
+                        .is_some_and(pure_immediate_source)
+            }) {
+                access_unresolved.push(crate::api_types::FunctionFactUnresolvedDto {
+                    kind: "unsupported_instruction".to_owned(),
+                    seqs: vec![insn.seq],
+                    location: None,
+                    detail: "pure immediate source has no frozen SourceReference".to_owned(),
+                });
+            }
+        }
+        access_unresolved.sort_by(|left, right| {
+            left.seqs
+                .cmp(&right.seqs)
+                .then(left.kind.cmp(&right.kind))
+                .then(left.detail.cmp(&right.detail))
+        });
+        access_unresolved.dedup_by(|left, right| {
+            left.seqs == right.seqs && left.kind == right.kind && left.detail == right.detail
+        });
         let global_map = global_map::StableGlobalMap::collect(&state, target_modules)?;
         let (memory_reads, global_reads, memory_writes, global_writes) =
             globals::partition_memory_facts(&owned, &global_map, memory_reads, memory_writes);
@@ -163,6 +188,14 @@ impl crate::engine::TraceEngine {
             unresolved: access_unresolved,
         })
     }
+}
+
+fn pure_immediate_source(operands: &str) -> bool {
+    let parts = operands.split(',').map(str::trim).collect::<Vec<_>>();
+    parts.len() >= 2
+        && parts[1].starts_with('#')
+        && !operands.contains('[')
+        && !matches!(parts[0], "sp" | "wsp")
 }
 
 /// 从最近的寄存器检查点重放到 `seq` 之前（不含 `seq`）：边界值必须取

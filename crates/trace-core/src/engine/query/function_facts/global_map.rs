@@ -6,7 +6,6 @@ use super::super::activation::stable_runtime_site;
 
 pub(crate) struct StableGlobalMap {
     pub(super) bases: BTreeMap<String, u64>,
-    pub(super) limits: BTreeMap<String, u64>,
     pub(super) target_modules: BTreeSet<String>,
 }
 
@@ -19,7 +18,6 @@ impl StableGlobalMap {
         if target_modules.is_empty() {
             return Ok(Self {
                 bases: BTreeMap::new(),
-                limits: BTreeMap::new(),
                 target_modules,
             });
         }
@@ -52,24 +50,8 @@ impl StableGlobalMap {
                 )));
             }
         }
-        let mut ordered = bases
-            .iter()
-            .map(|(module, base)| (base, module))
-            .collect::<Vec<_>>();
-        ordered.sort();
-        let mut limits = BTreeMap::new();
-        for (index, (base, module)) in ordered.iter().enumerate() {
-            let limit = ordered.get(index + 1).map_or(u64::MAX, |(next, _)| **next);
-            if **base >= limit {
-                return Err(TraceError::InvalidArgument(
-                    "target module runtime ranges overlap".to_owned(),
-                ));
-            }
-            limits.insert((*module).clone(), limit);
-        }
         Ok(Self {
             bases,
-            limits,
             target_modules,
         })
     }

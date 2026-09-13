@@ -273,10 +273,16 @@ fn graph_facts_keep_pure_immediate_sources_fail_closed() {
         )
         .expect("algorithm graph facts");
 
-    assert!(!facts
-        .dependency_edges
-        .iter()
-        .any(|edge| matches!(edge.producer, GraphMechanicalEndpointDto::Constant { .. })));
+    assert!(
+        facts
+            .dependency_edges
+            .iter()
+            .any(|edge| { matches!(edge.producer, GraphMechanicalEndpointDto::Unresolved { .. }) }),
+        "facts={facts:?}"
+    );
+    assert_eq!(facts.unresolved.len(), 1);
+    assert_eq!(facts.unresolved[0].kind, "unsupported_instruction");
+    assert_eq!(facts.unresolved[0].seqs, vec![1]);
 
     engine.close_session(&sid).unwrap();
     std::fs::remove_file(path).expect("remove inline trace");

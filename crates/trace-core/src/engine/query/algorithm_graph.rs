@@ -127,6 +127,22 @@ impl crate::engine::TraceEngine {
                 })
                 .collect::<Result<Vec<_>>>()?,
         );
+        for seq in boundary_index.by_seq.iter().filter_map(|(seq, endpoint)| {
+            matches!(endpoint, GraphMechanicalEndpointDto::Unresolved { .. }).then_some(*seq)
+        }) {
+            if closure.contains(&seq)
+                && !dependency_edges.iter().any(|edge| {
+                    edge.producer.seq() == Some(seq) || edge.consumer.seq() == Some(seq)
+                })
+            {
+                dependency_edges.push(GraphDependencyEdgeDto {
+                    producer: map_endpoint(&state, tree, &selectors, &boundary_index, seq)?,
+                    consumer: map_endpoint(&state, tree, &selectors, &boundary_index, target_seq)?,
+                    kind: "data".to_owned(),
+                    pair_part: None,
+                });
+            }
+        }
         dependency_edges.sort_by(dependency_order);
         dependency_edges.dedup();
 
@@ -313,27 +329,16 @@ fn attach_unowned_boundaries(
             .and_then(|lines| lines.get_line(&state.mmap, *seq))
             .and_then(|raw| std::str::from_utf8(raw).ok())
             .unwrap_or("");
-        let unresolved_index = u32::try_from(boundaries.unresolved.len()).map_err(|_| {
-            TraceError::InvalidArgument("unresolved boundary index exceeds u32".to_owned())
-        })?;
-        boundaries.by_seq.insert(
-            *seq,
-            GraphMechanicalEndpointDto::Unresolved {
-                owner,
-                unresolved_index,
-                seq: *seq,
-            },
-        );
-        boundaries.unresolved.push(boundaries::UnresolvedBoundary {
-            kind: if trace_parser::gumtrace::parse_special_line(line).is_some() {
-                "non_function_boundary_unresolved".to_owned()
+        boundaries.push_unresolved(
+            &owner,
+            if trace_parser::gumtrace::parse_special_line(line).is_some() {
+                "non_function_boundary_unresolved"
             } else {
-                "instruction_owner_unresolved".to_owned()
+                "instruction_owner_unresolved"
             },
-            seq: *seq,
-            detail: "target dependency occurrence has no uniquely requested Activation owner"
-                .to_owned(),
-        });
+            *seq,
+            "target dependency occurrence has no uniquely requested Activation owner",
+        )?;
     }
     Ok(())
 }

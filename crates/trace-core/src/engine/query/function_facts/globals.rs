@@ -32,15 +32,22 @@ impl StableGlobalMap {
                         return None;
                     }
                     let base = *self.bases.get(&module)?;
-                    let limit = *self.limits.get(&module)?;
-                    let end = address.checked_add(u64::from(size))?;
-                    if runtime.checked_sub(offset)? != base
-                        || arrow_register_value(&insn.line, &tracked).is_none()
-                        || address < base
-                        || end > limit
-                    {
+                    let adrp_page = arrow_register_value(&insn.line, &tracked)?;
+                    if runtime.checked_sub(offset)? != base || address < base {
                         return None;
                     }
+                    let expected_address = resolve_fixed_address_chain(
+                        owned,
+                        access_index,
+                        insn,
+                        &tracked,
+                        adrp_page,
+                    )?;
+                    let annotated = access_address(owned.get(access_index)?)?;
+                    if expected_address != address || annotated != address {
+                        return None;
+                    }
+                    address.checked_add(u64::from(size))?;
                     return Some(format!("{module}+0x{:x}", address - base));
                 }
                 "add" | "sub" if parts.len() == 3 && parse_immediate(parts[2]).is_some() => {
@@ -51,6 +58,85 @@ impl StableGlobalMap {
         }
         None
     }
+}
+
+fn resolve_fixed_address_chain(
+    owned: &[OwnedInsn],
+    access_index: usize,
+    adrp: &OwnedInsn,
+    register: &str,
+    mut value: u64,
+) -> Option<u64> {
+    let adrp_parts = adrp
+        .first_operand
+        .as_deref()?
+        .split(',')
+        .map(str::trim)
+        .collect::<Vec<_>>();
+    if adrp_parts.len() != 2 || adrp_parts[0] != register {
+        return None;
+    }
+    let operand_page = parse_immediate(adrp_parts[1])?;
+    if arrow_register_value(&adrp.line, register)? != operand_page || value != operand_page {
+        return None;
+    }
+    let adrp_index = owned.iter().position(|insn| insn.seq == adrp.seq)?;
+    let mut current = register.to_owned();
+    for insn in &owned[adrp_index + 1..access_index] {
+        let mnemonic = insn.mnemonic.as_deref()?;
+        let parts = insn
+            .first_operand
+            .as_deref()?
+            .split(',')
+            .map(str::trim)
+            .collect::<Vec<_>>();
+        if matches!(mnemonic, "add" | "sub")
+            && parts.len() == 3
+            && parts[1] == current
+            && parse_immediate(parts[2]).is_some()
+        {
+            let immediate = parse_immediate(parts[2])?;
+            value = if mnemonic == "add" {
+                value.checked_add(immediate)?
+            } else {
+                value.checked_sub(immediate)?
+            };
+            if arrow_register_value(&insn.line, parts[0])? != value {
+                return None;
+            }
+            current = parts[0].to_owned();
+        } else if parts.first().copied() == Some(current.as_str()) && writes_first_operand(mnemonic)
+        {
+            return None;
+        }
+    }
+    let access = owned.get(access_index)?;
+    if base_register(access.first_operand.as_deref()?)? != current {
+        return None;
+    }
+    apply_memory_immediate(value, access.first_operand.as_deref()?)
+}
+
+fn apply_memory_immediate(base: u64, operands: &str) -> Option<u64> {
+    let start = operands.find('[')?;
+    let end = operands[start..].find(']')? + start;
+    let parts = operands[start + 1..end]
+        .split(',')
+        .map(str::trim)
+        .collect::<Vec<_>>();
+    match parts.as_slice() {
+        [_] => Some(base),
+        [_, immediate] if immediate.starts_with("#-") => {
+            base.checked_sub(parse_immediate(immediate.strip_prefix("#-")?)?)
+        }
+        [_, immediate] => base.checked_add(parse_immediate(immediate)?),
+        _ => None,
+    }
+}
+
+fn access_address(insn: &OwnedInsn) -> Option<u64> {
+    super::lines::line_mem_annotation(&insn.line, "mem_r")
+        .or_else(|| super::lines::line_mem_annotation(&insn.line, "mem_w"))
 }
 
 fn parse_immediate(value: &str) -> Option<u64> {

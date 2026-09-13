@@ -286,6 +286,31 @@ fn pc_relative_target_module_accesses_become_stable_global_facts() {
 }
 
 #[test]
+fn pc_relative_global_mapping_rejects_inconsistent_adrp_and_effective_addresses() {
+    for (adrp_value, access_address) in [("0x7fff0000", "0x7fff0020"), ("0x404000", "0x405020")] {
+        let adrp = format!("[App] 0x402000!0x2000 adrp x8, #0x404000; x8=0x0 -> x8={adrp_value}");
+        let load = format!(
+            "[App] 0x402004!0x2004 ldr x0, [x8, #0x20]; x8={adrp_value} mem_r={access_address} -> x0=0x7"
+        );
+        let (engine, sid, path) = setup_inline_trace(&[
+            "[App] 0x401000!0x1000 bl #0x402000; sp=0x5000",
+            &adrp,
+            &load,
+            "[App] 0x402008!0x2008 ret; x0=0x7 sp=0x5000",
+            "[App] 0x401004!0x1004 mov x0, x0; x0=0x7 -> x0=0x7",
+        ]);
+        let bundle = engine
+            .get_function_facts_for_modules(&sid, 0, 1, &["App".to_owned()])
+            .expect("function facts");
+        assert!(bundle.global_reads.is_empty());
+        assert_eq!(bundle.memory_reads.len(), 1);
+        assert_eq!(bundle.memory_reads[0].address, access_address);
+        engine.close_session(&sid).unwrap();
+        std::fs::remove_file(path).expect("remove inline trace");
+    }
+}
+
+#[test]
 fn pc_relative_global_mapping_accepts_separate_add_destination_and_rejects_dynamic_offset() {
     let (engine, sid, path) = setup_inline_trace(&[
         "[App] 0x401000!0x1000 bl #0x402000; sp=0x5000",

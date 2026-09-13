@@ -22,6 +22,34 @@ pub(super) struct BoundaryIndex {
     pub(super) unresolved: Vec<UnresolvedBoundary>,
 }
 
+impl BoundaryIndex {
+    pub(super) fn push_unresolved(
+        &mut self,
+        owner: &GraphActivationSelectorDto,
+        kind: impl Into<String>,
+        seq: u32,
+        detail: impl Into<String>,
+    ) -> Result<()> {
+        let unresolved_index = u32::try_from(self.unresolved.len()).map_err(|_| {
+            TraceError::InvalidArgument("unresolved boundary index exceeds u32".to_owned())
+        })?;
+        self.by_seq.insert(
+            seq,
+            GraphMechanicalEndpointDto::Unresolved {
+                owner: owner.clone(),
+                unresolved_index,
+                seq,
+            },
+        );
+        self.unresolved.push(UnresolvedBoundary {
+            kind: kind.into(),
+            seq,
+            detail: detail.into(),
+        });
+        Ok(())
+    }
+}
+
 pub(super) fn collect_boundaries(
     state: &crate::session::SessionState,
     tree: &ActivationTree,
@@ -51,14 +79,15 @@ pub(super) fn collect_boundaries(
             if !event.unresolved.is_empty() {
                 for seq in special_seqs.iter().copied().chain([event.callsite.seq]) {
                     if closure.contains(&seq) {
-                        index.unresolved.push(UnresolvedBoundary {
-                            kind: "external_call_event_unresolved".to_owned(),
+                        index.push_unresolved(
+                            selector,
+                            "external_call_event_unresolved",
                             seq,
-                            detail: format!(
+                            format!(
                                 "External Call Event at seq {} has incomplete target or effect",
                                 event.callsite.seq
                             ),
-                        });
+                        )?;
                     }
                 }
                 continue;
@@ -83,6 +112,24 @@ pub(super) fn collect_boundaries(
             index.external_events.push(fact);
         }
 
+        for insn in &owned {
+            if closure.contains(&insn.seq)
+                && insn.mnemonic.as_deref().is_some_and(|mnemonic| {
+                    matches!(mnemonic, "mov" | "movz" | "movn")
+                        && insn
+                            .first_operand
+                            .as_deref()
+                            .is_some_and(pure_immediate_source)
+                })
+            {
+                index.push_unresolved(
+                    selector,
+                    "unsupported_instruction",
+                    insn.seq,
+                    "pure immediate source has no frozen SourceReference",
+                )?;
+            }
+        }
         let return_producer = owned
             .iter()
             .rfind(|insn| line_arrow_register_value(&insn.line, "x0").is_some())
@@ -95,6 +142,18 @@ pub(super) fn collect_boundaries(
                 return_producer,
             );
         let literal_reads = memory_reads.clone();
+        for unresolved in &memory_unresolved {
+            for seq in &unresolved.seqs {
+                if closure.contains(seq) {
+                    index.push_unresolved(
+                        selector,
+                        unresolved.kind.clone(),
+                        *seq,
+                        unresolved.detail.clone(),
+                    )?;
+                }
+            }
+        }
         let (memory_reads, global_reads, _, global_writes) =
             super::super::function_facts::globals::partition_memory_facts(
                 &owned,
@@ -192,11 +251,12 @@ pub(super) fn collect_boundaries(
         }
         for (seq, sources) in &literal_sources {
             if sources.len() != 1 {
-                index.unresolved.push(UnresolvedBoundary {
-                    kind: "literal_source_incomplete".to_owned(),
-                    seq: *seq,
-                    detail: "literal load does not resolve to one complete FunctionCallRecord memory_read".to_owned(),
-                });
+                index.push_unresolved(
+                    selector,
+                    "literal_source_incomplete",
+                    *seq,
+                    "literal load does not resolve to one complete FunctionCallRecord memory_read",
+                )?;
                 continue;
             }
             let source_index = sources[0];
@@ -215,12 +275,12 @@ pub(super) fn collect_boundaries(
                 continue;
             };
             if read.bytes.is_none() || read.size != width {
-                index.unresolved.push(UnresolvedBoundary {
-                    kind: "literal_source_incomplete".to_owned(),
-                    seq: *seq,
-                    detail: "literal load source does not cover the complete instruction width"
-                        .to_owned(),
-                });
+                index.push_unresolved(
+                    selector,
+                    "literal_source_incomplete",
+                    *seq,
+                    "literal load source does not cover the complete instruction width",
+                )?;
                 continue;
             }
             for seq in &read.read_seqs {
@@ -286,25 +346,13 @@ pub(super) fn collect_boundaries(
                             bytes: memory_reads[read_index as usize].bytes.clone(),
                         },
                     );
-                } else {
-                    index.unresolved.push(UnresolvedBoundary {
-                        kind: "dynamic_source_record_unresolved".to_owned(),
-                        seq: insn.seq,
-                        detail:
-                            "initial memory source has no complete FunctionCallRecord memory_read"
-                                .to_owned(),
-                    });
-                }
-            }
-        }
-        for unresolved in memory_unresolved {
-            for seq in unresolved.seqs {
-                if closure.contains(&seq) {
-                    index.unresolved.push(UnresolvedBoundary {
-                        kind: unresolved.kind.clone(),
-                        seq,
-                        detail: unresolved.detail.clone(),
-                    });
+                } else if !index.by_seq.contains_key(&insn.seq) {
+                    index.push_unresolved(
+                        selector,
+                        "dynamic_source_record_unresolved",
+                        insn.seq,
+                        "initial memory source has no complete FunctionCallRecord memory_read",
+                    )?;
                 }
             }
         }
@@ -355,6 +403,11 @@ pub(super) fn map_endpoint(
         seq,
         owner: selector.clone(),
     })
+}
+
+fn pure_immediate_source(operands: &str) -> bool {
+    let parts = operands.split(',').map(str::trim).collect::<Vec<_>>();
+    parts.len() >= 2 && parts[1].starts_with('#') && !operands.contains('[')
 }
 
 fn literal_load_address(insn: &super::super::function_facts::blocks::OwnedInsn) -> Option<u64> {
