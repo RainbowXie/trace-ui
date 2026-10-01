@@ -417,6 +417,12 @@ pub(crate) fn expand_mem_op(mem: &MemOp) -> Vec<ByteValue> {
 }
 
 fn expand_scalar_or_pair(mem: &MemOp) -> Vec<ByteValue> {
+    if let Some(bytes) = trace_parser::strict_memory::scalar_pair_bytes(mem) {
+        return bytes.into_iter().map(|value| match value {
+            Some(value) => ByteValue { value, known: true },
+            None => ByteValue::unknown(),
+        }).collect();
+    }
     let mut result = Vec::new();
     if mem.elem_width <= 8 {
         append_scalar(&mut result, mem.elem_width, mem.value);

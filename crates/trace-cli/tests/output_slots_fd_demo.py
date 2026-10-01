@@ -84,4 +84,56 @@ invoke(PREFIX+EXIT+CALLER,dict(REQUEST,entry_seq=3),False)
 invoke(PREFIX+EXIT+CALLER,dict(REQUEST,function="App+0x999"),False)
 for change in [dict(REQUEST,unexpected=True),dict(REQUEST,kind="old_output_slots"),dict(REQUEST,slot_ranges=REQUEST["slot_ranges"]*2),dict(REQUEST,slot_ranges=[dict(address="0x7000",size=0)])]: invoke(PREFIX+EXIT+CALLER,change,False)
 invoke(PREFIX+EXIT+CALLER,json.dumps(REQUEST)[:-1]+',"kind":"output_slot_uses"}',False)
+# Unsigned narrow and pair elements are independent negative obligations.
+outer = PREFIX.splitlines()[:2]
+def width_trace(store, pre, load, post, source_regs, load_regs):
+    lines = outer + [f"[App] 0x402000!0x2000 {store}, [x0]; x0=0x7000 {pre} mem_w=0x7000"]
+    for i, reg in enumerate(source_regs):
+        alias = "x" + reg[1:]
+        lines.append(f"[App] 0x40200{4+i*4:x}!0x200{4+i*4:x} mov {reg}, #0; -> {alias}=0x0")
+    lines += EXIT.splitlines()
+    if load:
+        lines.append(f"[App] 0x401004!0x1004 {load}, [x0]; x0=0x7000 mem_r=0x7000 -> {post}")
+    else:
+        lines.append("[App] 0x401004!0x1004 nop; x0=0x7000")
+    for i, reg in enumerate(load_regs):
+        alias = "x" + reg[1:]
+        lines.append(f"[App] 0x40100{8+i*4:x}!0x100{8+i*4:x} mov {reg}, #0; -> {alias}=0x0")
+    lines += ["[App] 0x401020!0x1020 ret; x0=0x7000", "[App] 0x400004!0x4 nop; x0=0x7000"]
+    return "\n".join(lines)+"\n"
+for store, load, size, pre, post, src, dst in [
+    ("strb w1","ldrb w3",1,"x1=0x142","x3=0x42",["w1"],["w3"]),
+    ("strh w1","ldrh w3",2,"x1=0x142","x3=0x142",["w1"],["w3"]),
+    ("str w1","ldr w3",4,"x1=0x142","x3=0x142",["w1"],["w3"]),
+    ("stp w1, w2","ldp w3, w4",8,"x1=0x14 x2=0x13","x3=0x14 x4=0x13",["w1","w2"],["w3","w4"]),
+    ("stp x1, x2","ldp x3, x4",16,"x1=0x14 x2=0x13","x3=0x14 x4=0x13",["x1","x2"],["x3","x4"]),
+    ("stp wzr, wzr","ldp w3, w4",8,"","x3=0x0 x4=0x0",[],["w3","w4"]),
+]:
+    trace = width_trace(store,pre,load,post,src,dst)
+    request = dict(REQUEST,slot_ranges=[dict(address="0x7000",size=size)])
+    result = invoke(trace,request)
+    assert result["coverage"]["complete"] and not result["uses"] and not result["gaps"], result
+    if src:
+        bad = invoke(trace.replace(pre,pre.split()[0] if len(src)==2 else ""),request)
+        assert not bad["coverage"]["complete"] and bad["gaps"], bad
+    if dst:
+        escaped = trace.replace(f"mov {dst[0]}, #0; -> x{dst[0][1:]}=0x0",f"ldr x7, [x{dst[0][1:]}]; x{dst[0][1:]}=0x14 mem_r=0x14 -> x7=0x0")
+        bad = invoke(escaped,request)
+        assert not bad["coverage"]["complete"], bad
+# Two W elements totaling eight bytes do not establish an independent X slot.
+joined = width_trace("stp w1, w2","x1=0x14 x2=0x13","ldr x3","x3=0x1300000014",["w1","w2"],["x3"])
+result = invoke(joined)
+assert not result["coverage"]["complete"] and not result["uses"], result
+# W/X aliases cannot be killed by a masked or conflicting upper-half observation.
+alias = width_trace("strb w1","x1=0x42","ldrb w3","x3=0x42",["w1"],["w3"])
+result = invoke(alias.replace("mov w1, #0; -> x1=0x0", "mov w1, #0; -> x1=0x100000000"),dict(REQUEST,slot_ranges=[dict(address="0x7000",size=1)]))
+assert not result["coverage"]["complete"], result
+# Known partial overwrite merges final bytes, but cannot resurrect the old X slot.
+merged = width_trace("str x1","x1=0x1122334455667788",None,"",["x1"],[])
+merged = merged.replace(EXIT,"[App] 0x402008!0x2008 strb w2, [x0, #1]; x0=0x7000 x2=0xaa mem_w=0x7001\n[App] 0x40200c!0x200c mov w2, #0; -> x2=0x0\n"+EXIT)
+result = invoke(merged)
+assert result["coverage"]["complete"] and not result["uses"], result
+bad = invoke(merged.replace("x2=0xaa", ""))
+assert not bad["coverage"]["complete"], bad
+print("real FD output-slot demonstrations passed: narrow/pair/zero/partial-byte negative; unknown-half and narrow escape rejection;" )
 print("real FD output-slot demonstrations passed: complete scalar store/load/kill; final pointer positive; unknown usage incomplete; partial/unknown; transient scalar overwrite; store-data/return escape incomplete; owner/selector and strict protocol rejection")
