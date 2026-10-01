@@ -6,6 +6,7 @@
 
 mod abi;
 mod address_provenance;
+mod caller_return;
 pub(crate) mod blocks;
 mod byte_effect;
 pub(crate) mod dataflow;
