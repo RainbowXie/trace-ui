@@ -1,6 +1,8 @@
 use serde::{Deserialize, Serialize};
 use trace_parser::types::TraceFormat;
 
+mod private_frame_operands;
+pub use private_frame_operands::*;
 mod output_slots;
 pub use output_slots::*;
 mod caller_return;

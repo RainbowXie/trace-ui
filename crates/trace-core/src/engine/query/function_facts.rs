@@ -6,6 +6,7 @@
 
 mod abi;
 mod address_provenance;
+mod private_frame_operands;
 mod output_slots;
 mod caller_return;
 pub(crate) mod blocks;
