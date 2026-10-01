@@ -58,19 +58,20 @@ fn immediate(text: &str) -> Option<i64> {
         Some(value)
     }
 }
-fn offset_operand(text: &str) -> Option<(&str, i64)> {
+// Effective offset and optional fixed writeback delta; no register indexing.
+fn memory_operand(text: &str) -> Option<(&str, i64, Option<i64>)> {
     let start = text.find('[')?;
     let end = text[start..].find(']')? + start;
-    if !text[end + 1..].trim().is_empty() {
-        return None;
-    } // writeback stays a gap
-    let parts = text[start + 1..end]
-        .split(',')
-        .map(str::trim)
-        .collect::<Vec<_>>();
-    match parts.as_slice() {
-        [base] => Some((base, 0)),
-        [base, off] => Some((base, immediate(off)?)),
+    let parts = text[start + 1..end].split(',').map(str::trim).collect::<Vec<_>>();
+    let (base, offset) = match parts.as_slice() {
+        [base] => (*base, 0),
+        [base, off] => (*base, immediate(off)?),
+        _ => return None,
+    };
+    match text[end + 1..].trim() {
+        "" => Some((base, offset, None)),
+        "!" => Some((base, offset, Some(offset))),
+        tail if offset == 0 => Some((base, 0, Some(immediate(tail.strip_prefix(',')?.trim())?))),
         _ => None,
     }
 }
@@ -261,6 +262,7 @@ impl crate::engine::TraceEngine {
         let mut accesses = Vec::new();
         let mut gaps = Vec::new();
         let mut steps_total = 0usize;
+        let mut sp_copy_sources = BTreeMap::new();
         let mut prior_writes = Vec::<(u64, u32)>::new();
         let mut unknown_effect = false;
         let positions = owned
@@ -346,13 +348,16 @@ impl crate::engine::TraceEngine {
                         "printed store marker does not prove a successful access",
                     );
                 }
-                if let Some((base, offset)) = offset_operand(operand) {
+                if let Some((base, offset, writeback)) = memory_operand(operand) {
                     if let Some(reg) = reg64(base) {
                         if parsed.base_reg == Some(reg) {
                             if let Some(p) = proofs.get(&reg) {
                                 if values(&parsed, reg, false) == Some(p.value)
                                     && add(p.value, offset) == Some(address)
                                     && p.delta.checked_add(offset).is_some()
+                                    && writeback.is_none_or(|delta| {
+                                        base == "sp" && add(p.value, delta) == values(&parsed, reg, true)
+                                    })
                                 {
                                     let mut p = p.clone();
                                     p.delta = p.delta.checked_add(offset).unwrap();
@@ -419,6 +424,7 @@ impl crate::engine::TraceEngine {
                     origin_anchor: proof.as_ref().map(|p| p.anchor.clone()),
                     definition_steps: proof.as_ref().map(|p| p.steps.clone()).unwrap_or_default(),
                     integer_delta: proof.as_ref().map(|p| p.delta),
+                    frame_access: None,
                 });
                 if write {
                     if let Some(size) = size {
@@ -537,6 +543,9 @@ impl crate::engine::TraceEngine {
                                     });
                                     p.value = value;
                                     p.delta = total;
+                                    if dst == RegId::SP && src != RegId::SP && matches!(p.anchor, AddressOriginDto::EntrySp { .. }) {
+                                        sp_copy_sources.insert(seq, value);
+                                    }
                                     next = Some((dst, p));
                                 }
                             }
@@ -570,6 +579,27 @@ impl crate::engine::TraceEngine {
                                     steps: vec![],
                                 },
                             ));
+                        }
+                    }
+                }
+            }
+            // Reuse the same concrete SP address chain for fixed writeback.
+            if let Some(("sp", _, Some(delta))) = memory_operand(operand) {
+                if let Some(p) = proofs.get(&RegId::SP) {
+                    if let (Some(value), Some(total)) = (add(p.value, delta), p.delta.checked_add(delta)) {
+                        if values(&parsed, RegId::SP, false) == Some(p.value)
+                            && values(&parsed, RegId::SP, true) == Some(value)
+                            && p.steps.len() < MAX_CHAIN
+                            && mem.is_some() && marker.is_some()
+                        {
+                            let mut p = p.clone();
+                            p.steps.push(AddressDefinitionStepDto {
+                                seq, operation: "writeback".into(), source_operand: operand.into(),
+                                target_operand: "sp".into(), pre_value: hex(p.value), post_value: hex(value),
+                            });
+                            p.value = value;
+                            p.delta = total;
+                            next = Some((RegId::SP, p));
                         }
                     }
                 }
@@ -610,6 +640,117 @@ impl crate::engine::TraceEngine {
                 }
             }
         }
+        let mut frames = Vec::new();
+        // Only owners whose recorded instructions touch SP need a frame query.
+        // Owner selectors and entry_seq are unique in this closed response.
+        for owner in tree.activations.iter().filter(|a| {
+            a.entry_seq >= entry_seq && a.exit_seq <= root.exit_seq && a.unresolved_reason.is_none()
+        }) {
+            let instructions = owned.iter().filter(|i| tree.activation_for_seq(i.seq).is_some_and(|a| a.id == owner.id)).collect::<Vec<_>>();
+            if !instructions.iter().any(|i| i.line.contains("sp=0x") || i.first_operand.as_deref().is_some_and(|o| o.split(|c: char| !c.is_ascii_alphanumeric()).any(|s| s == "sp"))) {
+                continue;
+            }
+            if frames.len() >= MAX_ACCESSES { return Err(invalid("frame capacity exceeded")); }
+            let mut frame = FrameDto {
+                owner_call_seq: owner.call_seq, owner_entry_seq: owner.entry_seq,
+                owner_exit_seq: owner.exit_seq, owner_resume_seq: owner.resume_seq,
+                entry_sp: String::new(), exit_sp: None, balanced: false,
+                steps: Vec::new(), gaps: Vec::new(),
+            };
+            let mut current = None;
+            let mut initial = None;
+            let mut valid = true;
+            if !(owner.call_seq < owner.entry_seq && owner.entry_seq <= owner.exit_seq && owner.exit_seq < owner.resume_seq)
+                || [owner.call_seq, owner.entry_seq, owner.exit_seq, owner.resume_seq].iter().any(|seq| {
+                    raw_line(*seq).ok().is_none_or(|raw| trace_parser::strict_memory::instruction_parts(raw).is_none() || stable_runtime_site(raw).is_none())
+                })
+                || frames.iter().any(|f: &FrameDto| f.owner_entry_seq == owner.entry_seq)
+            {
+                return Err(invalid("frame owner lacks unique closed instruction selector"));
+            }
+            for insn in instructions {
+                let raw = insn.line.as_str();
+                let parsed = if raw.contains("!0x") { trace_parser::gumtrace::parse_line_gumtrace_full(raw) } else { trace_parser::parser::parse_line_full(raw) };
+                let Some(parsed) = parsed else { valid = false; continue; };
+                let mnemonic = insn.mnemonic.as_deref().unwrap();
+                let operand = insn.first_operand.as_deref().unwrap();
+                let pre = values(&parsed, RegId::SP, false);
+                let post = values(&parsed, RegId::SP, true);
+                if insn.seq == owner.entry_seq {
+                    initial = pre;
+                    current = pre;
+                    frame.entry_sp = pre.map(hex).unwrap_or_default();
+                    if pre.is_none() { valid = false; gap(&mut frame.gaps, insn.seq, "frame_entry", "owner entry lacks actual pre SP"); }
+                }
+                if pre.is_some() && pre != current {
+                    valid = false;
+                    gap(&mut frame.gaps, insn.seq, "frame_discontinuity", "actual pre SP differs from verified lifecycle");
+                }
+                let class = trace_parser::insn_class::classify_and_refine(&parsed);
+                let (defs, _) = trace_parser::def_use::determine_def_use(class, &parsed);
+                let parts = operand.split(',').map(str::trim).collect::<Vec<_>>();
+                let wb = memory_operand(operand).filter(|(base, _, _)| *base == "sp").and_then(|(_, _, wb)| wb);
+                let writes_sp = defs.contains(&RegId::SP) || post.is_some() || parts.first() == Some(&"sp") || wb.is_some();
+                let mut verified_post = current;
+                if writes_sp {
+                    let expected = if let Some(delta) = wb {
+                        let strict = trace_parser::strict_memory::memory_op(raw);
+                        let effective = memory_operand(operand).and_then(|(_, off, _)| add(pre?, off));
+                        if strict.as_ref().is_some_and(|m| Some(m.abs) == effective) { pre.and_then(|v| add(v, delta)) } else { None }
+                    } else if matches!(mnemonic, "mov" | "add" | "sub") && parts.first() == Some(&"sp") {
+                        let delta = match parts.as_slice() {
+                            [_, _] if mnemonic == "mov" => Some(0),
+                            [_, _, off] if mnemonic == "add" => immediate(off),
+                            [_, _, off] if mnemonic == "sub" => immediate(off).and_then(i64::checked_neg),
+                            _ => None,
+                        };
+                        // A copied frame pointer must have an existing operand-labelled
+                        // entry-SP chain, captured in the first scan before redefinitions.
+                        let source = parts.get(1).and_then(|s| reg64(s)).and_then(|r| values(&parsed, r, false));
+                        if parts.get(1) == Some(&"sp") { source.zip(delta).and_then(|(v,d)| add(v,d)) } else { sp_copy_sources.get(&insn.seq).copied() }
+                    } else { None };
+                    if valid && pre == current && expected.is_some() && expected == post {
+                        if steps_total >= MAX_STEPS { return Err(invalid("frame step capacity exceeded")); }
+                        steps_total += 1;
+                        frame.steps.push(FrameSpStepDto { seq: insn.seq, operation: if wb.is_some() { "writeback" } else { mnemonic }.into(), source_operand: operand.into(), target_operand: "sp".into(), pre_sp: hex(pre.unwrap()), post_sp: hex(post.unwrap()) });
+                        verified_post = post;
+                    } else {
+                        valid = false;
+                        verified_post = None;
+                        gap(&mut frame.gaps, insn.seq, "frame_sp_definition", "unsupported, missing or inconsistent actual SP definition");
+                    }
+                }
+                if let Some(access) = accesses.iter_mut().find(|a| a.seq == insn.seq) {
+                    if valid {
+                        if let (Some(pre), Some(post), Some(entry), Some(size), Some((_,address))) = (pre, verified_post, initial, access.size, trace_parser::strict_memory::memory_marker(raw)) {
+                            if let Some(end) = address.checked_add(u64::from(size)) {
+                                // Pre-index allocates before access; post-index frees after access.
+                                let live = if operand.trim_end().ends_with('!') { post } else { pre };
+                                access.frame_access = Some(FrameAccessDto { owner_entry_seq: owner.entry_seq, pre_sp: hex(pre), post_sp: hex(post), access_start: hex(address), access_end: hex(end), live_frame_start: hex(live), live_frame_end: hex(entry), within_live_frame: live <= entry && live <= address && end <= entry });
+                            }
+                        } else {
+                            gap(&mut frame.gaps, insn.seq, "frame_access", "actual SP or complete access range missing");
+                        }
+                    }
+                }
+                current = verified_post;
+                if external_calls.contains(&insn.seq) || unresolved_calls.contains(&insn.seq) || gaps.iter().any(|g| g.seq == insn.seq && g.kind != "address_definition") {
+                    valid = false;
+                    gap(&mut frame.gaps, insn.seq, "frame_effect", "uncovered effects invalidate frame lifecycle");
+                }
+                if insn.seq == owner.exit_seq {
+                    frame.exit_sp = pre.map(hex);
+                    frame.balanced = valid && mnemonic == "ret" && pre.is_some() && pre == initial;
+                    if !frame.balanced { gap(&mut frame.gaps, insn.seq, "frame_exit", "return boundary lacks verified restored SP"); }
+                }
+            }
+            // Missing/special owner lines must not silently disappear from the lifecycle.
+            if gaps.iter().any(|g| g.seq >= owner.entry_seq && g.seq <= owner.exit_seq && g.kind != "address_definition") {
+                frame.balanced = false;
+                gap(&mut frame.gaps, owner.exit_seq, "frame_coverage", "owner closure contains uncovered effects");
+            }
+            frames.push(frame);
+        }
         Ok(AddressProvenanceDto {
             trace_session: session_id.into(),
             call_seq,
@@ -623,9 +764,10 @@ impl crate::engine::TraceEngine {
                 last_seq: root.exit_seq,
                 scanned_lines: count,
                 access_count: accesses.len(),
-                complete: gaps.is_empty(),
+                complete: gaps.is_empty() && frames.iter().all(|f| f.gaps.is_empty()),
             },
             accesses,
+            frames,
             gaps,
         })
     }

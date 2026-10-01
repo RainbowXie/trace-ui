@@ -83,13 +83,45 @@ fn address_provenance_real_queries() {
         ok["accesses"][0]["definition_steps"][0]["source_operand"],
         "x0, #8"
     );
+    let frame = run("[App] 0x1200!0x200 stp x29, x30, [sp, #-32]! ; sp=0x8000 x29=0x11 x30=0x1108 mem_w=0x7fe0 -> sp=0x7fe0\n[App] 0x1204!0x204 mov x29, sp ; sp=0x7fe0 -> x29=0x7fe0\n[App] 0x1208!0x208 str x0, [sp, #16] ; sp=0x7fe0 x0=0x3000 mem_w=0x7ff0\n[App] 0x120c!0x20c ldr x8, [x29, #16] ; sp=0x7fe0 x29=0x7fe0 mem_r=0x7ff0 -> x8=0x3000\n[App] 0x1210!0x210 ldp x29, x30, [sp], #32 ; sp=0x7fe0 mem_r=0x7fe0 -> sp=0x8000 x29=0x11 x30=0x1108\n[App] 0x1214!0x214 ret ; sp=0x8000\n");
+    assert_eq!(frame["coverage"]["complete"], true, "{frame}");
+    assert_eq!(frame["frames"][0]["balanced"], true, "{frame}");
+    assert_eq!(frame["frames"][0]["steps"].as_array().unwrap().len(), 2);
+    assert_eq!(frame["accesses"][0]["size"], 16);
+    assert_eq!(frame["accesses"][0]["frame_access"]["live_frame_start"], "0x7fe0");
+    assert_eq!(frame["accesses"][3]["frame_access"]["live_frame_start"], "0x7fe0");
+    assert_eq!(frame["accesses"][3]["frame_access"]["post_sp"], "0x8000");
+    for access in frame["accesses"].as_array().unwrap() {
+        assert_eq!(access["frame_access"]["within_live_frame"], true, "{frame}");
+    }
+    let nested_frame = run("[App] 0x1200!0x200 sub sp, sp, #32 ; sp=0x8000 -> sp=0x7fe0\n[App] 0x1204!0x204 bl #0x1400 ; sp=0x7fe0\n[App] 0x1400!0x400 sub sp, sp, #16 ; sp=0x7fe0 -> sp=0x7fd0\n[App] 0x1404!0x404 str x0, [sp] ; sp=0x7fd0 x0=0x3000 mem_w=0x7fd0\n[App] 0x1408!0x408 add sp, sp, #16 ; sp=0x7fd0 -> sp=0x7fe0\n[App] 0x140c!0x40c ret ; sp=0x7fe0\n[App] 0x1208!0x208 add sp, sp, #32 ; sp=0x7fe0 -> sp=0x8000\n[App] 0x120c!0x20c ret ; sp=0x8000\n");
+    assert_eq!(nested_frame["coverage"]["complete"], true, "{nested_frame}");
+    assert_eq!(nested_frame["frames"].as_array().unwrap().len(), 2);
+    assert_eq!(nested_frame["accesses"][0]["frame_access"]["owner_entry_seq"], 4);
+    assert_eq!(nested_frame["accesses"][0]["frame_access"]["live_frame_end"], "0x7fe0");
+    let argument = run("[App] 0x1200!0x200 sub sp, sp, #32 ; sp=0x8000 -> sp=0x7fe0\n[App] 0x1204!0x204 str x0, [sp, #32] ; sp=0x7fe0 x0=0x3000 mem_w=0x8000\n[App] 0x1208!0x208 add sp, sp, #32 ; sp=0x7fe0 -> sp=0x8000\n[App] 0x120c!0x20c ret ; sp=0x8000\n");
+    assert_eq!(argument["accesses"][0]["frame_access"]["within_live_frame"], false);
+    let negative = run("[App] 0x1200!0x200 sub sp, sp, #32 ; sp=0x8000 -> sp=0x7fe0\n[App] 0x1204!0x204 str x0, [sp, #-8] ; sp=0x7fe0 x0=0x3000 mem_w=0x7fd8\n[App] 0x1208!0x208 add sp, sp, #32 ; sp=0x7fe0 -> sp=0x8000\n[App] 0x120c!0x20c ret ; sp=0x8000\n");
+    assert_eq!(negative["frames"][0]["balanced"], true, "{negative}");
+    assert_eq!(negative["accesses"][0]["frame_access"]["within_live_frame"], false);
+    let copied = run("[App] 0x1200!0x200 mov x29, sp ; sp=0x8000 -> x29=0x8000\n[App] 0x1204!0x204 sub sp, sp, #32 ; sp=0x8000 -> sp=0x7fe0\n[App] 0x1208!0x208 mov sp, x29 ; sp=0x7fe0 x29=0x8000 -> sp=0x8000\n[App] 0x120c!0x20c ret ; sp=0x8000\n");
+    assert_eq!(copied["frames"][0]["balanced"], true, "{copied}");
+    for body in [
+        "[App] 0x1200!0x200 sub sp, sp, x8 ; sp=0x8000 x8=0x20 -> sp=0x7fe0\n[App] 0x1204!0x204 ret ; sp=0x8000\n",
+        "[App] 0x1200!0x200 sub sp, sp, #32 ; sp=0x8000 -> sp=0x7fe0\n[App] 0x1204!0x204 ret ; sp=0x7fe0\n",
+        "[App] 0x1200!0x200 mov x29, sp ; sp=0x8000 -> x29=0x8000\n[App] 0x1204!0x204 mov x29, #0x8000 ; -> x29=0x8000\n[App] 0x1208!0x208 mov sp, x29 ; sp=0x8000 x29=0x8000 -> sp=0x8000\n[App] 0x120c!0x20c ret ; sp=0x8000\n",
+    ] {
+        let rejected = run(body);
+        assert_eq!(rejected["coverage"]["complete"], false, "{rejected}");
+        assert_eq!(rejected["frames"][0]["balanced"], false, "{rejected}");
+    }
     let blob = run("[App] 0x1200!0x200 ldr x8, [x0] ; x0=0x3000 mem_r=0x3000 -> x8=0x3000\n[App] 0x1204!0x204 str x0, [x8] ; x0=0x3000 x8=0x3000 mem_w=0x3000\n[App] 0x1208!0x208 ret\n");
     assert_eq!(blob["coverage"]["complete"], false);
     assert!(blob["accesses"][1]["origin_anchor"].is_null());
     let data = run("[App] 0x1200!0x200 mov x8, #0x3000 -> x8=0x3000\n[App] 0x1204!0x204 str x0, [x8] ; x0=0x3000 x8=0x3000 mem_w=0x3000\n[App] 0x1208!0x208 ret\n");
     assert_eq!(data["coverage"]["complete"], false);
     assert!(data["accesses"][0]["origin_anchor"].is_null());
-    let stack = run("[App] 0x1200!0x200 ldr x8, [sp] ; sp=0x8000 mem_r=0x8000 -> x8=0x3000\n[App] 0x1204!0x204 ldr w9, [x8] ; x8=0x3000 mem_r=0x3000 -> w9=0x41\n[App] 0x1208!0x208 ret\n");
+    let stack = run("[App] 0x1200!0x200 ldr x8, [sp] ; sp=0x8000 mem_r=0x8000 -> x8=0x3000\n[App] 0x1204!0x204 ldr w9, [x8] ; x8=0x3000 sp=0x8000 mem_r=0x3000 -> w9=0x41\n[App] 0x1208!0x208 ret ; sp=0x8000\n");
     assert_eq!(stack["coverage"]["complete"], true, "{stack}");
     assert_eq!(
         stack["accesses"][1]["origin_anchor"]["kind"],
