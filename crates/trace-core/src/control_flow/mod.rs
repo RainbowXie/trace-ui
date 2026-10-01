@@ -1,5 +1,6 @@
 //! 有界内存控制流索引；不读取路径缓存、不构建动态数据依赖。
 pub mod disk;
+mod disk_query;
 mod scan;
 pub mod types;
 mod view;
@@ -42,3 +43,5 @@ impl ControlFlowIndex {
 }
 #[cfg(test)]
 mod tests;
+#[cfg(test)]
+mod disk_query_tests;

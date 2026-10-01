@@ -446,6 +446,12 @@ impl super::TraceEngine {
     }
 
     pub fn cancel_build(&self, session_id: &str) {
+        if session_id.starts_with("disk-cfg:") {
+            if let Ok(Some(handle)) = self.disk_handle(session_id) {
+                handle.cancel.store(true, Ordering::SeqCst);
+            }
+            return;
+        }
         if let Ok(handle) = self.get_handle(session_id) {
             handle.build_cancel.store(true, Ordering::SeqCst);
         }

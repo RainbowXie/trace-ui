@@ -59,6 +59,11 @@ impl super::TraceEngine {
         blocks: CfgPage,
         occurrences: CfgPage,
     ) -> Result<CfgView> {
+        if session_id.starts_with("disk-cfg:") {
+            let h = self.disk_handle(session_id)?.ok_or_else(|| TraceError::SessionNotFound(session_id.into()))?;
+            let store = h.store.read().map_err(|e| TraceError::Internal(e.to_string()))?;
+            return store.as_ref().ok_or(TraceError::IndexNotReady)?.disk_activation_cfg(&h.trace, call_seq, entry_seq, function, &blocks, &occurrences, &h.cancel);
+        }
         let handle = self.get_handle(session_id)?;
         let state = handle
             .state
@@ -85,6 +90,11 @@ impl super::TraceEngine {
         blocks: CfgPage,
         occurrences: CfgPage,
     ) -> Result<CfgView> {
+        if session_id.starts_with("disk-cfg:") {
+            let h = self.disk_handle(session_id)?.ok_or_else(|| TraceError::SessionNotFound(session_id.into()))?;
+            let store = h.store.read().map_err(|e| TraceError::Internal(e.to_string()))?;
+            return store.as_ref().ok_or(TraceError::IndexNotReady)?.disk_function_cfg(&h.trace, function, &blocks, &occurrences, &h.cancel);
+        }
         let handle = self.get_handle(session_id)?;
         let state = handle
             .state
@@ -102,6 +112,11 @@ impl super::TraceEngine {
         session_id: &str,
         seq: u32,
     ) -> Result<Option<CfgOccurrence>> {
+        if session_id.starts_with("disk-cfg:") {
+            let h = self.disk_handle(session_id)?.ok_or_else(|| TraceError::SessionNotFound(session_id.into()))?;
+            let store = h.store.read().map_err(|e| TraceError::Internal(e.to_string()))?;
+            return store.as_ref().ok_or(TraceError::IndexNotReady)?.disk_occurrence_for_seq(&h.trace, seq, &h.cancel);
+        }
         let handle = self.get_handle(session_id)?;
         let state = handle
             .state

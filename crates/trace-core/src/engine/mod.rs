@@ -1,5 +1,6 @@
 mod browse;
 mod control_flow;
+mod disk_control_flow;
 mod build;
 mod memory;
 mod query;
@@ -20,12 +21,14 @@ use trace_parser::types::TraceFormat;
 #[derive(Default)]
 pub struct TraceEngine {
     sessions: RwLock<HashMap<String, Arc<SessionHandle>>>,
+    disk_cfg_sessions: RwLock<HashMap<String, Arc<disk_control_flow::DiskCfgSession>>>,
 }
 
 impl TraceEngine {
     pub fn new() -> Self {
         Self {
             sessions: RwLock::new(HashMap::new()),
+            disk_cfg_sessions: RwLock::new(HashMap::new()),
         }
     }
 
@@ -116,6 +119,15 @@ impl TraceEngine {
     }
 
     pub fn close_session(&self, session_id: &str) -> Result<()> {
+        if session_id.starts_with("disk-cfg:") {
+            let removed = self.disk_cfg_sessions.write().map_err(|e| TraceError::Internal(e.to_string()))?.remove(session_id);
+            if let Some(handle) = removed {
+                handle.closed.store(true, Ordering::SeqCst);
+                handle.cancel.store(true, Ordering::SeqCst);
+                drop(handle);
+            }
+            return Ok(());
+        }
         let removed = {
             let mut sessions = self
                 .sessions

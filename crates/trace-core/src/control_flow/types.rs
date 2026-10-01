@@ -26,8 +26,10 @@ impl Default for CfgPage {
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct CfgOccurrence {
     pub activation_id: u32,
+    /// Reference within this session's CFG index, not a cross-index identity.
     pub block_id: u32,
     pub start_seq: u32,
+    /// Inclusive last raw seq; disk half-open ranges are converted at query time.
     pub end_seq: u32,
 }
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -38,6 +40,8 @@ pub struct CfgRepresentative {
 }
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct CfgBlock {
+    /// Index-local ID. Stable identity is (containing function, site); numeric
+    /// allocation may differ between the small memory and disk implementations.
     pub id: u32,
     pub site: String,
     pub count: u64,

@@ -149,11 +149,11 @@ fn execute() -> anyhow::Result<()> {
     validate_function(&function)?;
     let (blocks, occurrences) = pages(&format, blocks, occurrences)?;
     let engine = TraceEngine::new();
-    let session = engine.create_session_from_file(trace, &format!("inherited-fd:{fd}"))?;
-    engine.build_control_flow_index(&session.session_id)?;
+    let session_id = engine.create_control_flow_session_from_file(trace, &format!("inherited-fd:{fd}"))?;
+    engine.build_disk_control_flow_index(&session_id, false, trace_core::control_flow::disk::BuildBudget::default())?;
     let view = if let Some((call, entry)) = anchors {
         engine.get_activation_cfg(
-            &session.session_id,
+            &session_id,
             call,
             entry,
             &function,
@@ -161,7 +161,7 @@ fn execute() -> anyhow::Result<()> {
             occurrences,
         )?
     } else {
-        engine.get_function_cfg(&session.session_id, &function, blocks, occurrences)?
+        engine.get_function_cfg(&session_id, &function, blocks, occurrences)?
     };
     let dot = if matches!(format, Format::Dot) {
         anyhow::ensure!(
@@ -187,6 +187,8 @@ fn execute() -> anyhow::Result<()> {
         dot: dot.as_deref(),
     };
     let encoded = encode(&response, MAX_RESPONSE_BYTES)?;
+    engine.verify_control_flow_session_identity(&session_id)?;
+    engine.close_session(&session_id)?;
     let mut stdout = io::stdout().lock();
     stdout.write_all(&encoded)?;
     stdout.flush()?;
