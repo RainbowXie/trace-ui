@@ -10,7 +10,7 @@ use super::global_map::StableGlobalMap;
 use super::lines::{arrow_register_value, base_register};
 
 impl StableGlobalMap {
-    fn stable_global_for_access(
+    pub(super) fn stable_global_for_access(
         &self,
         owned: &[OwnedInsn],
         access_index: usize,

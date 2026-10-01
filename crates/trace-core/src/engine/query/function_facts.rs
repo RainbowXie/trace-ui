@@ -5,6 +5,7 @@
 //! consumer 读写）、`events`（External Call Event）。
 
 mod abi;
+mod address_provenance;
 pub(crate) mod blocks;
 mod byte_effect;
 pub(crate) mod dataflow;

@@ -57,6 +57,101 @@ fn spawn_fact_helper(
 }
 
 #[test]
+fn address_provenance_real_queries() {
+    let dir = std::env::temp_dir().join(format!("address-provenance-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let path = dir.join("trace.log");
+    let query = br#"{"kind":"address_provenance","call_seq":1,"entry_seq":2,"function":"App+0x200","target_modules":[]}"#;
+    let run = |body: &str| {
+        let raw = format!("[App] 0x1100!0x100 mov x0, x1 ; x1=0x3000 -> x0=0x3000\n[App] 0x1104!0x104 bl #0x1200 ; sp=0x8000\n{body}[App] 0x1108!0x108 nop\n");
+        std::fs::write(&path, raw).unwrap();
+        let fd = std::fs::File::open(&path).unwrap();
+        let out = run_fact_helper(fd.as_raw_fd(), query);
+        assert!(
+            out.status.success(),
+            "{}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        serde_json::from_slice::<serde_json::Value>(&out.stdout).unwrap()
+    };
+    let ok = run("[App] 0x1200!0x200 add x8, x0, #8 ; x0=0x3000 -> x8=0x3008\n[App] 0x1204!0x204 str x0, [x8] ; x0=0x3000 x8=0x3008 mem_w=0x3008\n[App] 0x1208!0x208 ret\n");
+    assert_eq!(ok["coverage"]["complete"], true, "{ok}");
+    assert_eq!(ok["accesses"][0]["origin_anchor"]["register"], "x0");
+    assert_eq!(ok["accesses"][0]["integer_delta"], 8);
+    assert_eq!(ok["accesses"][0]["address_operand"], "[x8]");
+    assert_eq!(
+        ok["accesses"][0]["definition_steps"][0]["source_operand"],
+        "x0, #8"
+    );
+    let blob = run("[App] 0x1200!0x200 ldr x8, [x0] ; x0=0x3000 mem_r=0x3000 -> x8=0x3000\n[App] 0x1204!0x204 str x0, [x8] ; x0=0x3000 x8=0x3000 mem_w=0x3000\n[App] 0x1208!0x208 ret\n");
+    assert_eq!(blob["coverage"]["complete"], false);
+    assert!(blob["accesses"][1]["origin_anchor"].is_null());
+    let data = run("[App] 0x1200!0x200 mov x8, #0x3000 -> x8=0x3000\n[App] 0x1204!0x204 str x0, [x8] ; x0=0x3000 x8=0x3000 mem_w=0x3000\n[App] 0x1208!0x208 ret\n");
+    assert_eq!(data["coverage"]["complete"], false);
+    assert!(data["accesses"][0]["origin_anchor"].is_null());
+    let stack = run("[App] 0x1200!0x200 ldr x8, [sp] ; sp=0x8000 mem_r=0x8000 -> x8=0x3000\n[App] 0x1204!0x204 ldr w9, [x8] ; x8=0x3000 mem_r=0x3000 -> w9=0x41\n[App] 0x1208!0x208 ret\n");
+    assert_eq!(stack["coverage"]["complete"], true, "{stack}");
+    assert_eq!(
+        stack["accesses"][1]["origin_anchor"]["kind"],
+        "stack_argument"
+    );
+    let overwritten = run("[App] 0x1200!0x200 str x0, [sp] ; x0=0x3000 sp=0x8000 mem_w=0x8000\n[App] 0x1204!0x204 ldr x8, [sp] ; sp=0x8000 mem_r=0x8000 -> x8=0x3000\n[App] 0x1208!0x208 ldr w9, [x8] ; x8=0x3000 mem_r=0x3000 -> w9=0x41\n[App] 0x120c!0x20c ret\n");
+    assert_eq!(overwritten["coverage"]["complete"], false);
+    assert!(overwritten["accesses"][2]["origin_anchor"].is_null());
+    let callee = run("[App] 0x1200!0x200 mov x8, x0 ; x0=0x3000 -> x8=0x3000\n[App] 0x1204!0x204 bl #0x1400\n[App] 0x1400!0x400 ldr w9, [x8] ; x8=0x3000 mem_r=0x3000 -> w9=0x41\n[App] 0x1404!0x404 ret\n[App] 0x1208!0x208 ret\n");
+    assert_eq!(callee["coverage"]["complete"], true, "{callee}");
+    assert_eq!(callee["accesses"][0]["seq"], 4);
+    assert_eq!(callee["accesses"][0]["origin_anchor"]["seq"], 2);
+    let rewritten = run("[App] 0x1200!0x200 mov x8, x0 ; x0=0x3000 -> x8=0x3000\n[App] 0x1204!0x204 mov w8, #0x3000 -> w8=0x3000\n[App] 0x1208!0x208 ldr w9, [x8] ; x8=0x3000 mem_r=0x3000 -> w9=0x41\n[App] 0x120c!0x20c ret\n");
+    assert_eq!(rewritten["coverage"]["complete"], false);
+    let external = run("[App] 0x1200!0x200 bl #0x9000\n[App] 0x1204!0x204 ldr w9, [x0] ; x0=0x3000 mem_r=0x3000 -> w9=0x41\n[App] 0x1208!0x208 ret\n");
+    assert_eq!(external["coverage"]["complete"], false);
+    assert!(external["gaps"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|g| g["kind"] == "external_boundary"));
+    for bad in [
+        String::from_utf8(query.to_vec()).unwrap().replace(
+            "\"target_modules\":[]",
+            "\"target_modules\":[\"App\",\"App\"]",
+        ),
+        String::from_utf8(query.to_vec())
+            .unwrap()
+            .replace("\"entry_seq\":2", "\"entry_seq\":2,\"entry_seq\":2"),
+        String::from_utf8(query.to_vec())
+            .unwrap()
+            .replace("App+0x200", "App+0x201"),
+        String::from_utf8(query.to_vec())
+            .unwrap()
+            .replace("\"target_modules\":[]", "\"target_modules\":[],\"extra\":1"),
+    ] {
+        let fd = std::fs::File::open(&path).unwrap();
+        let out = run_fact_helper(fd.as_raw_fd(), bad.as_bytes());
+        assert!(!out.status.success());
+        assert!(out.stdout.is_empty());
+    }
+    std::fs::write(&path, "[App] 0x1100!0x100 nop\n[App] 0x1104!0x104 bl #0x1200\n[App] 0x1200!0x200 adrp x8, #0x5000 ; -> x8=0x5000\n[App] 0x1204!0x204 add x8, x8, #8 ; x8=0x5000 -> x8=0x5008\n[App] 0x1208!0x208 ldr w9, [x8] ; x8=0x5008 mem_r=0x5008 -> w9=0x41\n[App] 0x120c!0x20c ret\n[App] 0x1108!0x108 nop\n").unwrap();
+    let fd = std::fs::File::open(&path).unwrap();
+    let global_query = String::from_utf8(query.to_vec())
+        .unwrap()
+        .replace("\"target_modules\":[]", "\"target_modules\":[\"App\"]");
+    let out = run_fact_helper(fd.as_raw_fd(), global_query.as_bytes());
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let global: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
+    assert_eq!(global["coverage"]["complete"], true, "{global}");
+    assert_eq!(
+        global["accesses"][0]["origin_anchor"]["global"],
+        "App+0x4000"
+    );
+    std::fs::remove_dir_all(dir).unwrap();
+}
+
+#[test]
 fn runtime_mapping_real_queries() {
     let root = std::env::temp_dir().join(format!("runtime-mapping-{}", std::process::id()));
     std::fs::create_dir_all(&root).unwrap();

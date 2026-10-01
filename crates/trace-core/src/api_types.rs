@@ -1,6 +1,8 @@
 use serde::{Deserialize, Serialize};
 use trace_parser::types::TraceFormat;
 
+mod address_provenance;
+pub use address_provenance::*;
 mod runtime_mapping;
 pub use runtime_mapping::*;
 
