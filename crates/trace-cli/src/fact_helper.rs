@@ -76,6 +76,22 @@ enum CallerReturnKind {
     CallerReturnUses,
 }
 
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct OutputSlotRequest {
+    kind: OutputSlotKind,
+    call_seq: u32,
+    entry_seq: u32,
+    function: String,
+    target_modules: Vec<String>,
+    slot_ranges: Vec<trace_core::api_types::OutputSlotRangeDto>,
+}
+#[derive(Debug, Deserialize)]
+enum OutputSlotKind {
+    #[serde(rename = "output_slot_uses")]
+    OutputSlotUses,
+}
+
 pub(crate) fn requested() -> bool {
     std::env::args().any(|arg| arg == "--function-facts-helper" || arg == "--function-fact-helper")
 }
@@ -97,6 +113,12 @@ pub(crate) fn run() -> anyhow::Result<()> {
     let request_bytes = read_stdin_bounded()?;
     // 只按显式 kind 分派，再从原始字节 strict 解析；不跨协议 fallback。
     let control: serde_json::Value = serde_json::from_slice(&request_bytes)?;
+    let output_request = match control.get("kind") {
+        Some(serde_json::Value::String(kind)) if kind == "output_slot_uses" => Some(
+            serde_json::from_slice::<OutputSlotRequest>(&request_bytes)?,
+        ),
+        _ => None,
+    };
     let return_request = match control.get("kind") {
         Some(serde_json::Value::String(kind)) if kind == "caller_return_uses" => Some(
             serde_json::from_slice::<CallerReturnRequest>(&request_bytes)?,
@@ -114,10 +136,10 @@ pub(crate) fn run() -> anyhow::Result<()> {
         Some(serde_json::Value::String(kind)) if kind == "runtime_mapping" => Some(
             serde_json::from_slice::<RuntimeMappingRequest>(&request_bytes)?,
         ),
-        Some(serde_json::Value::String(kind)) if kind == "address_provenance" || kind == "caller_return_uses" => None,
+        Some(serde_json::Value::String(kind)) if kind == "address_provenance" || kind == "caller_return_uses" || kind == "output_slot_uses" => None,
         Some(_) => anyhow::bail!("unknown fact helper request kind"),
     };
-    let fact_request = if mapping_request.is_none() && address_request.is_none() && return_request.is_none() {
+    let fact_request = if mapping_request.is_none() && address_request.is_none() && return_request.is_none() && output_request.is_none() {
         Some(serde_json::from_slice::<FactHelperRequest>(&request_bytes)?)
     } else {
         None
@@ -140,6 +162,13 @@ pub(crate) fn run() -> anyhow::Result<()> {
         )
         .map_err(|error| anyhow::anyhow!("failed to build index: {error}"))?;
 
+    if let Some(request) = output_request {
+        let OutputSlotKind::OutputSlotUses = request.kind;
+        return write_response(&engine.get_output_slot_uses(
+            &sid, request.call_seq, request.entry_seq, &request.function,
+            &request.target_modules, &request.slot_ranges,
+        )?);
+    }
     if let Some(request) = return_request {
         let CallerReturnKind::CallerReturnUses = request.kind;
         return write_response(&engine.get_caller_return_uses(

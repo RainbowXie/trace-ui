@@ -1,6 +1,8 @@
 use serde::{Deserialize, Serialize};
 use trace_parser::types::TraceFormat;
 
+mod output_slots;
+pub use output_slots::*;
 mod caller_return;
 pub use caller_return::*;
 mod address_provenance;
