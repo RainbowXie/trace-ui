@@ -6,7 +6,11 @@
 
 use std::fs::File;
 use std::io::{self, Read, Write};
+use std::sync::atomic::AtomicBool;
 use std::sync::Arc;
+use trace_core::engine::{
+    write_function_fact_projection, FactActivationSelector, FactSourceReference, FunctionFactContext,
+};
 
 #[cfg(unix)]
 use std::os::fd::{FromRawFd, RawFd};
@@ -27,6 +31,79 @@ struct FactHelperRequest {
     function: Option<String>,
     #[serde(default)]
     target_modules: Vec<String>,
+}
+
+/// Source references are caller-bound to the retained FD, not reopened here.
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct FactSourceContext {
+    artifact: String,
+    pointer: String,
+}
+
+impl FactSourceContext {
+    fn borrowed(&self) -> FactSourceReference<'_> {
+        FactSourceReference {
+            artifact: &self.artifact,
+            pointer: &self.pointer,
+        }
+    }
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct FactActivationContext {
+    trace: FactSourceContext,
+    function: String,
+    call_seq: u32,
+    entry_seq: u32,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct BoundedFactRequest {
+    kind: BoundedFactKind,
+    trace: FactSourceContext,
+    activation: FactActivationContext,
+    target_modules: Vec<String>,
+}
+
+#[derive(Debug, Deserialize)]
+enum BoundedFactKind {
+    #[serde(rename = "function_facts_bounded")]
+    FunctionFactsBounded,
+}
+
+impl BoundedFactRequest {
+    fn context(&self) -> FunctionFactContext<'_> {
+        FunctionFactContext {
+            trace: self.trace.borrowed(),
+            activation: FactActivationSelector {
+                trace: self.activation.trace.borrowed(),
+                function: &self.activation.function,
+                call_seq: self.activation.call_seq,
+                entry_seq: self.activation.entry_seq,
+            },
+        }
+    }
+
+    fn validate_modules(&self) -> anyhow::Result<()> {
+        for (index, module) in self.target_modules.iter().enumerate() {
+            let bytes = module.as_bytes();
+            // common-types.md canonical module grammar; preserve request order.
+            if bytes.is_empty()
+                || bytes.len() > 128
+                || !bytes[0].is_ascii_alphanumeric()
+                || !bytes[1..].iter().all(|b| {
+                    b.is_ascii_alphanumeric() || matches!(b, b'.' | b'_' | b'-')
+                })
+                || self.target_modules[..index].contains(module)
+            {
+                anyhow::bail!("invalid or duplicate target_modules");
+            }
+        }
+        Ok(())
+    }
 }
 
 #[derive(Debug, Deserialize)]
@@ -145,6 +222,14 @@ pub(crate) fn run() -> anyhow::Result<()> {
     let request_bytes = read_stdin_bounded()?;
     // 只按显式 kind 分派，再从原始字节 strict 解析；不跨协议 fallback。
     let control: serde_json::Value = serde_json::from_slice(&request_bytes)?;
+    let bounded_request = match control.get("kind") {
+        Some(serde_json::Value::String(kind)) if kind == "function_facts_bounded" => {
+            let request: BoundedFactRequest = serde_json::from_slice(&request_bytes)?;
+            request.validate_modules()?;
+            Some(request)
+        }
+        _ => None,
+    };
     let history_request = match control.get("kind") {
         Some(serde_json::Value::String(kind)) if kind == "target_write_history" => Some(
             serde_json::from_slice::<TargetHistoryRequest>(&request_bytes)?,
@@ -180,10 +265,10 @@ pub(crate) fn run() -> anyhow::Result<()> {
         Some(serde_json::Value::String(kind)) if kind == "runtime_mapping" => Some(
             serde_json::from_slice::<RuntimeMappingRequest>(&request_bytes)?,
         ),
-        Some(serde_json::Value::String(kind)) if kind == "address_provenance" || kind == "caller_return_uses" || kind == "output_slot_uses" || kind == "private_frame_operands" || kind == "target_write_history" => None,
+        Some(serde_json::Value::String(kind)) if kind == "address_provenance" || kind == "caller_return_uses" || kind == "output_slot_uses" || kind == "private_frame_operands" || kind == "target_write_history" || kind == "function_facts_bounded" => None,
         Some(_) => anyhow::bail!("unknown fact helper request kind"),
     };
-    let fact_request = if mapping_request.is_none() && address_request.is_none() && return_request.is_none() && output_request.is_none() && private_request.is_none() && history_request.is_none() {
+    let fact_request = if bounded_request.is_none() && mapping_request.is_none() && address_request.is_none() && return_request.is_none() && output_request.is_none() && private_request.is_none() && history_request.is_none() {
         Some(serde_json::from_slice::<FactHelperRequest>(&request_bytes)?)
     } else {
         None
@@ -206,6 +291,20 @@ pub(crate) fn run() -> anyhow::Result<()> {
         )
         .map_err(|error| anyhow::anyhow!("failed to build index: {error}"))?;
 
+    if let Some(request) = bounded_request {
+        let BoundedFactKind::FunctionFactsBounded = request.kind;
+        let context = request.context();
+        let bundle = engine.get_function_facts_bounded(
+            &sid,
+            context,
+            &request.target_modules,
+            &AtomicBool::new(false),
+        )?;
+        // Formal projection (trace/activation/anchors) has its own fixed 64 MiB
+        // gate. Compact legacy-shaped wire bytes are a separate transport gate.
+        write_function_fact_projection(context, &bundle, &mut io::sink())?;
+        return write_response(&bundle);
+    }
     if let Some(request) = history_request {
         let TargetHistoryKind::TargetWriteHistory = request.kind;
         return write_response(&engine.get_target_write_history(
@@ -254,6 +353,7 @@ pub(crate) fn run() -> anyhow::Result<()> {
         )?;
         return write_response(&mapping);
     }
+    // Compatibility only: the no-kind legacy fact request is not construction-bounded.
     let request = fact_request.expect("explicit protocol dispatch");
     let bundle = engine
         .get_function_facts_for_modules(
