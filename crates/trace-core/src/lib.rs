@@ -1,6 +1,7 @@
 pub mod api_types;
 pub mod browse;
 pub mod cache;
+pub mod control_flow;
 pub mod chunk_scan;
 pub mod engine;
 pub mod error;

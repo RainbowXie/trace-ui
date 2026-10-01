@@ -1,4 +1,5 @@
 mod browse;
+mod control_flow;
 mod build;
 mod memory;
 mod query;
@@ -67,6 +68,7 @@ impl TraceEngine {
             trace_format: TraceFormat::Unidbg,
             call_tree: None,
             activation_tree: None,
+            control_flow: None,
             phase2_store: None,
             string_index: None,
             scan_store: None,

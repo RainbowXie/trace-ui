@@ -46,6 +46,8 @@ pub struct SessionState {
     /// Confirmed Activation 树（call → entry → exit → resume 确认边界 + bypassed 调用）。
     /// 旧缓存（无 section 7）重建前为 None。
     pub activation_tree: Option<ActivationTree>,
+    /// 独立有界内存 CFG，不要求 scan_store 或磁盘缓存。
+    pub control_flow: Option<crate::control_flow::ControlFlowIndex>,
     pub phase2_store: Option<CachedStore<Phase2Archive>>,
     pub string_index: Option<StringIndex>,
 
