@@ -6,9 +6,9 @@ use std::collections::{BTreeMap, HashSet};
 use crate::api_types::{FunctionFactUnresolvedDto, FunctionMemoryReadDto, FunctionMemoryWriteDto};
 
 use super::blocks::OwnedInsn;
+use super::byte_effect::{memory_bytes, FinalByteMap};
 use super::lines::{
-    access_width, arrow_register_value, exclusive_store_outcome, is_pair_access,
-    line_mem_annotation, prestate_register_value, ExclusiveStoreOutcome,
+    access_width, exclusive_store_outcome, line_mem_annotation, ExclusiveStoreOutcome,
 };
 use crate::scanner::LINE_MASK;
 use crate::utils::checked_mem_addr;
@@ -88,8 +88,8 @@ pub(super) fn relevant_seqs(
 enum WriteEffect {
     /// 失败的独占写：无内存效果，不参与任何追踪。
     None,
-    /// 真实写入：宽度 + 值（pair/未知值 → None）。
-    Applied { size: u32, value: Option<u64> },
+    /// 真实写入：宽度与逐字节已知/未知值。
+    Applied { size: u32, bytes: Vec<Option<u8>> },
     /// 宽度/成败未知：保守阻断重叠读取，不进输出。
     BlockOnly { size: u32 },
 }
@@ -98,152 +98,30 @@ fn write_effect(insn: &OwnedInsn, mnemonic: &str, operand: &str) -> Option<Write
     let address = line_mem_annotation(&insn.line, "mem_w")?;
     let _ = address;
     // 独占 STORE：状态寄存器定成败；成功时值取数据寄存器（第二个操作数）
-    // prestate，pair 独占写横跨两个寄存器保持 null。
+    // prestate；pair 分别展开两个数据寄存器，缺值保持未知。
     let effect = match exclusive_store_outcome(&insn.line, mnemonic, operand) {
         Some(ExclusiveStoreOutcome::Failed) => WriteEffect::None,
-        Some(ExclusiveStoreOutcome::Succeeded { width, pair }) => {
-            let value = if pair {
-                None
-            } else {
-                operand
-                    .split(',')
-                    .nth(1)
-                    .and_then(|register| prestate_register_value(&insn.line, register.trim()))
-            };
-            WriteEffect::Applied { size: width, value }
-        }
+        Some(ExclusiveStoreOutcome::Succeeded { width, .. }) => WriteEffect::Applied {
+            size: width,
+            bytes: memory_bytes(&insn.line, width),
+        },
         Some(ExclusiveStoreOutcome::Unknown) => WriteEffect::BlockOnly {
             size: UNKNOWN_WRITE_WIDTH,
         },
         None => match access_width(mnemonic, operand) {
-            Some(size) => {
-                let register = operand.split(',').next().unwrap_or("").trim();
-                let value = if size > 8 || is_pair_access(mnemonic) {
-                    None
-                } else {
-                    prestate_register_value(&insn.line, register)
-                };
-                WriteEffect::Applied { size, value }
+            Some(size) if trace_parser::strict_memory::memory_op(&insn.line).is_some() => {
+                WriteEffect::Applied {
+                    size,
+                    bytes: memory_bytes(&insn.line, size),
+                }
             }
+            Some(size) => WriteEffect::BlockOnly { size },
             None => WriteEffect::BlockOnly {
                 size: UNKNOWN_WRITE_WIDTH,
             },
         },
     };
     Some(effect)
-}
-
-/// 字节粒度的最终写入追踪：每个地址记录 (值是否已知, 字节值, 最终生产者)。
-/// 相邻且已知性一致的字节在物化时合并；未知范围还必须 winner 相同才合并——
-/// 否则 gumtrace 只能对整段取 max(last_write)，中间时点 capture 无法只补已完成字节（ISSUE-H9）。
-/// 已知范围可跨 winner 合并：最终字节已由 trace 确定，capture 只作核对，不再需要逐字节时点。
-struct ByteRange {
-    start: u64,
-    size: u32,
-    bytes: Vec<u8>,
-    uniform_known: bool,
-    last_winner: u32,
-    seqs: Vec<u32>,
-}
-
-#[derive(Default)]
-struct FinalByteMap {
-    bytes: BTreeMap<u64, (bool, u8, u32)>,
-}
-
-impl FinalByteMap {
-    fn apply(&mut self, address: u64, size: u32, value: Option<u64>, seq: u32) -> bool {
-        // 无法形成完整半开范围时整条放弃，禁止把已写下的前缀当成 known write（ISSUE-H15）。
-        if size == 0 {
-            return false;
-        }
-        if checked_mem_addr(address, u64::from(size) - 1).is_none() {
-            return false;
-        }
-        let le = value.map(|value| value.to_le_bytes());
-        for offset in 0..u64::from(size) {
-            let byte_addr = address + offset;
-            let slot = self.bytes.entry(byte_addr).or_insert((false, 0, seq));
-            let (known, byte, winner) = slot;
-            *winner = seq;
-            match &le {
-                Some(bytes) => {
-                    *known = true;
-                    *byte = bytes[offset as usize];
-                }
-                None => *known = false,
-            }
-        }
-        true
-    }
-
-    fn materialize(&self) -> Vec<FunctionMemoryWriteDto> {
-        let mut writes = Vec::new();
-        let mut pending: Option<ByteRange> = None;
-        for (&address, &(known, byte, winner)) in &self.bytes {
-            match &mut pending {
-                Some(range) => {
-                    let contiguous = checked_mem_addr(range.start, u64::from(range.size))
-                        == Some(address)
-                        && known == range.uniform_known;
-                    // 未知范围按最终写入者拆段；已知范围可跨 winner 合并。
-                    let same_owner = known || winner == range.last_winner;
-                    if contiguous && same_owner {
-                        range.size += 1;
-                        range.bytes.push(byte);
-                        range.last_winner = winner;
-                        if !range.seqs.contains(&winner) {
-                            range.seqs.push(winner);
-                        }
-                    } else {
-                        writes.push(Self::emit(pending.take().expect("pending")));
-                        pending = Some(ByteRange {
-                            start: address,
-                            size: 1,
-                            bytes: vec![byte],
-                            uniform_known: known,
-                            last_winner: winner,
-                            seqs: vec![winner],
-                        });
-                    }
-                }
-                None => {
-                    pending = Some(ByteRange {
-                        start: address,
-                        size: 1,
-                        bytes: vec![byte],
-                        uniform_known: known,
-                        last_winner: winner,
-                        seqs: vec![winner],
-                    });
-                }
-            }
-        }
-        if let Some(range) = pending {
-            writes.push(Self::emit(range));
-        }
-        writes
-    }
-
-    fn emit(range: ByteRange) -> FunctionMemoryWriteDto {
-        let ByteRange {
-            start,
-            size,
-            bytes,
-            uniform_known,
-            last_winner: _,
-            seqs,
-        } = range;
-        FunctionMemoryWriteDto {
-            address: format!("0x{start:x}"),
-            size,
-            // 范围内字节全部已知才产出 bytes；含未知字节的范围整体 null，
-            // 不用部分字节冒充完整内容。
-            bytes: (uniform_known)
-                .then(|| bytes.iter().map(|byte| format!("{byte:02x}")).collect()),
-            write_seqs: seqs,
-        }
-    }
 }
 
 /// 影响目标的相关读写与未覆盖访存缺口。
@@ -270,6 +148,18 @@ pub(crate) fn collect_memory_facts(
     let mut write_winners: Vec<u32> = Vec::new();
     let mut write_unresolved: Vec<FunctionFactUnresolvedDto> = Vec::new();
     for insn in owned {
+        let annotated = ["mem_w=", "mem_r=", "mem[WRITE]", "mem[READ]"]
+            .iter()
+            .any(|marker| insn.line.contains(marker));
+        if annotated && trace_parser::strict_memory::memory_marker(&insn.line).is_none() {
+            write_unresolved.push(FunctionFactUnresolvedDto {
+                kind: "unsupported_instruction".to_string(),
+                seqs: vec![insn.seq],
+                location: None,
+                detail: "访存地址或读写注记畸形/冲突，拒绝该访存事实".to_string(),
+            });
+            continue;
+        }
         let Some((mnemonic, operand)) = insn.mnemonic.as_deref().zip(insn.first_operand.as_deref())
         else {
             continue;
@@ -277,8 +167,8 @@ pub(crate) fn collect_memory_facts(
         if let Some(address) = line_mem_annotation(&insn.line, "mem_w") {
             match write_effect(insn, mnemonic, operand) {
                 Some(WriteEffect::None) => continue,
-                Some(WriteEffect::Applied { size, value }) => {
-                    if final_bytes.apply(address, size, value, insn.seq) {
+                Some(WriteEffect::Applied { size, bytes }) => {
+                    if final_bytes.apply(address, &bytes, insn.seq) {
                         write_winners.push(insn.seq);
                         blocked.push((address, size, insn.seq));
                     } else {
@@ -343,6 +233,17 @@ pub(crate) fn collect_memory_facts(
                 continue;
             }
         };
+        if trace_parser::strict_memory::memory_op(&insn.line).is_none() {
+            if is_relevant(insn.seq) {
+                unresolved.push(FunctionFactUnresolvedDto {
+                    kind: "unsupported_instruction".to_string(),
+                    seqs: vec![insn.seq],
+                    location: Some(format!("0x{address:x}")),
+                    detail: "访存操作数或读写方向未能严格确定，拒绝该读取事实".to_string(),
+                });
+            }
+            continue;
+        }
         let register = operand.split(',').next().unwrap_or("").trim();
         let literal_address = literal_load_address(mnemonic, operand);
         let literal_relevant = literal_address == Some(address)
@@ -361,16 +262,12 @@ pub(crate) fn collect_memory_facts(
         if stack_slots.contains(&(address, size)) {
             continue;
         }
-        let value = if size > 8 || is_pair_access(mnemonic) {
-            None
-        } else {
-            arrow_register_value(&insn.line, register)
-        };
+        let bytes = memory_bytes(&insn.line, size);
         observations.extend(external_read_ranges(
             address,
             size,
             insn.seq,
-            value,
+            &bytes,
             &blocked,
             &mut unresolved,
         ));
@@ -436,11 +333,10 @@ fn external_read_ranges(
     address: u64,
     size: u32,
     seq: u32,
-    value: Option<u64>,
+    bytes: &[Option<u8>],
     blocked: &[(u64, u32, u32)],
     unresolved: &mut Vec<FunctionFactUnresolvedDto>,
 ) -> Vec<FunctionMemoryReadDto> {
-    let le = value.map(|value| value.to_le_bytes());
     let mut external: Vec<(u64, Option<u8>)> = Vec::new();
     let mut overflow = false;
     for offset in 0..u64::from(size) {
@@ -454,7 +350,7 @@ fn external_read_ranges(
         if internal {
             continue;
         }
-        let known = le.as_ref().map(|bytes| bytes[offset as usize]);
+        let known = bytes.get(offset as usize).copied().flatten();
         external.push((byte, known));
     }
     if overflow {

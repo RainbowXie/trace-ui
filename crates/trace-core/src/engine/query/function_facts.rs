@@ -6,6 +6,7 @@
 
 mod abi;
 pub(crate) mod blocks;
+mod byte_effect;
 pub(crate) mod dataflow;
 pub(crate) mod events;
 pub(crate) mod global_map;

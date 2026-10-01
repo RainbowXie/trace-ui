@@ -117,31 +117,12 @@ pub(super) fn target_memory_producers(
 }
 
 pub(super) fn parse_memory_address(line: &str) -> Option<u64> {
-    let marker = "abs=0x";
-    let start = line.find(marker)? + marker.len();
-    let digits = line[start..]
-        .bytes()
-        .take_while(u8::is_ascii_hexdigit)
-        .count();
-    u64::from_str_radix(&line[start..start + digits], 16).ok()
+    trace_parser::strict_memory::memory_marker(line).map(|(_, address)| address)
 }
 
 pub(super) fn parse_memory_width(line: &str) -> Option<u64> {
-    let lower = line.to_ascii_lowercase();
-    let instruction = lower.split('"').nth(1).or_else(|| {
-        lower
-            .split('!')
-            .nth(1)
-            .and_then(|part| part.split_whitespace().nth(1))
-    })?;
-    let mnemonic = instruction.split_whitespace().next()?;
-    Some(match mnemonic {
-        "strb" | "ldrb" => 1,
-        "strh" | "ldrh" => 2,
-        word if word.starts_with("stp") || word.starts_with("ldp") => 16,
-        word if word.starts_with("str") || word.starts_with("ldr") => 8,
-        _ => return None,
-    })
+    let mem = trace_parser::strict_memory::memory_op(line)?;
+    Some(u64::from(mem.elem_width) * u64::from(mem.value_count))
 }
 
 pub(super) fn target_dependency_seeds(

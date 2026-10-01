@@ -338,7 +338,7 @@ pub(crate) fn scan_memory_with_sink(
 
 // ── MemOp 字节展开 ──
 
-fn expand_mem_op(mem: &MemOp) -> Vec<ByteValue> {
+pub(crate) fn expand_mem_op(mem: &MemOp) -> Vec<ByteValue> {
     match mem.layout {
         // atomic/RMW 的最终字节是旧值与寄存器的运算结果，trace 注解不足以精确
         // 恢复：write 使整个访问范围失效，read 不覆盖已有已知值（两者都表现

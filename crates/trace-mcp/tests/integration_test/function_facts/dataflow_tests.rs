@@ -97,8 +97,7 @@ fn pair_reads_of_stack_arguments_keep_a_null_value() {
 
 #[test]
 fn w_pair_values_are_not_half_forged() {
-    // W-pair（stp w8, w0）总宽 8 字节：宽度守卫不触发，但值横跨两个寄存器
-    // ——bytes 必须为 null，不得把第二个寄存器的字节伪造为零。
+    // 完整记录两个 W 寄存器时，每个寄存器贡献四个低位字节。
     let (engine, sid, path) = setup_inline_trace(&[
         "[App] 0x1004!0x1004 bl #0x2000; sp=0x3000",
         "[App] 0x2000!0x2000 stp w8, w0, [x19]; x19=0x7000 w8=0x14 w0=0x13 mem_w=0x7000",
@@ -112,9 +111,9 @@ fn w_pair_values_are_not_half_forged() {
     let writes = bundle
         .memory_writes
         .iter()
-        .map(|write| (write.address.as_str(), write.size, write.bytes.is_none()))
+        .map(|write| (write.address.as_str(), write.size, write.bytes.as_deref()))
         .collect::<Vec<_>>();
-    assert_eq!(writes, vec![("0x7000", 8, true)], "W-pair 写 bytes 为 null");
+    assert_eq!(writes, vec![("0x7000", 8, Some("1400000013000000"))]);
     assert!(
         bundle
             .memory_reads
@@ -530,12 +529,12 @@ fn pair_spill_chains_keep_upstream_reads_relevant() {
         .collect::<Vec<_>>();
     // ldp 读（外部 spill 输入）与 ldr 读（经 pair 恢复寄存器的二级外部
     // 输入，流入返回值）都必须进入 memory_reads。
-    // ldp 读 16B：pair 值横跨两个寄存器 → bytes null（不是半值冒充）；
+    // ldp 读 16B：两个寄存器均已记录，按低地址到高地址展开；
     // 上游 ldr 读经 pair 恢复寄存器流入返回值 → 保留。
     assert_eq!(
         reads,
         vec![
-            ("0x3000", None),
+            ("0x3000", Some("77000000000000008800000000000000".to_string())),
             ("0x8800", Some("9900000000000000".to_string())),
         ],
         "pair 生产者链上的上游读取不得被静默丢弃：{reads:?}"

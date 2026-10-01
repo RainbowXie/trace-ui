@@ -33,6 +33,7 @@ pub use fingerprint::{
     FingerprintSource,
 };
 pub use scan::search_memory;
+pub(crate) use scan::expand_mem_op;
 
 pub(crate) const MAX_PAGE_SIZE: u32 = 200;
 const MAX_PATTERN_SIZE: usize = 64 * 1024 * 1024;
