@@ -4,6 +4,7 @@
 //! 指令集合与两阶段块切分）、`abi`（栈参数三门）、`dataflow`（producer→
 //! consumer 读写）、`events`（External Call Event）。
 
+mod target_write_history;
 mod abi;
 mod address_provenance;
 mod private_frame_operands;
