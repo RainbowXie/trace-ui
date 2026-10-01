@@ -3,6 +3,7 @@ mod control_flow;
 mod build;
 mod memory;
 mod query;
+pub(crate) use query::activation::{stable_site, stable_runtime_site};
 mod search;
 mod slice;
 

@@ -3,6 +3,7 @@
 //! Only this instance's exclusive directory is removed; no global cache sweep.
 use super::format::{bad, cancel};
 use crate::error::Result;
+use super::scratch::ScratchQuota;
 use std::{fs::{self, File, OpenOptions}, io::{BufReader, BufWriter, Read, Write}, path::{Path, PathBuf}, sync::atomic::{AtomicBool, AtomicU64, Ordering}};
 static NEXT: AtomicU64 = AtomicU64::new(0);
 #[derive(Clone, Copy)]
@@ -22,6 +23,7 @@ pub struct ExternalSort<const WIDTH: usize> {
     next_file: u64,
     pub merge_passes: u64,
     finished: bool,
+    shared: Option<ScratchQuota>,
 }
 impl<const WIDTH: usize> ExternalSort<WIDTH> {
     pub fn create(parent: &Path, budget: SortBudget) -> Result<Self> {
@@ -38,12 +40,18 @@ impl<const WIDTH: usize> ExternalSort<WIDTH> {
                 Err(e) => return Err(e.into()),
             }
         };
-        Ok(Self { directory, budget, buffer: Vec::new(), runs: 0, live_bytes: 0, next_file: 0, merge_passes: 0, finished: false })
+        Ok(Self { directory, budget, buffer: Vec::new(), runs: 0, live_bytes: 0, next_file: 0, merge_passes: 0, finished: false, shared: None })
+    }
+    pub(crate) fn create_shared(parent: &Path, budget: SortBudget, quota: ScratchQuota) -> Result<Self> {
+        let mut sort = Self::create(parent, budget)?;
+        sort.shared = Some(quota);
+        Ok(sort)
     }
     fn path(&self, id: u64) -> PathBuf { self.directory.join(id.to_string()) }
     fn reserve_disk(&mut self, bytes: u64) -> Result<()> {
         let total = self.live_bytes.checked_add(bytes).ok_or_else(|| bad("scratch bytes overflow"))?;
         if total > self.budget.scratch_bytes { return Err(bad("sort scratch byte capacity exceeded")); }
+        if let Some(q) = &self.shared { q.reserve(bytes)?; }
         self.live_bytes = total;
         Ok(())
     }
@@ -119,6 +127,7 @@ impl<const WIDTH: usize> ExternalSort<WIDTH> {
                 for (j, bytes) in sizes.into_iter().enumerate() {
                     fs::remove_file(self.path(first + group_start + j as u64))?;
                     self.live_bytes = self.live_bytes.checked_sub(bytes).ok_or_else(|| bad("scratch accounting underflow"))?;
+                    if let Some(q) = &self.shared { q.release(bytes); }
                 }
                 outputs = outputs.checked_add(1).ok_or_else(|| bad("merge count overflow"))?;
                 group_start = group_start.checked_add(group).ok_or_else(|| bad("merge ordinal overflow"))?;
@@ -140,7 +149,10 @@ pub fn read_record<const WIDTH: usize>(r: &mut impl Read) -> Result<Option<[u8; 
     Ok(Some(record))
 }
 impl<const WIDTH: usize> Drop for ExternalSort<WIDTH> {
-    fn drop(&mut self) { let _ = fs::remove_dir_all(&self.directory); }
+    fn drop(&mut self) {
+        let _ = fs::remove_dir_all(&self.directory);
+        if let Some(q) = &self.shared { q.release(self.live_bytes); }
+    }
 }
 #[cfg(test)]
 mod tests {

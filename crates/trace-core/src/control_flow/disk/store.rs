@@ -103,6 +103,9 @@ fn contains_id(s: FlatSection<'_>, wanted: u32) -> Result<bool> {
 }
 pub(crate) fn validate(b: &[u8], trace: &OpenedTrace, c: &AtomicBool) -> Result<()> {
     cancel(c)?;
+    if b.len() >= 12 && (&b[..8] != MAGIC || u32_at(b,8) != VERSION) {
+        return Err(bad("incompatible control-flow cache version (requires v2)"));
+    }
     if b.len() < PAYLOAD || &b[..8] != MAGIC || u32_at(b,8) != VERSION
         || u32_at(b,12) != trace.format as u32 || u64_at(b,16) != trace.len()
         || b[24..56] != trace.hash || u64_at(b,56) != b.len() as u64
@@ -172,11 +175,35 @@ pub(crate) fn validate(b: &[u8], trace: &OpenedTrace, c: &AtomicBool) -> Result<
             _ => return Err(bad("activation status")),
         }
     }
+    let lines=section_view(b,Section::LineIndex)?;
+    if lines.data.len() as u64 != 8u64.checked_add(bytes(lines.count,8)?).ok_or_else(||bad("line size"))?
+        || u32_at(lines.data,0)!=total || u32_at(lines.data,4)!=0 || lines.count!=(u64::from(total)+255)/256 { return Err(bad("line index header")); }
+    let raw_line=|seq_id:u32|->Result<&str> {
+        seq(seq_id,total)?;
+        let mut pos=usize::try_from(u64_at(lines.data,8+(seq_id as usize/256)*8)).map_err(|_|bad("line capacity"))?;
+        for _ in 0..seq_id%256 {pos=pos.checked_add(memchr::memchr(b'\n',trace.data().get(pos..).ok_or_else(||bad("line offset"))?).ok_or_else(||bad("line missing"))?+1).ok_or_else(||bad("line offset overflow"))?;}
+        let tail=trace.data().get(pos..).ok_or_else(||bad("line offset"))?;let end=memchr::memchr(b'\n',tail).unwrap_or(tail.len());
+        Ok(std::str::from_utf8(&tail[..end]).map_err(|_|bad("line UTF8"))?.trim_end_matches('\r'))
+    };
     let ev=section_view(b,Section::ActivationBoundaryEvents)?; fixed(ev,24)?;
     let mut last_seq=None;
     for r in ev.data.chunks_exact(24) {
         cancel(c)?; let s=u32_at(r,0); seq(s,total)?;
-        optional_id(u32_at(r,4),a.count)?; optional_id(u32_at(r,12),addresses.count)?; optional_id(u32_at(r,16),a.count)?;
+        optional_id(u32_at(r,4),a.count)?; optional_id(u32_at(r,12),addresses.count)?;
+        if u32_at(r,8)==4 {
+            let call=u32_at(r,16); seq(call,total)?;
+            if call>=s || u32_at(r,4)==NONE || u32_at(r,12)==NONE { return Err(bad("bypassed boundary")); }
+            let call_line=raw_line(call)?;let resume_line=raw_line(s)?;
+            let (module,pc,offset)=crate::engine::stable_runtime_site(call_line).ok_or_else(||bad("bypassed call site"))?;
+            let (_,resume_pc,_)=crate::engine::stable_runtime_site(resume_line).ok_or_else(||bad("bypassed resume site"))?;
+            let (mnemonic,_)=trace_parser::strict_memory::instruction_parts(call_line).ok_or_else(||bad("bypassed call instruction"))?;
+            if super::super::scan::kind(mnemonic)!=super::super::types::CfgEdgeKind::CallResume || pc.checked_add(4)!=Some(resume_pc) {return Err(bad("bypassed actual call/resume"));}
+            let addr=addresses.record(u32_at(r,12) as u64,16)?;let mid=u32_at(addr,0) as usize;
+            let module_start=u64_at(offsets,mid*8);let module_end=u64_at(offsets,(mid+1)*8);
+            if checked_slice(pool,module_start,module_end-module_start)?!=module.as_bytes() || u64_at(addr,8)!=offset {return Err(bad("bypassed address mismatch"));}
+            let parent=u32_at(r,4);
+            if parent!=0 {let ar=a.record(parent as u64,64)?;let entry=u32_at(ar,12);if entry==NONE || call<entry || (u32_at(ar,24)==1 && s>u32_at(ar,16)){return Err(bad("bypassed outside parent"));}}
+        } else { optional_id(u32_at(r,16),a.count)?; }
         let kind=u32_at(r,8); let aid=u32_at(r,4);
         if kind>4 || u32_at(r,20)!=0 || last_seq.is_some_and(|v| v>s) { return Err(bad("boundary event")); }
         if kind<4 {
@@ -256,7 +283,7 @@ pub(crate) fn validate(b: &[u8], trace: &OpenedTrace, c: &AtomicBool) -> Result<
     for r in et[0].data.chunks_exact(48) {
         cancel(c)?; let aid=u32_at(r,0); let from=u32_at(r,4); let to=u32_at(r,8); let kind=u32_at(r,12); let f=u32_at(r,16);
         let key=(f,aid,from,to,kind);
-        if kind>4 || u32_at(r,20)!=0 || u64_at(r,24)==0 || last_edge.is_some_and(|v|v>=key) { return Err(bad("edge order/kind/count")); }
+        if kind>5 || u32_at(r,20)!=0 || u64_at(r,24)==0 || last_edge.is_some_and(|v|v>=key) { return Err(bad("edge order/kind/count")); }
         for bid in [from,to] { if u32_at(blocks.record(u64::from(bid),48)?,0)!=f { return Err(bad("edge function mismatch")); } }
         let ss=u64_at(r,32); let sc=u64_at(r,40);
         if ss!=edge_source_end { return Err(bad("edge source layout")); }

@@ -1,7 +1,7 @@
-//! Internal CFG v1 encoding. All integers are little endian; no native casts.
+//! Internal CFG v2 encoding. All integers are little endian; no native casts.
 //! The 128-byte header is followed by 13 fixed-position 24-byte directory entries
 //! (offset, byte length, logical count: u64 each). Payload starts at byte 440,
-//! aligned to 8. No section tags exist: version 1 fixes the order below.
+//! aligned to 8. No section tags exist: version 2 fixes the order below.
 //! Header: magic[8], version:u32, format:u32, trace_len:u64, trace_hash[32],
 //! file_len:u64, payload_hash[32], total_lines:u32, reserved[28]. The payload
 //! hash covers the directory and every byte after it, including padding.
@@ -14,7 +14,10 @@
 //! status 1 confirmed (reason=0); status 2 unresolved (reason=1 trace-end,
 //! 2 displaced, 3 no-next-insn). Absent entry/exit/resume use NONE, never zero.
 //! BoundaryEvents: 24 bytes: seq,activation,kind,address,related,reserved:u32;
-//! kind=0 call,1 entry,2 exit,3 resume,4 bypassed; optional IDs use NONE.
+//! kind=0 call,1 entry,2 exit,3 resume,4 bypassed. For kinds 0..3,
+//! related is an optional activation ID. For kind 4, seq is resume,
+//! activation is parent (including root 0), address is callsite, related is
+//! the actual call seq (not an activation ID). Bypassed creates no activation.
 //! Blocks: 64-byte four-pair (offset,count): records[48], variants[16],
 //! function-block references[16], source activation IDs[4]. Block record:
 //! function,address,representative_start,representative_end:u32;
@@ -30,7 +33,7 @@
 //! Edges: 32-byte two-pair header: records[48], source IDs[4]. Edge record:
 //! activation,from,to,kind,function,reserved:u32; count,source_start,count:u64.
 //! activation=NONE denotes function aggregate, otherwise activation-local;
-//! kind=0 fallthrough,1 conditional,2 jump,3 call_resume,4 return.
+//! kind=0 sequential,1 conditional,2 branch,3 indirect,4 call_resume,5 return.
 //! Sources are sorted unique confirmed IDs of this function; local edges have
 //! exactly their activation as source. Records ordered (function,activation,
 //! from,to,kind). No zero counts or duplicated keys.
@@ -46,8 +49,8 @@ pub const NONE: u32 = u32::MAX;
 pub const HEADER: usize = 128;
 pub const DIRECTORY: usize = 13 * 24;
 pub const PAYLOAD: usize = HEADER + DIRECTORY;
-pub const MAGIC: &[u8; 8] = b"TCFG0001";
-pub const VERSION: u32 = 1;
+pub const MAGIC: &[u8; 8] = b"TCFG0002";
+pub const VERSION: u32 = 2;
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 #[repr(u32)]
 pub enum TraceFormat { GumTrace = 1, Unidbg = 2 }

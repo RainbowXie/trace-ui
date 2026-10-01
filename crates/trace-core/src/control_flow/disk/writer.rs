@@ -5,7 +5,7 @@ use std::{fs::{File, OpenOptions}, io::{Read, Seek, SeekFrom, Write}, os::unix::
 
 /// Bounded section copy. The caller supplies exact encoded section length and
 /// count; this writer does not serialize or retain builder-owned object trees.
-/// Sections must be supplied once in the fixed version-1 order.
+/// Sections must be supplied once in the fixed version-2 order.
 pub struct CacheWriter {
     file: File, candidate: PathBuf, target: PathBuf, next: usize,
     entries: [(u64,u64,u64);13], trace_hash: [u8;32], trace_len: u64,
