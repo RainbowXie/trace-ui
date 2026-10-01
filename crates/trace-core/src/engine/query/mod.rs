@@ -5,7 +5,7 @@ mod algorithm_graph;
 mod call_tree;
 mod crypto;
 mod dep_tree;
-mod function_facts;
+pub(super) mod function_facts;
 mod functions;
 mod memory;
 mod strings;

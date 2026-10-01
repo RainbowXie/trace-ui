@@ -37,11 +37,35 @@ fn check_cancel(cancel: &AtomicBool) -> Result<()> {
     }
 }
 
+// LineIndex strips LF and optional CR before returning this slice.
+pub(super) fn check_raw(raw: &[u8]) -> Result<()> {
+    check_raw_limit(raw, 1024 * 1024)
+}
+fn check_raw_limit(raw: &[u8], limit: usize) -> Result<()> {
+    if raw.len() > limit {
+        return Err(TraceError::Internal(
+            "function facts raw-line working memory resource limit exceeded".into(),
+        ));
+    }
+    Ok(())
+}
+
 pub(super) fn scan_owned(
     state: &SessionState,
     tree: &ActivationTree,
     activation: &ConfirmedActivation,
     cancel: &AtomicBool,
+    visit: impl FnMut(BorrowedOwnedInsn<'_>) -> Result<bool>,
+) -> Result<()> {
+    scan_owned_impl(state, tree, activation, cancel, true, visit)
+}
+
+fn scan_owned_impl(
+    state: &SessionState,
+    tree: &ActivationTree,
+    activation: &ConfirmedActivation,
+    cancel: &AtomicBool,
+    resource_bound: bool,
     mut visit: impl FnMut(BorrowedOwnedInsn<'_>) -> Result<bool>,
 ) -> Result<()> {
     let index = state.line_index_view().ok_or(TraceError::IndexNotReady)?;
@@ -69,6 +93,9 @@ pub(super) fn scan_owned(
         let raw = index
             .get_line(&state.mmap, seq)
             .ok_or_else(|| TraceError::InvalidArgument(format!("seq {seq} 不在 trace 内")))?;
+        if resource_bound {
+            check_raw(raw)?;
+        }
         let line =
             std::str::from_utf8(raw).map_err(|error| TraceError::Internal(error.to_string()))?;
         let Some(site) = stable_site(line) else {
@@ -92,10 +119,11 @@ fn is_observed_target(
     activation: &ConfirmedActivation,
     cancel: &AtomicBool,
     site: &str,
+    resource_bound: bool,
 ) -> Result<bool> {
     let mut previous_transfer = false;
     let mut found = false;
-    scan_owned(state, tree, activation, cancel, |insn| {
+    scan_owned_impl(state, tree, activation, cancel, resource_bound, |insn| {
         if previous_transfer && insn.site == site {
             found = true;
             return Ok(false);
@@ -106,19 +134,29 @@ fn is_observed_target(
     Ok(found)
 }
 
-fn stream_executed_blocks(
+pub(super) fn stream_executed_blocks(
     state: &SessionState,
     tree: &ActivationTree,
     activation: &ConfirmedActivation,
     cancel: &AtomicBool,
+    sink: impl FnMut(&str, u32) -> Result<()>,
+) -> Result<()> {
+    stream_blocks_impl(state, tree, activation, cancel, true, sink)
+}
+fn stream_blocks_impl(
+    state: &SessionState,
+    tree: &ActivationTree,
+    activation: &ConfirmedActivation,
+    cancel: &AtomicBool,
+    resource_bound: bool,
     mut sink: impl FnMut(&str, u32) -> Result<()>,
 ) -> Result<()> {
     let mut first = true;
     let mut previous_transfer = false;
-    scan_owned(state, tree, activation, cancel, |insn| {
+    scan_owned_impl(state, tree, activation, cancel, resource_bound, |insn| {
         let starts = first
             || previous_transfer
-            || is_observed_target(state, tree, activation, cancel, &insn.site)?;
+            || is_observed_target(state, tree, activation, cancel, &insn.site, resource_bound)?;
         if starts {
             check_cancel(cancel)?;
             sink(&insn.site, insn.seq)?;
@@ -128,6 +166,18 @@ fn stream_executed_blocks(
         previous_transfer = insn.transfer();
         Ok(true)
     })
+}
+
+#[cfg(test)]
+mod resource_tests {
+    #[test]
+    fn raw_resource_boundary_checks_borrowed_bytes() {
+        assert!(super::check_raw_limit(b"12345678", 8).is_ok());
+        let error = super::check_raw_limit(b"123456789", 8).unwrap_err();
+        assert!(
+            matches!(error, crate::error::TraceError::Internal(message) if message == "function facts raw-line working memory resource limit exceeded")
+        );
+    }
 }
 
 impl crate::engine::TraceEngine {
@@ -197,6 +247,6 @@ impl crate::engine::TraceEngine {
                 ));
             }
         }
-        stream_executed_blocks(&state, tree, activation, cancel, sink)
+        stream_blocks_impl(&state, tree, activation, cancel, false, sink)
     }
 }

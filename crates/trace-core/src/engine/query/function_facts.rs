@@ -5,6 +5,21 @@
 //! consumer 读写）、`events`（External Call Event）。
 
 mod block_stream;
+mod budget;
+mod stack_stream;
+mod fact_work;
+mod memory_stream;
+mod collector;
+mod bounded;
+mod global_stream;
+mod read_stream;
+mod event_stream;
+mod replay;
+#[cfg(test)]
+mod budget_tests;
+#[cfg(test)]
+mod bounded_tests;
+pub use budget::{FactSourceReference, FactActivationSelector, FunctionFactContext, write_function_fact_projection};
 mod target_write_history;
 mod abi;
 mod address_provenance;

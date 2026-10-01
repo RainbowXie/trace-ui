@@ -5,6 +5,7 @@ mod build;
 mod memory;
 mod query;
 pub(crate) use query::activation::{stable_site, stable_runtime_site};
+pub use query::function_facts::{FactSourceReference, FactActivationSelector, FunctionFactContext, write_function_fact_projection};
 mod search;
 mod slice;
 
