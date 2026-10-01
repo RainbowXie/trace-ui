@@ -24,7 +24,7 @@ pub(crate) struct OwnedInsn {
 
 /// 冻结切分规则的块终止指令：条件/无条件/间接跳转、调用边界与返回。
 /// classify 已把 PAC 认证变体（braa/blraa/retaa 家族）归入对应分支类。
-fn is_control_transfer(mnemonic: &str) -> bool {
+pub(super) fn is_control_transfer(mnemonic: &str) -> bool {
     matches!(
         trace_parser::insn_class::classify(mnemonic, None),
         InsnClass::CondBranchNzcv

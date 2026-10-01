@@ -111,13 +111,14 @@ fn build_site(module: &str, offset_hex: &str) -> Option<String> {
     }
     // 规范化：小写、去前导零（零固定写 0）。上限 16 位 hex
     //（u64 最大 0xffffffffffffffff；超出 = 解析层异常，不是合法模块偏移）。
-    let lower = offset_hex.to_ascii_lowercase();
-    let trimmed = lower.trim_start_matches('0');
+    // 先在借用的输入上去前导零、检查宽度，再扩张字符串；极长的零前缀
+    // 不应使单项稳定身份查询先分配与 raw 行等大的临时字符串。
+    let trimmed = offset_hex.trim_start_matches('0');
     let normalized = if trimmed.is_empty() { "0" } else { trimmed };
     if normalized.len() > 16 {
         return None;
     }
-    Some(format!("{}+0x{}", module, normalized))
+    Some(format!("{}+0x{}", module, normalized.to_ascii_lowercase()))
 }
 
 /// common-types.md 模块名语法：`[A-Za-z0-9][A-Za-z0-9._-]{0,127}`，
@@ -497,6 +498,15 @@ mod tests {
 
     #[test]
     fn stable_site_rejects_malformed_lines() {
+        let zero_prefix = "0".repeat(256);
+        assert_eq!(
+            stable_site(&format!("[App] 0x1!0x{zero_prefix}AB nop")),
+            Some("App+0xab".to_owned()),
+        );
+        assert_eq!(
+            stable_site("[App] 0x1!0x10000000000000000 nop"),
+            None,
+        );
         assert_eq!(stable_site("[mod] 0x1!yy nop"), None, "! 后无 0x 前缀");
         assert_eq!(stable_site("[lib.so] 0x1!"), None, "截断");
         assert_eq!(
