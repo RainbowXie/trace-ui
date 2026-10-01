@@ -1,4 +1,5 @@
 //! 有界内存控制流索引；不读取路径缓存、不构建动态数据依赖。
+pub mod disk;
 mod scan;
 pub mod types;
 mod view;
