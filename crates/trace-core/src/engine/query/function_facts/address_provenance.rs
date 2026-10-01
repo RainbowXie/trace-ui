@@ -2,13 +2,14 @@
 //! Only concrete operand-labelled copy/fixed arithmetic is propagated.
 use super::super::activation::{stable_runtime_site, stable_site};
 use super::{
-    abi::collect_stack_arguments, blocks::OwnedInsn, global_map::StableGlobalMap, lines,
+    abi::collect_stack_arguments, blocks::OwnedInsn, global_map::StableGlobalMap,
     registers_at,
 };
 use crate::api_types::*;
 use crate::error::{Result, TraceError};
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 use trace_parser::types::{ParsedLine, RegId};
+use trace_parser::strict_memory::{integer_memory_elements, integer_register, observed_register_value, simple_address_operand};
 
 const MAX_LINES: u32 = 50_000;
 const MAX_RAW: usize = 32 * 1024 * 1024;
@@ -193,10 +194,31 @@ impl crate::engine::TraceEngine {
                 });
             }
         }
-        let entry = registers_at(&state, entry_seq)?;
-        let entry_sp = (entry[31] != u64::MAX)
-            .then_some(entry[31])
-            .or_else(|| lines::prestate_register_value(raw_line(entry_seq).ok()?, "sp"));
+        let mut entry = registers_at(&state, entry_seq)?;
+        let entry_raw = raw_line(entry_seq)?;
+        let pre = entry_raw.split_once(';').map(|(_, s)| s).unwrap_or(entry_raw);
+        let pre = pre.split(" -> ").next().unwrap().split(" => ").next().unwrap();
+        let mut gaps = Vec::new();
+        // Replay uses u64::MAX for unknown, not zero. Actual root-entry prestate
+        // may fill unknown but cannot hide a known replay disagreement.
+        for reg in (0..8).chain(std::iter::once(31)) {
+            let name = if reg == 31 { "sp".into() } else { format!("x{reg}") };
+            let wname = format!("w{reg}");
+            let has = |name: &str| pre.split(|c: char| c.is_whitespace() || c == ',' || c == ';')
+                .any(|token| token.split_once('=').is_some_and(|(n, _)| n == name));
+            if !has(&name) && (reg == 31 || !has(&wname)) { continue; }
+            let actual = observed_register_value(entry_raw, &name, false).filter(|v| {
+                reg == 31 || !has(&wname)
+                    || observed_register_value(entry_raw, &wname, false) == Some(*v & 0xffff_ffff)
+            });
+            if let Some(value) = actual.filter(|v| entry[reg] == u64::MAX || entry[reg] == *v) {
+                entry[reg] = value;
+            } else {
+                entry[reg] = u64::MAX;
+                gap(&mut gaps, entry_seq, "entry_definition", "root entry prestate is incomplete, inconsistent or conflicts with replay");
+            }
+        }
+        let entry_sp = (entry[31] != u64::MAX).then_some(entry[31]);
         let root_owned = owned
             .iter()
             .filter(|i| {
@@ -260,7 +282,6 @@ impl crate::engine::TraceEngine {
             .map(|c| c.call_seq)
             .collect::<BTreeSet<_>>();
         let mut accesses = Vec::new();
-        let mut gaps = Vec::new();
         let mut steps_total = 0usize;
         let mut sp_copy_sources = BTreeMap::new();
         let mut prior_writes = Vec::<(u64, u32)>::new();
@@ -326,7 +347,21 @@ impl crate::engine::TraceEngine {
             let marker = trace_parser::strict_memory::memory_marker(raw);
             let mem = trace_parser::strict_memory::memory_op(raw);
             let class = trace_parser::insn_class::classify_and_refine(&parsed);
-            let (defs, _) = trace_parser::def_use::determine_def_use(class, &parsed);
+            let (mut defs, _) = trace_parser::def_use::determine_def_use(class, &parsed);
+            // Unknown data still defines each nonzero load destination, including
+            // the second pair half. Never preserve an origin by value collision.
+            if marker.is_some_and(|(write, _)| !write) {
+                if let Some(elements) = integer_memory_elements(raw) {
+                    for element in elements.iter().filter(|e| !e.register.is_zero()) {
+                        if !defs.contains(&element.register) { defs.push(element.register); }
+                    }
+                }
+            }
+            if matches!(mnemonic, "mov" | "add" | "sub" | "adrp") {
+                if let Some(dst) = operand.split(',').next().and_then(|s| integer_register(s.trim())) {
+                    if !dst.is_zero() && !defs.contains(&dst) { defs.push(dst); }
+                }
+            }
             let parts = operand.split(',').map(str::trim).collect::<Vec<_>>();
             let mut loaded_stack = None;
             if let Some((write, address)) = marker {
@@ -350,9 +385,12 @@ impl crate::engine::TraceEngine {
                 }
                 if let Some((base, offset, writeback)) = memory_operand(operand) {
                     if let Some(reg) = reg64(base) {
-                        if parsed.base_reg == Some(reg) {
+                        let strict_base = simple_address_operand(operand).map(|(_, r, off)| (r, off));
+                        if strict_base == Some((reg, offset))
+                            || (base == "sp" && writeback.is_some() && parsed.base_reg == Some(reg))
+                        {
                             if let Some(p) = proofs.get(&reg) {
-                                if values(&parsed, reg, false) == Some(p.value)
+                                if observed_register_value(raw, base, false) == Some(p.value)
                                     && add(p.value, offset) == Some(address)
                                     && p.delta.checked_add(offset).is_some()
                                     && writeback.is_none_or(|delta| {
