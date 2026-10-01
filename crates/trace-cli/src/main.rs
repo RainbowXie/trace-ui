@@ -1,12 +1,16 @@
 use std::sync::Arc;
 use trace_core::TraceEngine;
 
+mod cfg_helper;
 mod fact_helper;
 mod graph_helper;
 mod helper;
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
+    if cfg_helper::requested() {
+        return cfg_helper::run();
+    }
     if helper::requested() {
         return helper::run();
     }
