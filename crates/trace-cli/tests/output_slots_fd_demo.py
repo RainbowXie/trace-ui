@@ -32,6 +32,21 @@ def invoke(trace, request=REQUEST, success=True):
             return
         assert r.returncode == 0, r.stderr.decode()
         return json.loads(r.stdout)
+# Complete finite-window negative: actual known scalar store/load followed
+# by a verified immediate definition killing the loaded identity before ret.
+scalar_caller = """[App] 0x401004!0x1004 ldr x2, [x0]; x0=0x7000 mem_r=0x7000 -> x2=0x42
+[App] 0x401008!0x1008 mov x2, #0; -> x2=0x0
+[App] 0x401014!0x1014 ret; x0=0x7000
+[App] 0x400004!0x4 nop; x0=0x7000
+"""
+scalar_prefix = PREFIX.replace("x1=0x6000", "x1=0x42") + "[App] 0x402004!0x2004 mov x1, #0; -> x1=0x0\n"
+scalar = invoke(scalar_prefix+EXIT+scalar_caller)
+assert scalar["coverage"]["complete"] and not scalar["uses"] and not scalar["gaps"], scalar
+direct_source = invoke(PREFIX + "[App] 0x402004!0x2004 ldr x7, [x1]; x1=0x6000 mem_r=0x6000 -> x7=0x3\n" + EXIT + CALLER)
+assert not direct_source["coverage"]["complete"] and any(g["kind"] == "untracked_store_source_use" for g in direct_source["gaps"]), direct_source
+unknown_usage = scalar_caller.replace("mov x2, #0; -> x2=0x0", "mystery x2; x2=0x42")
+unknown_proof = invoke(scalar_prefix+EXIT+unknown_usage)
+assert not unknown_proof["coverage"]["complete"] and unknown_proof["gaps"], unknown_proof
 p = invoke(PREFIX+EXIT+CALLER)
 assert len(p["uses"]) == 1, p
 u = p["uses"][0]
@@ -57,7 +72,11 @@ data_only = CALLER.split("[App] 0x401008")[0]+"""[App] 0x401008!0x1008 str x2, [
 [App] 0x401014!0x1014 ret; x0=0x7000
 [App] 0x400004!0x4 nop; x0=0x7000
 """
-assert not invoke(PREFIX+EXIT+data_only)["uses"]
+escaped = invoke(PREFIX+EXIT+data_only)
+assert not escaped["uses"] and not escaped["coverage"]["complete"], escaped
+assert any(g["kind"] == "untracked_store_data_escape" for g in escaped["gaps"]), escaped
+returned = invoke(scalar_prefix+EXIT+scalar_caller.replace("[App] 0x401008!0x1008 mov x2, #0; -> x2=0x0\n", ""))
+assert not returned["coverage"]["complete"], returned
 # Real trace_root does not supply confirmed caller ownership.
 p = invoke(PREFIX.split("\n",1)[1]+EXIT+CALLER, dict(REQUEST,call_seq=0,entry_seq=1))
 assert not p["uses"] and any(g["kind"] == "caller_not_closed" for g in p["gaps"]), p
@@ -65,4 +84,4 @@ invoke(PREFIX+EXIT+CALLER,dict(REQUEST,entry_seq=3),False)
 invoke(PREFIX+EXIT+CALLER,dict(REQUEST,function="App+0x999"),False)
 for change in [dict(REQUEST,unexpected=True),dict(REQUEST,kind="old_output_slots"),dict(REQUEST,slot_ranges=REQUEST["slot_ranges"]*2),dict(REQUEST,slot_ranges=[dict(address="0x7000",size=0)])]: invoke(PREFIX+EXIT+CALLER,change,False)
 invoke(PREFIX+EXIT+CALLER,json.dumps(REQUEST)[:-1]+',"kind":"output_slot_uses"}',False)
-print("real FD output-slot demonstrations passed: final store/load/copy/add/address; partial/unknown; transient scalar overwrite; data collision; owner/selector and strict protocol rejection")
+print("real FD output-slot demonstrations passed: complete scalar store/load/kill; final pointer positive; unknown usage incomplete; partial/unknown; transient scalar overwrite; store-data/return escape incomplete; owner/selector and strict protocol rejection")

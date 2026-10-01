@@ -2,7 +2,7 @@
 //! Deliberately does not infer pointers from numeric ranges or store-data reads.
 use super::super::activation::{stable_runtime_site, stable_site};
 use crate::{api_types::*, error::{Result, TraceError}};
-use std::collections::{BTreeSet, HashMap};
+use std::collections::{BTreeSet, HashMap, HashSet};
 use trace_parser::types::{ParsedLine, RegId};
 fn invalid(s: &str) -> TraceError { TraceError::InvalidArgument(s.into()) }
 fn hex(v: u64) -> String { format!("0x{v:x}") }
@@ -75,9 +75,12 @@ impl crate::engine::TraceEngine {
         let mut stores = HashMap::<u64,Store>::new();
         let mut final_stores = HashMap::<u64,u32>::new();
         let mut chains = HashMap::<RegId,Chain>::new();
+        // Negative-only store-source obligations. Reads need propagation we do
+        // not implement here; an actual supported overwrite can discharge one.
+        let mut store_sources = HashSet::<RegId>::new();
         let mut uses = Vec::new(); let mut bytes = 0usize; let mut scanned = 0u32; let mut access_count = 0; let mut steps = 0usize;
         for seq in entry_seq..=last {
-            if seq == root.resume_seq { final_stores = stores.iter().map(|(a,s)| (*a,s.seq)).collect(); chains.clear(); }
+            if seq == root.resume_seq { final_stores = stores.iter().map(|(a,s)| (*a,s.seq)).collect(); }
             let line = raw(seq)?;
             bytes = bytes.checked_add(line.len()).ok_or_else(|| invalid("raw overflow"))?;
             if bytes > 32*1024*1024 || line.len() > 4096 { gap(&mut gaps,seq,"raw_capacity"); break; }
@@ -89,11 +92,47 @@ impl crate::engine::TraceEngine {
             let (Some((m,operand)),Some(p)) = (parts,parsed) else { stores.clear(); chains.clear(); gap(&mut gaps,seq,"unsupported_parse"); continue; };
             if operand.len() > 512 { return Err(invalid("operand capacity")); }
             let class = trace_parser::insn_class::classify_and_refine(&p);
-            let (defs,_) = trace_parser::def_use::determine_def_use(class,&p);
+            let (defs,reads) = trace_parser::def_use::determine_def_use(class,&p);
+            if reads.iter().any(|r| store_sources.contains(r))
+                || address_operand(operand).is_some_and(|(_,r,_)| store_sources.contains(&r)) {
+                gap(&mut gaps,seq,"untracked_store_source_use");
+            }
+            if m == "ret" && !store_sources.is_empty() {
+                gap(&mut gaps,seq,"untracked_store_source_return");
+            }
             if matches!(m,"bl"|"blr"|"svc") || (matches!(class,trace_parser::insn_class::InsnClass::Nop) && m != "nop") { stores.clear(); chains.clear(); gap(&mut gaps,seq,"call_external_or_unknown"); continue; }
+            // Negative coverage is an instruction-by-instruction mechanical
+            // observation, not a language-level scalar/pointer classification.
+            let args = operand.split(',').map(str::trim).collect::<Vec<_>>();
+            let supported_data = match (m, args.as_slice()) {
+                ("mov", [dst, src]) => address_base(dst).is_some_and(|d| {
+                    let expected = address_base(src).and_then(|s| value(&p,s,false))
+                        .or_else(|| immediate(src).and_then(|v| u64::try_from(v).ok()));
+                    expected.is_some() && expected == value(&p,d,true)
+                }),
+                ("add" | "sub", [dst, src, imm]) => {
+                    match (address_base(dst), address_base(src), immediate(imm)) {
+                        (Some(d),Some(s),Some(n)) => {
+                            let delta = if m == "sub" { n.checked_neg() } else { Some(n) };
+                            let expected = value(&p,s,false).zip(delta).and_then(|(v,n)| v.checked_add_signed(n));
+                            expected.is_some() && expected == value(&p,d,true)
+                        },
+                        _ => false,
+                    }
+                },
+                ("nop", [""]) => true,
+                ("ret", [""]) => seq == if owner.id == root.id { root.exit_seq } else { caller.exit_seq },
+                ("ldr" | "ldur" | "str" | "stur", _) => true,
+                _ => false,
+            };
+            if !supported_data { gap(&mut gaps,seq,"unsupported_instruction_effect"); }
+            if m == "ret" && (!chains.is_empty() || value(&p,RegId(0),false).is_none()) {
+                gap(&mut gaps,seq,"untracked_return_escape");
+            }
             let marker = trace_parser::strict_memory::memory_marker(line);
             let mem = trace_parser::strict_memory::memory_op(line);
             let mut loaded = None;
+            let mut stored_source = None;
             if let Some((write,a)) = marker {
                 access_count += 1; if access_count > 8192 { return Err(invalid("access capacity")); }
                 let concrete_address = address_operand(operand).is_some_and(|(_,base,off)|
@@ -117,7 +156,20 @@ impl crate::engine::TraceEngine {
                             } else { chains.clear(); gap(&mut gaps,seq,"address_mismatch"); }
                         }
                     } else { chains.clear(); gap(&mut gaps,seq,"unsupported_address"); }
+                    let op = mem.as_ref().unwrap();
+                    let data = operand.split(',').next().unwrap_or("").trim();
+                    let data_reg = reg64(data);
+                    if !matches!(m,"ldr"|"ldur"|"str"|"stur") || size != 8 || op.value_count != 1 || data_reg.is_none()
+                        || op.value.is_none() || data_reg.and_then(|r| value(&p,r,!write)) != op.value {
+                        gap(&mut gaps,seq,"unsupported_memory_data_effect");
+                    }
                     if write {
+                        if data_reg.is_some_and(|r| chains.contains_key(&r)) {
+                            gap(&mut gaps,seq,"untracked_store_data_escape");
+                        }
+                        if chains.values().any(|c| a < c.slot.saturating_add(8) && c.slot < end) {
+                            gap(&mut gaps,seq,"loaded_identity_overwrite");
+                        }
                         stores.retain(|b,_| !(a < b.saturating_add(8) && *b < end));
                         // Partial or any alias overwrite kills even already loaded
                         // identities: conservative, not invented alias independence.
@@ -128,12 +180,16 @@ impl crate::engine::TraceEngine {
                             if let Some(v) = op.value.filter(|v| value(&p,reg64(data).unwrap(),false) == Some(*v)) {
                                 if stores.len() >= 8192 { return Err(invalid("store capacity")); }
                                 stores.insert(a,Store {seq,owner:owner.entry_seq,operand:data.into(),value:v});
+                                stored_source = reg64(data);
                             } else { gap(&mut gaps,seq,"unknown_store_value"); }
                         } else if ranges.iter().any(|&(b,e)| a < e && b < end) { gap(&mut gaps,seq,"partial_or_unsupported_store"); }
                     } else {
                         let op = mem.as_ref().unwrap();
                         let dst = operand.split(',').next().unwrap_or("").trim();
                         if size == 8 && op.value_count == 1 {
+                            if ranges.iter().any(|&(b,e)| a < e && b < end) && !stores.contains_key(&a) {
+                                gap(&mut gaps,seq,"load_without_slot_definition");
+                            }
                             if let (Some(s),Some(r)) = (stores.get(&a),reg64(dst)) {
                                 if op.value == Some(s.value) && value(&p,r,true) == Some(s.value) && defs.contains(&r) {
                                     loaded = Some((r,Chain {slot:a,store:s.clone(),load:seq,owner:owner.entry_seq,dst:dst.into(),value:s.value,delta:0,steps:vec![AddressDefinitionStepDto {seq,operation:"load".into(),source_operand:hex(a),target_operand:dst.into(),pre_value:hex(s.value),post_value:hex(s.value)}]}));
@@ -160,18 +216,41 @@ impl crate::engine::TraceEngine {
                     }
                 }
             }
+            if matches!(m,"mov"|"add"|"sub") && operands.get(1).and_then(|s| address_base(s)).is_some_and(|r| chains.contains_key(&r)) && copied.is_none() {
+                gap(&mut gaps,seq,"untracked_register_use");
+            }
             if m != "ret" { for r in defs { chains.remove(&r); } }
+            if supported_data && matches!(m,"mov"|"add"|"sub") {
+                if let Some(dst) = operands.first().and_then(|s| reg64(s)) { store_sources.remove(&dst); }
+            }
+            if let Some(r) = stored_source { store_sources.insert(r); }
             if let Some((r,c)) = loaded.or(copied) { chains.insert(r,c); }
         }
         // Observation is execution-before resume, not after the resume instruction.
         if last < root.resume_seq { gap(&mut gaps,root.resume_seq,"final_observation_uncovered"); }
+        // This first negative subset requires every requested final byte to
+        // have a complete known single-register definition. No stale entry
+        // bytes or partial writes are silently treated as scalar output.
+        for &(start,end) in &ranges {
+            let mut next = start;
+            while next < end {
+                if !final_stores.contains_key(&next) || next.checked_add(8).is_none_or(|n| n > end) {
+                    gap(&mut gaps,root.resume_seq,"final_range_definition_uncovered");
+                    break;
+                }
+                next += 8;
+            }
+        }
         for u in &mut uses { let a = u64::from_str_radix(&u.slot_address[2..],16).unwrap(); u.final_output_definition = final_stores.get(&a) == Some(&u.store_seq); }
         if uses.iter().any(|u| !u.final_output_definition) {
             gap(&mut gaps,root.resume_seq,"transient_store_not_final_output");
         }
-        // This subset never claims a complete negative: unsupported non-address
-        // reads/escapes and external effects are not exhaustively tracked.
-        gap(&mut gaps,last,"negative_coverage_not_supported");
-        Ok(OutputSlotUsesDto {trace_session:sid.into(),call_seq,entry_seq,function:function.into(),target_modules:modules.into_iter().collect(),exit_seq:root.exit_seq,resume_seq:root.resume_seq,slot_ranges:slot_ranges.to_vec(),caller:ReturnCallerDto {call_seq:caller.call_seq,entry_seq:caller.entry_seq,exit_seq:caller.exit_seq,resume_seq:caller.resume_seq,closed},uses,coverage:AddressCoverageDto {first_seq:entry_seq,last_seq:entry_seq+scanned.saturating_sub(1),scanned_lines:scanned,access_count,complete:false},gaps})
+        // Only this fixed kind is a non-blocking time-point diagnostic. Every
+        // other gap is missing coverage; an empty uses list alone is no proof.
+        // Complete means no unaccounted use in this finite executed window,
+        // never that a value cannot be a pointer in any future language context.
+        let complete = closed && last == wanted && scanned == wanted - entry_seq + 1
+            && gaps.iter().all(|g| g.kind == "transient_store_not_final_output");
+        Ok(OutputSlotUsesDto {trace_session:sid.into(),call_seq,entry_seq,function:function.into(),target_modules:modules.into_iter().collect(),exit_seq:root.exit_seq,resume_seq:root.resume_seq,slot_ranges:slot_ranges.to_vec(),caller:ReturnCallerDto {call_seq:caller.call_seq,entry_seq:caller.entry_seq,exit_seq:caller.exit_seq,resume_seq:caller.resume_seq,closed},uses,coverage:AddressCoverageDto {first_seq:entry_seq,last_seq:entry_seq+scanned.saturating_sub(1),scanned_lines:scanned,access_count,complete},gaps})
     }
 }
