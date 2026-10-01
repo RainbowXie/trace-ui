@@ -11,8 +11,7 @@ use std::sync::Arc;
 #[cfg(unix)]
 use std::os::fd::{FromRawFd, RawFd};
 
-use serde::Deserialize;
-use trace_core::api_types::FunctionFactBundleDto;
+use serde::{Deserialize, Serialize};
 use trace_core::BuildOptions;
 use trace_core::TraceEngine;
 
@@ -28,6 +27,22 @@ struct FactHelperRequest {
     function: Option<String>,
     #[serde(default)]
     target_modules: Vec<String>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RuntimeMappingRequest {
+    kind: RuntimeMappingKind,
+    call_seq: u32,
+    entry_seq: u32,
+    function: String,
+    target_modules: Vec<String>,
+}
+
+#[derive(Debug, Deserialize)]
+enum RuntimeMappingKind {
+    #[serde(rename = "runtime_mapping")]
+    RuntimeMapping,
 }
 
 pub(crate) fn requested() -> bool {
@@ -49,8 +64,20 @@ pub(crate) fn run() -> anyhow::Result<()> {
     ensure_regular(&trace, "trace fd")?;
 
     let request_bytes = read_stdin_bounded()?;
-    let request: FactHelperRequest = serde_json::from_slice(&request_bytes)
-        .map_err(|error| anyhow::anyhow!("invalid fact helper request: {error}"))?;
+    // 只按显式 kind 分派，再从原始字节 strict 解析；不跨协议 fallback。
+    let control: serde_json::Value = serde_json::from_slice(&request_bytes)?;
+    let mapping_request = match control.get("kind") {
+        None => None,
+        Some(serde_json::Value::String(kind)) if kind == "runtime_mapping" => Some(
+            serde_json::from_slice::<RuntimeMappingRequest>(&request_bytes)?,
+        ),
+        Some(_) => anyhow::bail!("unknown fact helper request kind"),
+    };
+    let fact_request = if mapping_request.is_none() {
+        Some(serde_json::from_slice::<FactHelperRequest>(&request_bytes)?)
+    } else {
+        None
+    };
 
     let engine = Arc::new(TraceEngine::new());
     let session_info = engine
@@ -69,6 +96,18 @@ pub(crate) fn run() -> anyhow::Result<()> {
         )
         .map_err(|error| anyhow::anyhow!("failed to build index: {error}"))?;
 
+    if let Some(request) = mapping_request {
+        let RuntimeMappingKind::RuntimeMapping = request.kind;
+        let mapping = engine.get_runtime_mapping(
+            &sid,
+            request.call_seq,
+            request.entry_seq,
+            &request.function,
+            &request.target_modules,
+        )?;
+        return write_response(&mapping);
+    }
+    let request = fact_request.expect("explicit protocol dispatch");
     let bundle = engine
         .get_function_facts_for_modules(
             &sid,
@@ -190,7 +229,7 @@ impl<W: Write> Write for BoundedWriter<W> {
 }
 
 #[cfg(unix)]
-fn encode_response(bundle: &FunctionFactBundleDto) -> anyhow::Result<Vec<u8>> {
+fn encode_response(bundle: &impl Serialize) -> anyhow::Result<Vec<u8>> {
     let mut buffer = Vec::new();
     let mut bounded = BoundedWriter::new(&mut buffer, MAX_FACT_BUNDLE_BYTES);
     serde_json::to_writer(&mut bounded, bundle)
@@ -202,7 +241,7 @@ fn encode_response(bundle: &FunctionFactBundleDto) -> anyhow::Result<Vec<u8>> {
 }
 
 #[cfg(unix)]
-fn write_response(bundle: &FunctionFactBundleDto) -> anyhow::Result<()> {
+fn write_response(bundle: &impl Serialize) -> anyhow::Result<()> {
     let encoded = encode_response(bundle)?;
     let mut stdout = io::stdout().lock();
     stdout

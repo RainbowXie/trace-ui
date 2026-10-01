@@ -1,6 +1,9 @@
 use serde::{Deserialize, Serialize};
 use trace_parser::types::TraceFormat;
 
+mod runtime_mapping;
+pub use runtime_mapping::*;
+
 // ── Progress ──
 
 pub type ProgressCallback = Box<dyn Fn(Progress) + Send + Sync>;

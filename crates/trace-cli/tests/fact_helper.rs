@@ -56,6 +56,82 @@ fn spawn_fact_helper(
     child.wait_with_output().expect("helper output")
 }
 
+#[test]
+fn runtime_mapping_real_queries() {
+    let root = std::env::temp_dir().join(format!("runtime-mapping-{}", std::process::id()));
+    std::fs::create_dir_all(&root).unwrap();
+    let path = root.join("trace.log");
+    let valid = "[App] 0x1100!0x100 nop\n[App] 0x1104!0x104 bl #0x1200\n[App] 0x1200!0x200 nop\n[App] 0x1204!0x204 ret\n[App] 0x1108!0x108 nop\n[Other] 0x9100!0x100 nop\n";
+    let request = br#"{"kind":"runtime_mapping","call_seq":1,"entry_seq":2,"function":"App+0x200","target_modules":["Other","App"]}"#;
+    std::fs::write(&path, valid).unwrap();
+    let trace = std::fs::File::open(&path).unwrap();
+    let out = run_fact_helper(trace.as_raw_fd(), request);
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let body: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
+    assert_eq!(body["target_modules"], serde_json::json!(["App", "Other"]));
+    assert_eq!(body["exit_seq"], 3);
+    assert_eq!(body["resume_seq"], 4);
+    assert_eq!(body["mappings"][0]["runtime_base"], "0x1000");
+    assert_eq!(body["mappings"][1]["runtime_base"], "0x9000");
+    assert_eq!(
+        body["mappings"][0]["source"],
+        serde_json::json!({"seq":0,"runtime_pc":"0x1100","stable_offset":"0x100"})
+    );
+    assert_eq!(body["mappings"][1]["source"]["seq"], 5);
+    drop(trace);
+    for bad_request in [
+        String::from_utf8(request.to_vec())
+            .unwrap()
+            .replace("App+0x200", "App+0x201"),
+        String::from_utf8(request.to_vec())
+            .unwrap()
+            .replace("\"entry_seq\":2", "\"entry_seq\":3"),
+        String::from_utf8(request.to_vec())
+            .unwrap()
+            .replace("\"Other\",\"App\"", "\"App\",\"App\""),
+        String::from_utf8(request.to_vec())
+            .unwrap()
+            .replace("\"Other\"", "\"Missing\""),
+        String::from_utf8(request.to_vec())
+            .unwrap()
+            .replace("\"Other\"", "\"../Other\""),
+        String::from_utf8(request.to_vec())
+            .unwrap()
+            .replace("\"kind\":\"runtime_mapping\"", "\"kind\":\"unknown\""),
+        String::from_utf8(request.to_vec())
+            .unwrap()
+            .replace("\"call_seq\":1", "\"call_seq\":1,\"call_seq\":1"),
+        String::from_utf8(request.to_vec())
+            .unwrap()
+            .replace("\"call_seq\":1", "\"extra\":true,\"call_seq\":1"),
+    ] {
+        let trace = std::fs::File::open(&path).unwrap();
+        let out = run_fact_helper(trace.as_raw_fd(), bad_request.as_bytes());
+        assert!(!out.status.success(), "must reject {bad_request}");
+        assert!(out.stdout.is_empty());
+    }
+    for (line, error) in [
+        ("[Other] 0x9204!0x104 nop\n", "inconsistent runtime bases"),
+        ("[Other] 0x10!0x100 nop\n", "below its stable offset"),
+    ] {
+        std::fs::write(&path, format!("{valid}{line}")).unwrap();
+        let trace = std::fs::File::open(&path).unwrap();
+        let out = run_fact_helper(trace.as_raw_fd(), request);
+        assert!(!out.status.success());
+        assert!(out.stdout.is_empty());
+        assert!(
+            String::from_utf8_lossy(&out.stderr).contains(error),
+            "{}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+    }
+    std::fs::remove_dir_all(root).unwrap();
+}
+
 fn run_fact_helper(trace_fd: RawFd, request: &[u8]) -> Output {
     spawn_fact_helper(trace_fd, "3", request, &[])
 }
