@@ -314,7 +314,8 @@ pub struct FunctionStackArgumentDto {
     pub read_seqs: Vec<u32>,
 }
 
-#[derive(Serialize)]
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
+#[serde(deny_unknown_fields)]
 pub struct ExecutedBlockEntryDto {
     pub block: String,
     pub entry_seq: u32,
@@ -490,6 +491,14 @@ pub enum GraphMechanicalEndpointDto {
         size: u32,
         bytes: String,
     },
+    InstructionImmediate {
+        owner: GraphActivationSelectorDto,
+        seq: u32,
+        block_index: u32,
+        block: ExecutedBlockEntryDto,
+        size: u32,
+        bytes: String,
+    },
     Unresolved {
         owner: GraphActivationSelectorDto,
         unresolved_index: u32,
@@ -504,6 +513,7 @@ impl GraphMechanicalEndpointDto {
             | Self::DynamicSource { seq, .. }
             | Self::GlobalReference { seq, .. }
             | Self::Constant { seq, .. }
+            | Self::InstructionImmediate { seq, .. }
             | Self::Unresolved { seq, .. } => *seq,
             Self::ExternalCallEvent { .. } => return None,
         })
@@ -516,6 +526,7 @@ impl GraphMechanicalEndpointDto {
             | Self::DynamicSource { owner, .. }
             | Self::GlobalReference { owner, .. }
             | Self::Constant { owner, .. }
+            | Self::InstructionImmediate { owner, .. }
             | Self::Unresolved { owner, .. } => owner,
         }
     }

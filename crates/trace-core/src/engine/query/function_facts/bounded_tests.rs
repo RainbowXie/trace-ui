@@ -62,3 +62,30 @@ fn tiny_internal_budget_refuses_whole_generation_and_exact_size_succeeds() {
     engine.close_session(&sid).unwrap();
     std::fs::remove_file(path).unwrap();
 }
+
+#[test]
+fn immediate_gap_keeps_missing_dependency_coverage_conservative() {
+    let tree = crate::query::activation::ActivationBuilder::new().finish(0);
+    // No ownership lookup may run when dependency coverage is unavailable.
+    let owner = &tree.activations[0];
+    let line = "[App] 0x200!0x200 mov x0, #1; x0=0x0 -> x0=0x1";
+    assert!(super::immediate_gap(
+        &tree,
+        owner,
+        &[],
+        None,
+        false,
+        1,
+        line
+    ));
+    let relevant = super::fact_work::Fixed::<super::fact_work::Dependency>::new().unwrap();
+    assert!(super::immediate_gap(
+        &tree,
+        owner,
+        &[],
+        Some(&relevant),
+        false,
+        1,
+        line
+    ));
+}

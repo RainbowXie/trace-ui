@@ -100,7 +100,7 @@ pub(crate) fn owned_instructions(
 
 /// 两阶段切分：先收集本次执行观察到的全部控制转移落点，再用最终起点集
 /// 合切分——后期观察到的目标会回溯拆开第一次的线性执行。
-pub(super) fn split_executed_blocks(owned: &[OwnedInsn]) -> Vec<ExecutedBlockEntryDto> {
+pub(crate) fn split_executed_blocks(owned: &[OwnedInsn]) -> Vec<ExecutedBlockEntryDto> {
     let mut targets: HashSet<&str> = HashSet::new();
     for pair in owned.windows(2) {
         if pair[0].transfer {

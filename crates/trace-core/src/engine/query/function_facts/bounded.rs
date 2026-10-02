@@ -204,7 +204,9 @@ impl crate::engine::TraceEngine {
                 .as_ref()
                 .is_none_or(|r| r.values.binary_search_by_key(&seq, |d| d.seq).is_ok())
         };
-        // Write gaps and pure immediate gaps are retained, not fallback facts.
+        // Only proved static immediate sources with complete dependency coverage
+        // and an owned block occurrence can omit their source gap. Other gaps
+        // remain unchanged; the retained block list was budgeted above.
         scan_owned(&state, tree, root, cancel, |insn| {
             let annotated = ["mem_w=", "mem_r=", "mem[WRITE]", "mem[READ]"]
                 .iter()
@@ -219,14 +221,17 @@ impl crate::engine::TraceEngine {
                     "访存地址或读写注记畸形/冲突，拒绝该访存事实",
                 )?;
             }
-            if let Some((m, op)) = trace_parser::strict_memory::instruction_parts(insn.line) {
-                let mut parts = op.split(',').map(str::trim);
-                let first = parts.next();
-                let second = parts.next();
-                if matches!(m, "mov" | "movz" | "movn")
-                    && second.is_some_and(|p| p.starts_with('#'))
-                    && !op.contains('[')
-                    && !matches!(first, Some("sp" | "wsp"))
+            if let Some((m, _op)) = trace_parser::strict_memory::instruction_parts(insn.line) {
+                if super::immediate::candidate(insn.line)
+                    && super::immediate_gap(
+                        tree,
+                        root,
+                        &dto.executed_block_sequence,
+                        relevant.as_ref(),
+                        state.pair_split_view().is_some(),
+                        insn.seq,
+                        insn.line,
+                    )
                 {
                     collector::unresolved(
                         &mut dto.unresolved,
@@ -234,7 +239,7 @@ impl crate::engine::TraceEngine {
                         "unsupported_instruction",
                         std::iter::once(insn.seq),
                         None,
-                        "pure immediate source has no frozen SourceReference",
+                        "immediate source grammar, ownership, block or dependency coverage incomplete",
                     )?;
                 }
                 if let Some(effect) = memory_stream::effect(insn.line) {

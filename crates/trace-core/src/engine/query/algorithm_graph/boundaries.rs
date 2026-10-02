@@ -18,6 +18,7 @@ pub(super) struct UnresolvedBoundary {
 #[derive(Default)]
 pub(super) struct BoundaryIndex {
     pub(super) by_seq: BTreeMap<u32, GraphMechanicalEndpointDto>,
+    pub(super) immediate_edges: Vec<crate::api_types::GraphDependencyEdgeDto>,
     pub(super) external_events: Vec<GraphExternalCallEventDto>,
     pub(super) unresolved: Vec<UnresolvedBoundary>,
 }
@@ -112,21 +113,47 @@ pub(super) fn collect_boundaries(
             index.external_events.push(fact);
         }
 
+        let blocks = super::super::function_facts::blocks::split_executed_blocks(&owned);
         for insn in &owned {
-            if closure.contains(&insn.seq)
-                && insn.mnemonic.as_deref().is_some_and(|mnemonic| {
-                    matches!(mnemonic, "mov" | "movz" | "movn")
-                        && insn
-                            .first_operand
-                            .as_deref()
-                            .is_some_and(pure_immediate_source)
-                })
+            if !closure.contains(&insn.seq)
+                || !super::super::function_facts::immediate::candidate(&insn.line)
             {
+                continue;
+            }
+            let source = super::super::function_facts::immediate::decode(&insn.line).zip(
+                super::super::function_facts::immediate::block_for_seq(
+                    tree, activation, &blocks, insn.seq,
+                ),
+            );
+            if let Some(((size, bytes), (block_index, block))) = source {
+                index
+                    .immediate_edges
+                    .push(crate::api_types::GraphDependencyEdgeDto {
+                        producer: GraphMechanicalEndpointDto::InstructionImmediate {
+                            owner: selector.clone(),
+                            seq: insn.seq,
+                            block_index: u32::try_from(block_index).map_err(|_| {
+                                TraceError::InvalidArgument(
+                                    "immediate block index exceeds u32".into(),
+                                )
+                            })?,
+                            block: block.clone(),
+                            size,
+                            bytes,
+                        },
+                        consumer: GraphMechanicalEndpointDto::Instruction {
+                            owner: selector.clone(),
+                            seq: insn.seq,
+                        },
+                        kind: "data".into(),
+                        pair_part: None,
+                    });
+            } else {
                 index.push_unresolved(
                     selector,
                     "unsupported_instruction",
                     insn.seq,
-                    "pure immediate source has no frozen SourceReference",
+                    "immediate source grammar, ownership or block incomplete",
                 )?;
             }
         }
@@ -403,11 +430,6 @@ pub(super) fn map_endpoint(
         seq,
         owner: selector.clone(),
     })
-}
-
-fn pure_immediate_source(operands: &str) -> bool {
-    let parts = operands.split(',').map(str::trim).collect::<Vec<_>>();
-    parts.len() >= 2 && parts[1].starts_with('#') && !operands.contains('[')
 }
 
 fn literal_load_address(insn: &super::super::function_facts::blocks::OwnedInsn) -> Option<u64> {

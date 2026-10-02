@@ -143,6 +143,7 @@ impl crate::engine::TraceEngine {
                 });
             }
         }
+        dependency_edges.extend(boundary_index.immediate_edges.iter().cloned());
         dependency_edges.sort_by(dependency_order);
         dependency_edges.dedup();
 

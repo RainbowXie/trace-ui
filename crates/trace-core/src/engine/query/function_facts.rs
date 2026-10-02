@@ -4,6 +4,7 @@
 //! 指令集合与两阶段块切分）、`abi`（栈参数三门）、`dataflow`（producer→
 //! consumer 读写）、`events`（External Call Event）。
 
+pub(crate) mod immediate;
 mod block_stream;
 mod budget;
 mod stack_stream;
@@ -141,19 +142,19 @@ impl crate::engine::TraceEngine {
             .map(|insn| insn.seq);
         let (memory_reads, memory_writes, mut access_unresolved) =
             collect_memory_facts(&state, &owned, &stack_argument_slots, return_producer);
+        let cancel = std::sync::atomic::AtomicBool::new(false);
+        let relevant = memory_stream::relevant(&state, tree, activation, &cancel)?;
+        let blocks = split_executed_blocks(&owned);
         for insn in &owned {
-            if insn.mnemonic.as_deref().is_some_and(|mnemonic| {
-                matches!(mnemonic, "mov" | "movz" | "movn")
-                    && insn
-                        .first_operand
-                        .as_deref()
-                        .is_some_and(pure_immediate_source)
-            }) {
+            if immediate::candidate(&insn.line)
+                && immediate_gap(tree, activation, &blocks, relevant.as_ref(),
+                    state.pair_split_view().is_some(), insn.seq, &insn.line)
+            {
                 access_unresolved.push(crate::api_types::FunctionFactUnresolvedDto {
                     kind: "unsupported_instruction".to_owned(),
                     seqs: vec![insn.seq],
                     location: None,
-                    detail: "pure immediate source has no frozen SourceReference".to_owned(),
+                    detail: "immediate source grammar, ownership, block or dependency coverage incomplete".to_owned(),
                 });
             }
         }
@@ -212,12 +213,21 @@ impl crate::engine::TraceEngine {
     }
 }
 
-fn pure_immediate_source(operands: &str) -> bool {
-    let parts = operands.split(',').map(str::trim).collect::<Vec<_>>();
-    parts.len() >= 2
-        && parts[1].starts_with('#')
-        && !operands.contains('[')
-        && !matches!(parts[0], "sp" | "wsp")
+fn immediate_gap(
+    tree: &crate::query::activation::ActivationTree,
+    owner: &crate::query::activation::ConfirmedActivation,
+    blocks: &[ExecutedBlockEntryDto],
+    relevant: Option<&fact_work::Fixed<fact_work::Dependency>>,
+    pair_ready: bool,
+    seq: u32,
+    line: &str,
+) -> bool {
+    let Some(relevant) = relevant.filter(|_| pair_ready) else { return true; };
+    if relevant.values.binary_search_by_key(&seq, |d| d.seq).is_err() {
+        return false;
+    }
+    immediate::decode(line).is_none()
+        || immediate::block_for_seq(tree, owner, blocks, seq).is_none()
 }
 
 /// 从最近的寄存器检查点重放到 `seq` 之前（不含 `seq`）：边界值必须取

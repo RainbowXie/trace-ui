@@ -6,7 +6,7 @@ use trace_core::engine::{
 };
 use trace_core::{BuildOptions, TraceEngine};
 
-fn compare(trace: &str, modules: &[String]) {
+fn compare(trace: &str, modules: &[String]) -> serde_json::Value {
     let path = std::env::temp_dir().join(format!("facts-bounded-{}.log", uuid::Uuid::new_v4()));
     let mut file = std::fs::OpenOptions::new()
         .create_new(true)
@@ -64,6 +64,7 @@ fn compare(trace: &str, modules: &[String]) {
     assert!(!bytes.ends_with(b"\n\n"));
     engine.close_session(&sid).unwrap();
     std::fs::remove_file(path).unwrap();
+    serde_json::to_value(&bounded).unwrap()
 }
 #[test]
 fn unchanged_small_fields_and_unknown_bytes() {
@@ -93,4 +94,33 @@ fn repeated_covering_writes_have_small_final_output() {
 #[test]
 fn real_global_address_chain() {
     compare("[App] 0x100!0x100 bl #0x200\n[App] 0x200!0x200 adrp x2, #0x1000 -> x2=0x1000\n[App] 0x204!0x204 add x2, x2, #0x10 -> x2=0x1010\n[App] 0x208!0x208 str x0, [x2]; x0=0x7 x2=0x1010 mem_w=0x1010\n[App] 0x20c!0x20c ret\n[App] 0x104!0x104 nop\n", &["App".into()]);
+}
+
+#[test]
+fn immediate_sources_share_old_and_bounded_mechanical_gate() {
+    for op in [
+        "mov w0, #4294967295",
+        "mov x0, #1",
+        "movk x0, #1",
+        "mov x0, #1, lsl #16",
+        "mov x0, #4294967296",
+    ] {
+        let result = compare(&format!("[App] 0x100!0x100 bl #0x200\n[App] 0x200!0x200 {op}; x0=0x0 -> x0=0x1\n[App] 0x204!0x204 movz x9, #99; x9=0x0 -> x9=0x63\n[App] 0x208!0x208 str x0, [x2]; x0=0x1 x2=0x8000 mem_w=0x8000\n[App] 0x20c!0x20c ret\n[App] 0x104!0x104 nop\n"), &[]);
+        let gaps = result["unresolved"].as_array().unwrap();
+        assert!(
+            !gaps
+                .iter()
+                .any(|g| g["seqs"] == serde_json::json!([2])
+                    && g["kind"] == "unsupported_instruction"),
+            "dead literal: {result}"
+        );
+        let expected_gap = matches!(op, "movk x0, #1" | "mov x0, #1, lsl #16");
+        assert_eq!(
+            gaps.iter()
+                .any(|g| g["seqs"] == serde_json::json!([1])
+                    && g["kind"] == "unsupported_instruction"),
+            expected_gap,
+            "{op}: {result}"
+        );
+    }
 }
