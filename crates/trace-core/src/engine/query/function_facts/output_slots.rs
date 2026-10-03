@@ -70,6 +70,7 @@ impl crate::engine::TraceEngine {
         let mut final_bytes = HashMap::<u64,(u32,Option<u8>)>::new();
         let mut loaded_values = HashMap::<RegId,(u64,u64)>::new();
         let mut chains = HashMap::<RegId,Chain>::new();
+        let mut store_flow=super::store_flow::StoreFlow::new()?;
         // Candidate provenance survives observed arithmetic even when it cannot
         // certify an address chain. Only independent observed DEFs discharge it.
         let mut store_sources = HashSet::<RegId>::new();
@@ -111,24 +112,26 @@ impl crate::engine::TraceEngine {
             let propagates=definition.is_some();
             if branch && reads.iter().any(|r|store_sources.contains(r) || loaded_values.contains_key(r) || chains.contains_key(r)) {gap(&mut gaps,seq,"candidate_control_use");}
             let elements = trace_parser::strict_memory::integer_memory_elements(line);
-            let slot_data_store=trace_parser::strict_memory::memory_marker(line).filter(|(write,_)|*write).zip(elements.as_ref())
+            let observed_data_store=trace_parser::strict_memory::memory_marker(line).filter(|(write,_)|*write).zip(elements.as_ref())
                 .is_some_and(|((_,address),es)| {
                     let width=es.iter().map(|e|u64::from(e.width)).sum::<u64>();
-                    address.checked_add(width).is_some_and(|end|ranges.iter().any(|&(b,e)|b<=address && end<=e))
+                    address.checked_add(width).is_some()
+                        && address_operand(operand).is_some_and(|(_,base,off)|p.base_reg==Some(base) && value(&p,base,false).and_then(|v|v.checked_add_signed(off))==Some(address))
+                        && trace_parser::strict_memory::memory_op(line).is_some()
                         && es.iter().all(|e|e.value.is_some())
                 });
-            if !propagates && !slot_data_store && reads.iter().any(|r| store_sources.contains(r))
+            if !propagates && !observed_data_store && reads.iter().any(|r| store_sources.contains(r))
                 || address_operand(operand).is_some_and(|(_,r,_)| store_sources.contains(&r)) {
                 gap(&mut gaps,seq,"untracked_store_source_use");
             }
             let data_reads = elements.as_ref().is_some_and(|es| m.starts_with("st") && es.iter().any(|e| store_sources.contains(&e.register)));
-            if data_reads && !slot_data_store { gap(&mut gaps,seq,"untracked_store_source_use"); }
+            if data_reads && !observed_data_store { gap(&mut gaps,seq,"untracked_store_source_use"); }
             if !propagates && matches!(m,"mov"|"add"|"sub") && operand.split(',').skip(1).map(str::trim)
                 .filter_map(trace_parser::strict_memory::integer_register)
                 .any(|r| store_sources.contains(&r) || (loaded_values.contains_key(&r) && !chains.contains_key(&r))) {
                 gap(&mut gaps,seq,"untracked_register_source_use");
             }
-            if !propagates && !slot_data_store && reads.iter().any(|r| loaded_values.contains_key(r) && !chains.contains_key(r))
+            if !propagates && !observed_data_store && reads.iter().any(|r| loaded_values.contains_key(r) && !chains.contains_key(r))
                 || address_operand(operand).is_some_and(|(_,r,_)| loaded_values.contains_key(&r) && !chains.contains_key(&r)) {
                 gap(&mut gaps,seq,"untracked_loaded_value_use");
             }
@@ -146,7 +149,7 @@ impl crate::engine::TraceEngine {
             });
             let observed_external=saved_event_observations.iter().find(|e|e.callsite.seq==seq && e.owner.entry_seq==owner.entry_seq);
             if let Some(event)=observed_external {
-                if !store_sources.is_empty() || !loaded_values.is_empty() || !chains.is_empty() {gap(&mut gaps,seq,"untracked_store_data_escape");}
+                if !store_sources.is_empty() || !loaded_values.is_empty() || !chains.is_empty() || store_flow.live() {gap(&mut gaps,seq,"untracked_store_data_escape");}
                 for &(start,end) in &ranges {for address in start..end {byte_definitions.insert(address,(seq,None));}}
                 // Explicit changes are observation-point definitions, never raw
                 // Store identities. This subset certifies B only via later raw writes.
@@ -229,10 +232,14 @@ impl crate::engine::TraceEngine {
                             let stop = start + u64::from(e.width);
                             let overlaps = ranges.iter().any(|&(b,end)| start < end && b < stop);
                             if write {
-                                if loaded_values.iter().any(|(r,&(b,end))| start < end && b < stop && !(*r==e.register && b==start && end==stop && slot_data_store)) {
+                                if let Some(value)=e.value {
+                                    let candidate=store_sources.contains(&e.register) || loaded_values.contains_key(&e.register) || chains.contains_key(&e.register);
+                                    store_flow.write(start,e.width,value,candidate,seq,owner.entry_seq)?;
+                                }
+                                if loaded_values.iter().any(|(r,&(b,end))| start < end && b < stop && !(*r==e.register && b==start && end==stop && observed_data_store)) {
                                     gap(&mut gaps,seq,"loaded_identity_overwrite");
                                 }
-                                if loaded_values.contains_key(&e.register) && !slot_data_store { gap(&mut gaps,seq,"untracked_store_data_escape"); }
+                                if loaded_values.contains_key(&e.register) && !observed_data_store { gap(&mut gaps,seq,"untracked_store_data_escape"); }
                                 if overlaps {
                                     let known = e.value.map(u64::to_le_bytes);
                                     for i in 0..e.width {
@@ -244,7 +251,15 @@ impl crate::engine::TraceEngine {
                                     if !e.register.is_zero() { stored_sources.push(e.register); }
                                     if e.value.is_none() { gap(&mut gaps,seq,"unknown_store_value"); }
                                 }
-                            } else if overlaps {
+                            } else {
+                                if let Some(value)=e.value {
+                                    match store_flow.read(start,e.width,value) {
+                                        Ok(true)=>new_loaded.push((e.register,(start,stop))),
+                                        Err(_)=>gap(&mut gaps,seq,"load_mismatch"),
+                                        _=>{},
+                                    }
+                                }
+                                if overlaps {
                                 let observed = e.value.map(u64::to_le_bytes);
                                 // Unwritten bytes are observed input obligations, not output
                                 // definitions. Any already-written byte must still match its
@@ -255,15 +270,16 @@ impl crate::engine::TraceEngine {
                                 });
                                 if !matches { gap(&mut gaps,seq,"load_without_slot_definition"); }
                                 else { new_loaded.push((e.register,(start,stop))); }
+                                }
                             }
                             offset += u64::from(e.width);
                         }
                     }
                     if write {
-                        if data_reg.is_some_and(|r| chains.contains_key(&r)) && !slot_data_store {
+                        if data_reg.is_some_and(|r| chains.contains_key(&r)) && !ranges.iter().any(|&(b,e)|b<=a && end<=e) {
                             gap(&mut gaps,seq,"untracked_store_data_escape");
                         }
-                        if chains.iter().any(|(r,c)| a < c.slot.saturating_add(8) && c.slot < end && !(Some(*r)==data_reg && a==c.slot && size==8 && slot_data_store)) {
+                        if chains.iter().any(|(r,c)| a < c.slot.saturating_add(8) && c.slot < end && !(Some(*r)==data_reg && a==c.slot && size==8 && observed_data_store)) {
                             gap(&mut gaps,seq,"loaded_identity_overwrite");
                         }
                         stores.retain(|b,_| !(a < b.saturating_add(8) && *b < end));
@@ -327,7 +343,10 @@ impl crate::engine::TraceEngine {
                 }
             }
             let inherited_source=definition.as_ref().is_some_and(|d|d.sources.iter().any(|r|store_sources.contains(r)));
-            let inherited_load=definition.as_ref().and_then(|d|d.sources.iter().find_map(|r|loaded_values.get(r).copied()));
+            // Union every loaded source; a second candidate must not disappear
+            // at an ALU merge. The hull conservatively preserves alias obligations.
+            let inherited_load=definition.as_ref().and_then(|d|d.sources.iter().filter_map(|r|loaded_values.get(r).copied())
+                .reduce(|(a,b),(c,d)|(a.min(c),b.max(d))));
             if supported_data && matches!(m,"mov"|"add"|"sub"|"adrp") {
                 if let Some(dst) = operands.first().and_then(|s| trace_parser::strict_memory::integer_register(s)) {
                     store_sources.remove(&dst);

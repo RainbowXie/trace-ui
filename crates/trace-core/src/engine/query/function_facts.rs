@@ -26,6 +26,7 @@ mod abi;
 mod address_provenance;
 mod private_frame_operands;
 mod output_slots;
+mod store_flow;
 mod caller_return;
 pub(crate) mod blocks;
 mod byte_effect;
