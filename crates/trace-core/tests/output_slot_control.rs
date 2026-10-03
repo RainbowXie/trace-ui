@@ -25,4 +25,12 @@ const LOOP:&str="[App] 0x400000!0x0 bl #0x401000; x0=0x7000\n[App] 0x401000!0x10
  .replace("[App] 0x40100c!0x100c mov x0", "[App] 0x401009!0x1009 mov x9, #0; -> x9=0x0\n[App] 0x40100c!0x100c mov x0");
  let p=query(&text);assert!(p.coverage.complete,"{}",serde_json::to_string(&p.gaps).unwrap());
 }
+#[test]fn initial_input_load_requires_tracked_use_and_real_final_definition(){
+ let text=LOOP.replace("[App] 0x402004!0x2004 mov x9, #1; -> x9=0x1", "[App] 0x402004!0x2004 ldr x9, [x0]; x0=0x7000 mem_r=0x7000 -> x9=0x1")
+ .replace("[App] 0x40100c!0x100c mov x0", "[App] 0x401009!0x1009 mov x9, #0; -> x9=0x0\n[App] 0x40100c!0x100c mov x0");
+ let p=query(&text);assert!(p.coverage.complete,"{}",serde_json::to_string(&p.gaps).unwrap());
+ let bad=text.replace("[App] 0x402008!0x2008 str x9", "[App] 0x402006!0x2006 ldr x7, [x9]; x9=0x1 mem_r=0x1 -> x7=0x0\n[App] 0x402008!0x2008 str x9");assert!(!query(&bad).coverage.complete);
+ let bad=text.replace("[App] 0x402004!0x2004 ldr x9", "[App] 0x402002!0x2002 strb w2, [x0]; x0=0x7000 w2=0xff mem_w=0x7000\n[App] 0x402004!0x2004 ldr x9");assert!(!query(&bad).coverage.complete);
+ let bad=text.replace("[App] 0x402004!0x2004 ldr x9", "[App] 0x402002!0x2002 strb w2, [x0]; x0=0x7000 mem_w=0x7000\n[App] 0x402004!0x2004 ldr x9");assert!(!query(&bad).coverage.complete);
+}
 #[test]fn unknown_branch_observation_is_not_negative(){let p=query(&LOOP.replace("cbnz x8, #0x402008; x8=0x1","cbnz x8, #0x402008"));assert!(!p.coverage.complete);}

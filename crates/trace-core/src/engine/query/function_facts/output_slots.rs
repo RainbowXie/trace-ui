@@ -227,8 +227,11 @@ impl crate::engine::TraceEngine {
                                 }
                             } else if overlaps {
                                 let observed = e.value.map(u64::to_le_bytes);
-                                let matches = (0..e.width).all(|i| {
-                                    byte_definitions.get(&(start + u64::from(i))).is_some_and(|(_,v)|
+                                // Unwritten bytes are observed input obligations, not output
+                                // definitions. Any already-written byte must still match its
+                                // last real definition; unknown/mismatched bytes never reset.
+                                let matches = observed.is_some() && (0..e.width).all(|i| {
+                                    byte_definitions.get(&(start + u64::from(i))).is_none_or(|(_,v)|
                                         v.is_some() && *v == observed.map(|v| v[usize::from(i)]))
                                 });
                                 if !matches { gap(&mut gaps,seq,"load_without_slot_definition"); }
@@ -261,7 +264,8 @@ impl crate::engine::TraceEngine {
                         let op = mem.as_ref().unwrap();
                         let dst = operand.split(',').next().unwrap_or("").trim();
                         if size == 8 && op.value_count == 1 {
-                            if ranges.iter().any(|&(b,e)| a < e && b < end) && !stores.contains_key(&a) {
+                            if ranges.iter().any(|&(b,e)| a < e && b < end) && !stores.contains_key(&a)
+                                && (a..end).all(|at|byte_definitions.contains_key(&at)) {
                                 gap(&mut gaps,seq,"load_without_single_x_slot_definition");
                             }
                             if let (Some(s),Some(r)) = (stores.get(&a),reg64(dst)) {
