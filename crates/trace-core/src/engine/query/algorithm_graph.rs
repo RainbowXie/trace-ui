@@ -5,6 +5,7 @@
 
 mod boundaries;
 mod deps;
+mod saved_events;
 
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -53,6 +54,15 @@ impl crate::engine::TraceEngine {
         activation_selectors: &[GraphActivationSelectorDto],
         target_modules: &[String],
     ) -> Result<AlgorithmGraphFactBundleDto> {
+        self.get_algorithm_graph_facts_with_saved_events(session_id,target_seq,target_address,target_size,target_rw,activation_selectors,target_modules,&[])
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub fn get_algorithm_graph_facts_with_saved_events(
+        &self,session_id:&str,target_seq:u32,target_address:u64,target_size:u32,target_rw:Option<&str>,
+        activation_selectors:&[GraphActivationSelectorDto],target_modules:&[String],
+        saved_event_observations:&[crate::engine::SavedEventObservation],
+    )->Result<AlgorithmGraphFactBundleDto> {
         let handle = self.get_handle(session_id)?;
         let state = handle
             .state
@@ -79,11 +89,28 @@ impl crate::engine::TraceEngine {
         target_seeds.sort_unstable();
         target_seeds.dedup();
 
-        let closure = deps::backward_closure(&deps, &pair_split, &target_seeds);
+        let event_load_edges=saved_events::load_edges(&state,saved_event_observations,target_seq,&handle.build_cancel)?;
+        let mut closure = deps::backward_closure(&deps, &pair_split, &target_seeds);
+        let relevant_event_edges=event_load_edges.into_iter().filter(|(_,load)|closure.contains(load)).collect::<Vec<_>>();
+        for (call,_) in &relevant_event_edges {closure.insert(*call);}
         let global_map =
             super::function_facts::global_map::StableGlobalMap::collect(&state, target_modules)?;
         let mut boundary_index =
             collect_boundaries(&state, tree, &selectors, &closure, &global_map)?;
+        for observation in saved_event_observations {
+            if relevant_event_edges.iter().any(|(call,_)|*call==observation.callsite.seq) {
+                if !selectors.values().any(|s|s==&observation.owner) {return Err(TraceError::InvalidArgument("saved event owner not selected".into()));}
+                let endpoint=GraphMechanicalEndpointDto::ExternalCallEvent{owner:observation.owner.clone(),event_index:observation.event_index,call_seq:observation.callsite.seq,resume_seq:observation.resume.seq};
+                boundary_index.by_seq.insert(observation.callsite.seq,endpoint);
+                for (_,load) in relevant_event_edges.iter().filter(|(call,_)|*call==observation.callsite.seq) {
+                    let activation=tree.activation_for_seq(*load).ok_or_else(||TraceError::InvalidArgument("event load owner missing".into()))?;
+                    let owner=selectors.get(&activation.id).ok_or_else(||TraceError::InvalidArgument("event load owner not selected".into()))?;
+                    boundary_index.by_seq.insert(*load,GraphMechanicalEndpointDto::Instruction{owner:owner.clone(),seq:*load});
+                }
+                let fact=crate::api_types::GraphExternalCallEventDto{owner:observation.owner.clone(),event_index:observation.event_index,call_seq:observation.callsite.seq,resume_seq:observation.resume.seq};
+                if !boundary_index.external_events.contains(&fact){boundary_index.external_events.push(fact);}
+            }
+        }
         attach_unowned_boundaries(&state, tree, &selectors, &closure, &mut boundary_index)?;
         let mut dependency_edges = deps::dependency_edges(
             &state,
@@ -143,6 +170,9 @@ impl crate::engine::TraceEngine {
                 });
             }
         }
+        for (call,load) in relevant_event_edges {dependency_edges.push(GraphDependencyEdgeDto{
+            producer:map_endpoint(&state,tree,&selectors,&boundary_index,call)?,consumer:map_endpoint(&state,tree,&selectors,&boundary_index,load)?,kind:"data".into(),pair_part:None,
+        });}
         dependency_edges.extend(boundary_index.immediate_edges.iter().cloned());
         dependency_edges.sort_by(dependency_order);
         dependency_edges.dedup();

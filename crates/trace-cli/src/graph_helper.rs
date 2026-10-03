@@ -27,6 +27,8 @@ struct GraphHelperRequest {
     activations: Vec<GraphActivationSelectorDto>,
     #[serde(default)]
     target_modules: Vec<String>,
+    #[serde(default)]
+    saved_event_observations: Vec<trace_core::engine::SavedEventObservation>,
 }
 
 pub(crate) fn requested() -> bool {
@@ -62,7 +64,7 @@ pub(crate) fn run() -> anyhow::Result<()> {
         },
         None,
     )?;
-    let facts = engine.get_algorithm_graph_facts_for_modules(
+    let facts = engine.get_algorithm_graph_facts_with_saved_events(
         &session.session_id,
         request.target_seq,
         request.target_address,
@@ -70,6 +72,7 @@ pub(crate) fn run() -> anyhow::Result<()> {
         request.target_rw.as_deref(),
         &request.activations,
         &request.target_modules,
+        &request.saved_event_observations,
     )?;
     write_response(&facts)
 }
