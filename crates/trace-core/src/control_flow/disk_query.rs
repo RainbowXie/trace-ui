@@ -1,8 +1,8 @@
-//! Bounded queries over validated CFG v2 flat sections. Raw instruction text is
+//! Bounded queries over validated CFG v3 flat sections. Raw instruction text is
 //! read only for the selected page; no ActivationTree or occurrence Vec is rebuilt.
 use super::{disk::{format::*, ControlFlowStore, FlatSection, OpenedTrace}, types::*};
 use crate::error::{Result, TraceError};
-use std::{collections::BTreeMap, sync::atomic::AtomicBool};
+use std::sync::atomic::AtomicBool;
 
 const MAX_ITEMS: usize = 100_000;
 const MAX_BLOCKS: usize = 10_000;
@@ -111,7 +111,6 @@ impl ControlFlowStore {
         let fi=table(self.section(Section::FunctionActivationIndex),1,4)?;
         let id_count=if selected.is_some(){1}else{u64_at(fr,16)};
         if id_count>MAX_ITEMS as u64 {return Err(capacity());}
-        let mut local=BTreeMap::<u32,u64>::new(); // only selected activation, explicitly capped
         for n in 0..id_count {
             cancel(c)?;
             let aid=if let Some(id)=selected{id}else{u32_at(fi.record(u64_at(fr,8)+n,4)?,0)};
@@ -124,22 +123,20 @@ impl ControlFlowStore {
             let from=op.offset.saturating_sub(base).min(size(count)?);
             let to=op.offset.checked_add(op.limit).ok_or_else(capacity)?.saturating_sub(base).min(size(count)?);
             for i in from..to {cancel(c)?;budget.add(std::mem::size_of::<CfgOccurrence>())?;view.occurrences.push(self.occurrence(start+i as u64)?);}
-            if selected.is_some() {
-                for i in start..start+count {cancel(c)?;let bid=u32_at(self.section(Section::OccurrenceBlockIds).record(i,4)?,0);
-                    if !local.contains_key(&bid) {if local.len()>=MAX_BLOCKS {return Err(capacity());} budget.add(64)?;}
-                    let total=local.entry(bid).or_default();*total=total.checked_add(1).ok_or_else(capacity)?;
-                }
-            }
         }
         let block_section=self.section(Section::Blocks);
         let br=table(block_section,0,48)?;let variants=table(block_section,1,16)?;
         let refs=table(block_section,2,16)?;let sources=table(block_section,3,4)?;
         let ref_start=lower(refs,16,|r|u32_at(r,0)<fid)?;let ref_end=lower(refs,16,|r|u32_at(r,0)<=fid)?;
-        view.total_blocks=if selected.is_some(){local.len()}else{size(ref_end-ref_start)?};
+        let local=table(block_section,4,16)?;
+        let (local_start,local_end)=if let Some(aid)=selected {
+            (lower(local,16,|r|u32_at(r,0)<aid)?,lower(local,16,|r|u32_at(r,0)<=aid)?)
+        }else{(0,0)};
+        view.total_blocks=if selected.is_some(){size(local_end-local_start)?}else{size(ref_end-ref_start)?};
         let page_end=bp.offset.checked_add(bp.limit).ok_or_else(capacity)?.min(view.total_blocks);
         if selected.is_some() {
-            for (&bid,&count) in local.iter().skip(bp.offset).take(bp.limit) {
-                view.blocks.push(self.disk_block(trace,bid,count,selected,br,variants,sources,&mut budget,c)?);
+            for n in bp.offset.min(view.total_blocks)..page_end {cancel(c)?;let r=local.record(local_start+n as u64,16)?;
+                view.blocks.push(self.disk_block(trace,u32_at(r,4),u64_at(r,8),selected,br,variants,sources,&mut budget,c)?);
             }
         } else {
             for n in bp.offset.min(view.total_blocks)..page_end {cancel(c)?;let r=refs.record(ref_start+n as u64,16)?;

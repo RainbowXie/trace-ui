@@ -1,7 +1,7 @@
-//! Internal CFG v2 encoding. All integers are little endian; no native casts.
+//! Internal CFG v3 encoding. All integers are little endian; no native casts.
 //! The 128-byte header is followed by 13 fixed-position 24-byte directory entries
 //! (offset, byte length, logical count: u64 each). Payload starts at byte 440,
-//! aligned to 8. No section tags exist: version 2 fixes the order below.
+//! aligned to 8. No section tags exist: version 3 fixes the order below.
 //! Header: magic[8], version:u32, format:u32, trace_len:u64, trace_hash[32],
 //! file_len:u64, payload_hash[32], total_lines:u32, reserved[28]. The payload
 //! hash covers the directory and every byte after it, including padding.
@@ -18,8 +18,11 @@
 //! related is an optional activation ID. For kind 4, seq is resume,
 //! activation is parent (including root 0), address is callsite, related is
 //! the actual call seq (not an activation ID). Bypassed creates no activation.
-//! Blocks: 64-byte four-pair (offset,count): records[48], variants[16],
-//! function-block references[16], source activation IDs[4]. Block record:
+//! Blocks: 80-byte five-pair (offset,count): records[48], variants[16],
+//! function-block references[16], source activation IDs[4], activation-block
+//! executions[16]. The last table is sorted unique (activation,block:u32),
+//! followed by positive executions:u64; it enables bounded activation pages
+//! without rebuilding all occurrences into a query-local map. Block record:
 //! function,address,representative_start,representative_end:u32;
 //! variant_start,variant_count,source_start,source_count:u64. Variant record:
 //! block,activation,start,end:u32, sorted unique by (activation,start,end)
@@ -49,8 +52,8 @@ pub const NONE: u32 = u32::MAX;
 pub const HEADER: usize = 128;
 pub const DIRECTORY: usize = 13 * 24;
 pub const PAYLOAD: usize = HEADER + DIRECTORY;
-pub const MAGIC: &[u8; 8] = b"TCFG0002";
-pub const VERSION: u32 = 2;
+pub const MAGIC: &[u8; 8] = b"TCFG0003";
+pub const VERSION: u32 = 3;
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 #[repr(u32)]
 pub enum TraceFormat { GumTrace = 1, Unidbg = 2 }

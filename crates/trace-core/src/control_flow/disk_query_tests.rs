@@ -74,8 +74,14 @@ fn disk_sessions_cold_hot_force_pages_fd_identity_and_core_dot() {
     assert_eq!(old,std::fs::read(&target).unwrap());
     let mut v1=old.clone();v1[..8].copy_from_slice(b"TCFG0001");v1[8..12].copy_from_slice(&1u32.to_le_bytes());std::fs::write(&target,&v1).unwrap();
     engine.build_disk_control_flow_index(&hot,false,tiny_budget()).unwrap();assert_eq!(old,std::fs::read(&target).unwrap());
+    let mut v2=old.clone();v2[..8].copy_from_slice(b"TCFG0002");v2[8..12].copy_from_slice(&2u32.to_le_bytes());std::fs::write(&target,&v2).unwrap();
+    assert!(engine.build_disk_control_flow_index(&hot,false,no_build).is_err());assert_eq!(v2,std::fs::read(&target).unwrap());
+    engine.build_disk_control_flow_index(&hot,false,tiny_budget()).unwrap();assert_eq!(old,std::fs::read(&target).unwrap());
     let mut corrupt=old.clone();let last=corrupt.len()-1;corrupt[last]^=1;std::fs::write(&target,&corrupt).unwrap();
     assert!(engine.build_disk_control_flow_index(&hot,false,tiny_budget()).is_err());assert_eq!(corrupt,std::fs::read(&target).unwrap());
+    for invalid in [old[..64].to_vec(),{let mut b=old.clone();b[..8].copy_from_slice(b"TCFG9999");b}] {
+        std::fs::write(&target,&invalid).unwrap();assert!(engine.build_disk_control_flow_index(&hot,false,tiny_budget()).is_err());assert_eq!(invalid,std::fs::read(&target).unwrap());
+    }
     std::fs::write(&target,&old).unwrap();
     let outside=dir.join("outside");std::fs::write(&outside,&old).unwrap();
     std::fs::remove_file(&target).unwrap();std::os::unix::fs::symlink(&outside,&target).unwrap();
@@ -91,6 +97,32 @@ fn disk_sessions_cold_hot_force_pages_fd_identity_and_core_dot() {
     engine.cancel_build(&hot);assert!(engine.get_function_cfg(&hot,"tiny.so+0x200",full(),full()).is_err());
     std::fs::write(&raw,text().replace("mov x0, x1","mov x0, x4")).unwrap();assert!(engine.get_function_cfg(&disk,"tiny.so+0x200",full(),full()).is_err());assert!(engine.verify_control_flow_session_identity(&disk).is_err());
     drop(engine);std::fs::remove_dir_all(dir).unwrap();
+}
+#[test]
+fn disk_activation_page_reads_more_than_ten_thousand_blocks() {
+    let dir=std::env::temp_dir().join(format!("cfg-large-page-{}",uuid::Uuid::new_v4()));std::fs::create_dir(&dir).unwrap();
+    let mut text=String::from("[tiny.so] 0x100!0x100 bl #0x200\n");
+    // Repeat the entry block to distinguish execution counts from variants.
+    text.push_str("[tiny.so] 0x200!0x200 b #0x200\n");
+    for i in 0..10_000u64 {let p=0x200+i*4;text.push_str(&format!("[tiny.so] 0x{p:x}!0x{p:x} b #0x{:x}\n",p+4));}
+    text.push_str("[tiny.so] 0x9e40!0x9e40 ret\n[tiny.so] 0x104!0x104 nop\n");
+    let raw=dir.join("raw");std::fs::write(&raw,text).unwrap();let c=AtomicBool::new(false);
+    let trace=OpenedTrace::open(File::open(&raw).unwrap(),format::TraceFormat::GumTrace,&c).unwrap();
+    let mut budget=tiny_budget();budget.run_records=1024;budget.merge_fan_in=8;budget.scratch_bytes=32*1024*1024;
+    let target=dir.join("cache");let store=build_control_flow_store(&trace,&target,&c,budget).unwrap();
+    let empty=CfgPage{offset:0,limit:0};
+    let page=store.disk_activation_cfg(&trace,0,1,"tiny.so+0x200",&CfgPage{offset:0,limit:1},&empty,&c).unwrap();
+    assert_eq!(page.total_blocks,10_001);assert_eq!(page.total_occurrences,10_002);
+    assert_eq!(page.blocks.len(),1);assert_eq!(page.blocks[0].site,"tiny.so+0x200");assert_eq!(page.blocks[0].count,2);
+    assert_eq!(page.blocks[0].representatives.len(),2);assert!(render_dot(&page).is_err());
+    let last=store.disk_activation_cfg(&trace,0,1,"tiny.so+0x200",&CfgPage{offset:10_000,limit:1},&empty,&c).unwrap();
+    assert_eq!(last.total_blocks,10_001);assert_eq!(last.blocks[0].site,"tiny.so+0x9e40");assert_eq!(last.blocks[0].count,1);
+    let beyond=store.disk_activation_cfg(&trace,0,1,"tiny.so+0x200",&CfgPage{offset:10_001,limit:1},&empty,&c).unwrap();assert!(beyond.blocks.is_empty());
+    assert!(store.disk_activation_cfg(&trace,0,1,"tiny.so+0x200",&CfgPage{offset:0,limit:10_001},&empty,&c).is_err());
+    let reopened=ControlFlowStore::open(&target,&trace,&c).unwrap();
+    let hot=reopened.disk_activation_cfg(&trace,0,1,"tiny.so+0x200",&CfgPage{offset:0,limit:1},&empty,&c).unwrap();
+    assert_eq!(serde_json::to_vec(&page).unwrap(),serde_json::to_vec(&hot).unwrap());
+    drop(reopened);drop(store);drop(trace);std::fs::remove_dir_all(dir).unwrap();
 }
 #[test]
 fn disk_query_recursive_owner_special_and_response_capacity() {

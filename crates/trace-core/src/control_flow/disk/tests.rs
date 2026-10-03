@@ -21,7 +21,8 @@ fn fixture()->Vec<(u64,Vec<u8>)>{
     let block0=[le32(&[0,0,1,2]),le64(&[0,1,0,1])].concat();
     let block1=[le32(&[0,1,3,4]),le64(&[1,1,1,1])].concat();
     let blocks=table(&[(2,48,[block0,block1].concat()),(2,16,le32(&[0,1,1,2,1,1,3,4])),
-        (2,16,[le32(&[0,0]),le64(&[1]),le32(&[0,1]),le64(&[1])].concat()),(2,4,le32(&[1,1]))]);
+        (2,16,[le32(&[0,0]),le64(&[1]),le32(&[0,1]),le64(&[1])].concat()),(2,4,le32(&[1,1])),
+        (2,16,[le32(&[1,0]),le64(&[1]),le32(&[1,1]),le64(&[1])].concat())]);
     let edge=[le32(&[1,0,1,2,0,0]),le64(&[1,0,1])].concat();
     let edges=table(&[(1,48,edge),(1,4,le32(&[1]))]);
     let functions=table(&[(1,24,[le32(&[0,0]),le64(&[0,1])].concat()),(1,4,le32(&[1]))]);
@@ -61,14 +62,26 @@ impl Drop for Env{fn drop(&mut self){let _=std::fs::remove_dir_all(&self.dir);}}
 fn rehash(b:&mut[u8]){use sha2::{Digest,Sha256};let h=Sha256::digest(&b[HEADER..]);b[64..96].copy_from_slice(&h);}
 #[test]fn malicious_offset_id_hash_and_parallel_capacity_rejected(){
  let e=Env::new();e.write();let original=std::fs::read(e.target()).unwrap();
- for variant in 0..5 {
+ for variant in 0..11 {
     let mut b=original.clone();
     match variant {
         0=>{b[HEADER..HEADER+8].copy_from_slice(&u64::MAX.to_le_bytes());rehash(&mut b);}
         1=>{let o=HEADER+Section::OccurrenceBlockIds as usize*24;let off=u64_at(&b,o)as usize;b[off..off+4].copy_from_slice(&99u32.to_le_bytes());rehash(&mut b);}
         2=>b[PAYLOAD]^=1,
         3=>{let o=HEADER+Section::OccurrenceEndSeqs as usize*24+16;b[o..o+8].copy_from_slice(&u64::MAX.to_le_bytes());rehash(&mut b);}
-        _=>{b.pop();}
+        4=>{b.pop();}
+        variant=>{
+            let o=HEADER+Section::Blocks as usize*24;let off=u64_at(&b,o) as usize;let local=off+u64_at(&b,off+64) as usize;
+            match variant {
+                5=>b[local+8..local+16].copy_from_slice(&0u64.to_le_bytes()),
+                6=>b[local..local+4].copy_from_slice(&0u32.to_le_bytes()),
+                7=>b[local+4..local+8].copy_from_slice(&99u32.to_le_bytes()),
+                8=>b[local+16..local+24].copy_from_slice(&[1u32.to_le_bytes(),0u32.to_le_bytes()].concat()),
+                9=>{let overlap=u64_at(&b,off+48);b[off+64..off+72].copy_from_slice(&overlap.to_le_bytes());},
+                _=>b[off+72..off+80].copy_from_slice(&u64::MAX.to_le_bytes()),
+            }
+            rehash(&mut b);
+        }
     }
     std::fs::write(e.target(),b).unwrap();assert!(ControlFlowStore::open(&e.target(),&e.trace,&e.cancel).is_err(),"variant {variant}");
  }

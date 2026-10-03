@@ -43,13 +43,17 @@ pub(super) fn finish_sections(w:&Workspace,b:BuildBudget,c:&AtomicBool,trace:&Op
     if index!=occ.len(){return Err(bad("occurrence owner ID capacity"));}
     let grouped=sorted(&mut byblock,w,c)?;drop(byblock);let gm=grouped.map()?;let gb=data(&gm);
     let mut records=w.stream()?;let mut variants=w.stream()?;let mut references=w.stream()?;let mut sources=w.stream()?;
+    let mut activation_blocks=sort::<16>(w,b)?;
     let mut cursor=0usize;let mut variant_count=0u64;let mut source_count=0u64;
     for bid in 0..block_count {
         let key=&keys[bid as usize*8..bid as usize*8+8];let f=be(key,0);let addr=be(key,4);
-        let vs=variant_count;let ss=source_count;let mut executions=0u64;let mut last_aid=NONE;let mut activation_variant_start=vs;let mut representative=None;
+        let vs=variant_count;let ss=source_count;let mut executions=0u64;let mut local_executions=0u64;let mut last_aid=NONE;
+        let flush_local=|aid:u32,count:u64,sorter:&mut ExternalSort<16>|->Result<()> {
+            let mut key=[0;16];put(&mut key,0,aid);put(&mut key,4,bid);key[8..].copy_from_slice(&count.to_be_bytes());sorter.push(key,c)
+        }; let mut activation_variant_start=vs;let mut representative=None;
         while cursor<gb.len() && be(gb,cursor)==bid {
             cancel(c)?;let r=&gb[cursor..cursor+24];let aid=be(r,4);let start=be(r,8);let end=be(r,12);
-            if aid!=last_aid {le32(&mut sources,aid,c)?;source_count=source_count.checked_add(1).ok_or_else(||bad("source count"))?;last_aid=aid;activation_variant_start=variant_count;}
+            if aid!=last_aid {if last_aid!=NONE {flush_local(last_aid,local_executions,&mut activation_blocks)?;}local_executions=0;le32(&mut sources,aid,c)?;source_count=source_count.checked_add(1).ok_or_else(||bad("source count"))?;last_aid=aid;activation_variant_start=variant_count;}
             // Only bounded per-line strings are allocated. Read existing reps
             // from scratch, comparing actual instruction sequences, not hashes.
             let mut reps=File::open(variants.path_for_build())?;
@@ -59,14 +63,21 @@ pub(super) fn finish_sections(w:&Workspace,b:BuildBudget,c:&AtomicBool,trace:&Op
                 if same_sequence(lines,(start,end),(u32_at(&v,8),u32_at(&v,12)),c)? {duplicate=true;break;}}
             drop(reps);
             if !duplicate {for v in [bid,aid,start,end]{le32(&mut variants,v,c)?;}variant_count=variant_count.checked_add(1).ok_or_else(||bad("variant count"))?;representative.get_or_insert((start,end));}
-            executions=executions.checked_add(1).ok_or_else(||bad("block execution count"))?;cursor+=24;
+            executions=executions.checked_add(1).ok_or_else(||bad("block execution count"))?;
+            local_executions=local_executions.checked_add(1).ok_or_else(||bad("activation block execution count"))?;cursor+=24;
         }
+        flush_local(last_aid,local_executions,&mut activation_blocks)?;
         let (rs,re)=representative.ok_or_else(||bad("block without occurrence"))?;
         for v in [f,addr,rs,re]{le32(&mut records,v,c)?;}for v in [vs,variant_count-vs,ss,source_count-ss]{le64(&mut records,v,c)?;}
         le32(&mut references,f,c)?;le32(&mut references,bid,c)?;le64(&mut references,executions,c)?;
     }
     drop(gm); drop(grouped); drop(km); drop(block_keys);
-    let mut blocks=composite(w,&mut[(&mut records,48,block_count as u64),(&mut variants,16,variant_count),(&mut references,16,block_count as u64),(&mut sources,4,source_count)],c)?;
+    let sorted_local=sorted(&mut activation_blocks,w,c)?;drop(activation_blocks);let local_map=sorted_local.map()?;
+    let mut local_records=w.stream()?;
+    for r in data(&local_map).chunks_exact(16) {le32(&mut local_records,be(r,0),c)?;le32(&mut local_records,be(r,4),c)?;le64(&mut local_records,u64::from_be_bytes(r[8..16].try_into().unwrap()),c)?;}
+    let local_count=local_records.len/16;drop(local_map);drop(sorted_local);
+    let mut blocks=composite(w,&mut[(&mut records,48,block_count as u64),(&mut variants,16,variant_count),(&mut references,16,block_count as u64),(&mut sources,4,source_count),(&mut local_records,16,local_count)],c)?;
+    drop(local_records);
     drop(records);drop(variants);drop(references);drop(sources);
     let ef=sorted(&mut edge_facts,w,c)?;drop(edge_facts);let em=ef.map()?;
     let mut edge_sort=sort::<32>(w,b)?;

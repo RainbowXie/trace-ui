@@ -31,8 +31,8 @@ fn legacy_header(file:&mut File)->Result<bool> {
     if !metadata.is_file(){return Err(bad("cache is not regular"));}
     let mut h=[0u8;HEADER];
     file.read_exact(&mut h)?;
-    if &h[..8]!=b"TCFG0001" || u32_at(&h,8)!=1{return Ok(false);}
-    // Recognize only the complete old fixed header; payload is never read as v2.
+    if !((&h[..8]==b"TCFG0001" && u32_at(&h,8)==1) || (&h[..8]==b"TCFG0002" && u32_at(&h,8)==2)){return Ok(false);}
+    // Recognize only complete old fixed headers; payload is never read as v3.
     if metadata.len()<PAYLOAD as u64 || u64_at(&h,56)!=metadata.len() || !matches!(u32_at(&h,12),1|2)
         || u64_at(&h,16)==0 || u32_at(&h,96)==0 || h[100..].iter().any(|b|*b!=0){return Err(bad("invalid legacy header"));}
     Ok(true)
@@ -58,8 +58,8 @@ impl super::TraceEngine {
         self.disk_cfg_sessions.write().map_err(|e|TraceError::Internal(e.to_string()))?.insert(id.clone(),Arc::new(DiskCfgSession{trace,target,store:RwLock::new(None),cancel:AtomicBool::new(false),building:AtomicBool::new(false),closed:AtomicBool::new(false)}));
         Ok(id)
     }
-    /// Only NotFound or a recognized complete v1 header triggers disk-v2 build.
-    /// A corrupt v2/unknown/truncated/permission-denied cache is an explicit error.
+    /// Only NotFound or a recognized complete v1/v2 header triggers disk-v3 build.
+    /// A corrupt v3/unknown/truncated/permission-denied cache is an explicit error.
     pub fn build_disk_control_flow_index(&self,id:&str,force:bool,budget:BuildBudget)->Result<()> {
         let h=self.disk_handle(id)?.ok_or_else(||TraceError::SessionNotFound(id.into()))?;
         if h.building.compare_exchange(false,true,Ordering::SeqCst,Ordering::SeqCst).is_err(){return Err(TraceError::OperationInProgress("disk CFG build".into()));}

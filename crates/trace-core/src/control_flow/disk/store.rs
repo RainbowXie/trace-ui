@@ -104,7 +104,7 @@ fn contains_id(s: FlatSection<'_>, wanted: u32) -> Result<bool> {
 pub(crate) fn validate(b: &[u8], trace: &OpenedTrace, c: &AtomicBool) -> Result<()> {
     cancel(c)?;
     if b.len() >= 12 && (&b[..8] != MAGIC || u32_at(b,8) != VERSION) {
-        return Err(bad("incompatible control-flow cache version (requires v2)"));
+        return Err(bad("incompatible control-flow cache version (requires v3)"));
     }
     if b.len() < PAYLOAD || &b[..8] != MAGIC || u32_at(b,8) != VERSION
         || u32_at(b,12) != trace.format as u32 || u64_at(b,16) != trace.len()
@@ -214,7 +214,7 @@ pub(crate) fn validate(b: &[u8], trace: &OpenedTrace, c: &AtomicBool) -> Result<
         }
         last_seq=Some(s);
     }
-    let bt=tables(section_view(b,Section::Blocks)?,&[48,16,16,4])?;
+    let bt=tables(section_view(b,Section::Blocks)?,&[48,16,16,4,16])?;
     let blocks=bt[0]; if blocks.count > NONE as u64 { return Err(bad("block ID capacity")); }
     let mut last_block=None; let mut variant_end=0; let mut source_end=0;
     for (i,r) in blocks.data.chunks_exact(48).enumerate() {
@@ -251,6 +251,16 @@ pub(crate) fn validate(b: &[u8], trace: &OpenedTrace, c: &AtomicBool) -> Result<
         if f!=u32_at(br,0) || u64_at(r,8)==0 || last_ref.is_some_and(|v|v>=key) { return Err(bad("function block reference")); } last_ref=Some(key);
     }
     if bt[2].count != blocks.count { return Err(bad("function block coverage")); }
+    let mut last_local=None;
+    for r in bt[4].data.chunks_exact(16) {
+        cancel(c)?;let aid=u32_at(r,0);let bid=u32_at(r,4);let br=blocks.record(u64::from(bid),48)?;
+        confirmed(a,aid,u32_at(br,0))?;
+        let key=(aid,bid);
+        if u64_at(r,8)==0 || last_local.is_some_and(|v|v>=key)
+            || !contains_id(subrange(bt[3],u64_at(br,32),u64_at(br,40),4)?,aid)? {return Err(bad("activation block execution reference"));}
+        last_local=Some(key);
+    }
+    if bt[4].count!=bt[3].count {return Err(bad("activation block coverage"));}
     let starts=section_view(b,Section::OccurrenceStartSeqs)?;
     let ends=section_view(b,Section::OccurrenceEndSeqs)?;
     let bids=section_view(b,Section::OccurrenceBlockIds)?;
