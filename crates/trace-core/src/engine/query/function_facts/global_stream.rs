@@ -1,6 +1,6 @@
 //! Global identity from bounded single-instruction rescans, without positions map.
 use super::super::activation::stable_runtime_site;
-use super::{block_stream::scan_owned, lines};
+use super::lines;
 use crate::error::{Result, TraceError};
 use crate::query::activation::{ActivationTree, ConfirmedActivation};
 use crate::session::SessionState;
@@ -113,16 +113,19 @@ pub(super) fn identity(
     let (adrp_seq, current, mut value, module, runtime, offset) = loop {
         let mut definition = None;
         let mut invalid = false;
-        scan_owned(state, tree, root, cancel, |insn| {
-            if insn.seq >= before {
+        super::global_closure::scan(state, tree, root, cancel, |seq,line| {
+            if seq >= before {
                 return Ok(false);
             }
-            let Some((m, op)) = trace_parser::strict_memory::instruction_parts(insn.line) else {
+            let Some((m, op)) = trace_parser::strict_memory::instruction_parts(line) else {
                 invalid = true;
                 return Ok(true);
             };
-            if op.split(',').next().map(str::trim) == Some(tracked) && writes_first(m) {
-                definition = Some(insn.seq);
+            if super::super::saved_events::opaque_boundary(state,tree,seq,line){definition=None;invalid=true;}
+            let parsed=if line.contains("!0x"){trace_parser::gumtrace::parse_line_gumtrace_full(line)}else{trace_parser::parser::parse_line_full(line)};
+            let alias_def=parsed.as_ref().is_some_and(|p|trace_parser::def_use::determine_def_use(trace_parser::insn_class::classify_and_refine(p),p).0.contains(&trace_parser::types::parse_reg(tracked).unwrap()));
+            if alias_def || (op.split(',').next().map(str::trim) == Some(tracked) && writes_first(m)) {
+                definition = Some(seq);
                 invalid = false;
             }
             Ok(true)
@@ -147,7 +150,7 @@ pub(super) fn identity(
             let Some(page) = second.and_then(immediate) else {
                 return Ok(None);
             };
-            if lines::arrow_register_value(line, tracked) != Some(page) {
+            if page & 0xfff != 0 || lines::arrow_register_value(line, tracked) != Some(page) {
                 return Ok(None);
             }
             let Some((module, runtime, offset)) = stable_runtime_site(line) else {
@@ -195,21 +198,23 @@ pub(super) fn identity(
     let mut current_len = current.len();
     current_storage[..current_len].copy_from_slice(current.as_bytes());
     let mut valid = true;
-    scan_owned(state, tree, root, cancel, |insn| {
-        if insn.seq <= adrp_seq {
+    super::global_closure::scan(state, tree, root, cancel, |seq,line| {
+        if seq <= adrp_seq {
             return Ok(true);
         }
-        if insn.seq >= access {
+        if seq >= access {
             return Ok(false);
         }
-        let Some((m, op)) = trace_parser::strict_memory::instruction_parts(insn.line) else {
+        let Some((m, op)) = trace_parser::strict_memory::instruction_parts(line) else {
             valid = false;
             return Ok(false);
         };
+        if super::super::saved_events::opaque_boundary(state,tree,seq,line){valid=false;return Ok(false);}
         let mut parts = op.split(',').map(str::trim);
         let (first, second, third, extra) =
             (parts.next(), parts.next(), parts.next(), parts.next());
         let current = std::str::from_utf8(&current_storage[..current_len]).expect("register");
+        if m=="ret" && current=="x0" && trace_parser::strict_memory::observed_register_value(line,"x0",false)!=Some(value) {valid=false;return Ok(false);}
         if matches!(m, "add" | "sub")
             && extra.is_none()
             && second == Some(current)
@@ -229,14 +234,15 @@ pub(super) fn identity(
                 valid = false;
                 return Ok(false);
             };
-            if lines::arrow_register_value(insn.line, dest) != Some(next) {
+            if trace_parser::strict_memory::observed_register_value(line,current,false)!=Some(value)
+                || lines::arrow_register_value(line, dest) != Some(next) {
                 valid = false;
                 return Ok(false);
             }
             value = next;
             current_len = dest.len();
             current_storage[..current_len].copy_from_slice(dest.as_bytes());
-        } else if first == Some(current) && writes_first(m) {
+        } else if (first == Some(current) && writes_first(m)) || first.and_then(trace_parser::strict_memory::integer_register)==trace_parser::strict_memory::integer_register(current) && writes_first(m) {
             valid = false;
             return Ok(false);
         }

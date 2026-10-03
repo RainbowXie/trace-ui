@@ -13,6 +13,7 @@ mod memory_stream;
 mod collector;
 mod bounded;
 mod global_stream;
+mod global_closure;
 mod read_stream;
 mod event_stream;
 mod replay;
