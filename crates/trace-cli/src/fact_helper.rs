@@ -198,6 +198,8 @@ struct TargetHistoryRequest {
     target_modules: Vec<String>,
     selected: trace_core::api_types::TargetHistorySelectionDto,
     capture_seq: u32,
+    #[serde(default)]
+    saved_event_observations: Vec<trace_core::engine::SavedEventObservation>,
 }
 #[derive(Debug, Deserialize)]
 enum TargetHistoryKind {
@@ -311,9 +313,9 @@ pub(crate) fn run() -> anyhow::Result<()> {
     }
     if let Some(request) = history_request {
         let TargetHistoryKind::TargetWriteHistory = request.kind;
-        return write_response(&engine.get_target_write_history(
+        return write_response(&engine.get_target_write_history_with_saved_events(
             &sid, request.call_seq, request.entry_seq, &request.function,
-            &request.target_modules, &request.selected, request.capture_seq,
+            &request.target_modules, &request.selected, request.capture_seq, &request.saved_event_observations,
         )?);
     }
     if let Some(request) = private_request {

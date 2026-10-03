@@ -71,6 +71,9 @@ impl crate::engine::TraceEngine {
         selected: &TargetHistorySelectionDto,
         capture_seq: u32,
     ) -> Result<TargetWriteHistoryDto> {
+        self.get_target_write_history_with_saved_events(sid,call_seq,entry_seq,function,target_modules,selected,capture_seq,&[])
+    }
+    pub fn get_target_write_history_with_saved_events(&self,sid:&str,call_seq:u32,entry_seq:u32,function:&str,target_modules:&[String],selected:&TargetHistorySelectionDto,capture_seq:u32,saved_event_observations:&[crate::engine::SavedEventObservation])->Result<TargetWriteHistoryDto> {
         let start = selected
             .address
             .strip_prefix("0x")
@@ -119,6 +122,8 @@ impl crate::engine::TraceEngine {
         {
             return Err(invalid("root requires closed confirmed boundaries"));
         }
+        super::super::saved_events::validate(&state,saved_event_observations)?;
+        super::super::saved_events::validate_scope(tree,root,saved_event_observations)?;
         let index = state.line_index_view().ok_or(TraceError::IndexNotReady)?;
         let raw = |seq| -> Result<&str> {
             std::str::from_utf8(
@@ -227,6 +232,7 @@ impl crate::engine::TraceEngine {
         let mut payload_bytes = 0usize;
         let mut access_count = 0usize;
         for seq in entry_seq..=last {
+            if handle.build_cancel.load(std::sync::atomic::Ordering::Relaxed){return Err(TraceError::Cancelled);}
             if seq == capture_seq {
                 capture_snapshot = Some(snapshot(seq, "before_instruction", &bytes)?);
             }
@@ -239,6 +245,15 @@ impl crate::engine::TraceEngine {
                 .ok_or_else(|| invalid("raw capacity overflow"))?;
             if raw_bytes > 32 * 1024 * 1024 || line.len() > 4096 {
                 return Err(invalid("history raw capacity"));
+            }
+            // Only validated opaque interior rows may be skipped. They still
+            // count in the raw window and never synthesize instruction effects.
+            if saved_event_observations.iter().any(|e|e.callsite.seq<seq && seq<e.resume.seq){continue;}
+            let observed_event=saved_event_observations.iter().find(|e|e.callsite.seq==seq);
+            if observed_event.is_some() {
+                bytes.fill(ByteDefinition::default());
+                if seq>=selected.seq {gap(&mut gaps,seq,"external_effect_unobserved");}
+                continue;
             }
             let gaps_before = gaps.len();
             let owner = tree.activation_for_seq(seq);
@@ -428,6 +443,11 @@ impl crate::engine::TraceEngine {
         }
         if !formed(&capture_snapshot) {
             gap(&mut gaps, capture_seq, "capture_definition_incomplete");
+        }
+        let same_definitions=selected_snapshot.definitions.len()==capture_snapshot.definitions.len()
+            && selected_snapshot.definitions.iter().zip(&capture_snapshot.definitions).all(|(a,b)|a.target_offset==b.target_offset && a.size==b.size && a.last_writer_seq==b.last_writer_seq && a.owner==b.owner);
+        if !saved_event_observations.is_empty() && (!same_definitions || selected_snapshot.bytes!=capture_snapshot.bytes) {
+            gap(&mut gaps,capture_seq,"capture_definition_incomplete");
         }
         // Keep memory bounded before serialization: a pathological alternating
         // writer per byte must fail, not allocate an unbounded JSON producer map.
