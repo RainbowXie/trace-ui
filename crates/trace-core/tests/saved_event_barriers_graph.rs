@@ -17,6 +17,18 @@ fn run_with(barrier:&str,expected:bool,fresh:bool){
  assert_eq!(found,expected,"{}",serde_json::to_string(&facts).unwrap());e.close_session(&sid).unwrap();std::fs::remove_file(path).unwrap();
 }
 #[test]fn annotation_backed_br_kills_old_event_winner(){run("[App] 0x401008!0x1008 br x16; x16=0x499100\ncall func: opaque(0x6000)\nret: 0x6000\n",false);}
+#[test]fn markerless_cas_same_value_kills_old_event_winner(){run("[App] 0x401008!0x1008 cas x10, x11, [x0]; x0=0x6000 x10=0x1 x11=0x1 -> x10=0x1\n",false);}
+#[test]fn marked_cas_same_value_is_not_proven_no_effect(){run("[App] 0x401008!0x1008 cas x10, x11, [x0]; x0=0x6000 x10=0x1 x11=0x1 mem_w=0x6000 -> x10=0x1\n",false);}
+#[test]fn compare_swap_variants_are_possible_writes(){
+ for mnemonic in ["casa","casal","casl","casb","casab","casalb","caslb","cash","casah","casalh","caslh"] {
+  let registers=if mnemonic.ends_with('b') || mnemonic.ends_with('h') {"w10, w11"}else{"x10, x11"};
+  run(&format!("[App] 0x401008!0x1008 {mnemonic} {registers}, [x0]; x0=0x6000 x10=0x1 x11=0x1 -> x10=0x1\n"),false);
+ }
+ for mnemonic in ["casp","caspa","caspal","caspl"] {
+  run(&format!("[App] 0x401008!0x1008 {mnemonic} x10, x11, x12, x13, [x0]; x0=0x6000 x10=0x1 x11=0x0 x12=0x1 x13=0x0 -> x10=0x1 x11=0x0\n"),false);
+ }
+}
+#[test]fn proved_failed_exclusive_store_preserves_event_winner(){run("[App] 0x401008!0x1008 stxr w12, x10, [x0]; x0=0x6000 x10=0x1 mem_w=0x6000 -> w12=0x1\n",true);}
 #[test]fn store_without_marker_kills_old_event_winner(){run("[App] 0x401008!0x1008 str x10, [x0]; x0=0x6000 x10=0x1\n",false);}
 #[test]fn known_nonoverlap_write_keeps_event_winner(){run("[App] 0x401008!0x1008 str x10, [x4]; x4=0x8000 x10=0x1 mem_w=0x8000\n",true);}
 #[test]fn fresh_second_capture_reestablishes_only_new_winner(){run_with("[App] 0x40101c!0x101c bl #0x499000; x0=0x6000 x1=0x5000 x2=0x8\ncall func: memcpy(0x6000, 0x5000, 0x8)\nret: 0x6000\n",false,true);}

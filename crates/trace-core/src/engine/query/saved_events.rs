@@ -43,7 +43,7 @@ pub(crate) fn opaque_boundary(state:&SessionState,tree:&crate::query::activation
 pub(crate) fn possible_write(line:&str)->bool {
  let Some((m,_))=trace_parser::strict_memory::instruction_parts(line) else{return false};
  use trace_parser::insn_class::{classify,InsnClass};
- matches!(classify(m,None),InsnClass::StoreReg|InsnClass::StorePair|InsnClass::StoreExcl|InsnClass::SimdStore|InsnClass::AtomicLoadOp)
+ matches!(classify(m,None),InsnClass::StoreReg|InsnClass::StorePair|InsnClass::StoreExcl|InsnClass::SimdStore|InsnClass::AtomicLoadOp|InsnClass::CompareAndSwap)
   || m.starts_with("st") || (classify(m,None)==InsnClass::Nop && m!="nop")
 }
 pub(crate) fn validate(state:&SessionState,observations:&[SavedEventObservation])->Result<()> {
