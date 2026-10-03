@@ -55,6 +55,7 @@ impl crate::engine::TraceEngine {
         if root.unresolved_reason.is_some() || !(call_seq < entry_seq && entry_seq <= root.exit_seq && root.exit_seq < root.resume_seq && root.resume_seq < state.total_lines) { return Err(invalid("root requires closed confirmed ownership")); }
         let caller = tree.activations.iter().find(|a| Some(a.id) == root.parent_id).ok_or_else(|| invalid("missing caller"))?;
         let closed = caller.id != 0 && caller.unresolved_reason.is_none() && caller.entry_seq <= call_seq && root.resume_seq <= caller.exit_seq && caller.exit_seq < caller.resume_seq && caller.resume_seq < state.total_lines;
+        super::super::saved_events::validate_scope(tree,if closed{caller}else{root},saved_event_observations)?;
         let wanted = if closed { caller.exit_seq } else { root.exit_seq };
         let last = wanted.min(entry_seq.saturating_add(49_999));
         let index = state.line_index_view().ok_or(TraceError::IndexNotReady)?;
@@ -147,7 +148,7 @@ impl crate::engine::TraceEngine {
                     && raw(a.exit_seq).ok().and_then(trace_parser::strict_memory::instruction_parts).is_some_and(|(m,_)|m=="ret")
                     && raw(a.resume_seq).ok().and_then(stable_runtime_site).is_some_and(|(m,next,_)|m==module && pc.checked_add(4)==Some(next))
             });
-            let observed_external=saved_event_observations.iter().find(|e|e.callsite.seq==seq && e.owner.entry_seq==owner.entry_seq);
+            let observed_external=saved_event_observations.iter().find(|e|e.callsite.seq==seq && e.owner.call_seq==owner.call_seq && e.owner.entry_seq==owner.entry_seq && e.owner.exit_seq==owner.exit_seq && e.owner.resume_seq==owner.resume_seq);
             if let Some(event)=observed_external {
                 if !store_sources.is_empty() || !loaded_values.is_empty() || !chains.is_empty() || store_flow.live() {gap(&mut gaps,seq,"untracked_store_data_escape");}
                 for &(start,end) in &ranges {for address in start..end {byte_definitions.insert(address,(seq,None));}}

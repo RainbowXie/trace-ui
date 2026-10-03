@@ -14,6 +14,14 @@ fn observed_sp_raw()->String {
  .replace("; x20=0x404000 x9", "; sp=0x9000 x20=0x404000 x9")
  .replace("ret; x0=0x0", "ret; sp=0x9000 x0=0x0")
 }
+#[test]fn descendant_event_matches_actual_child_owner_not_query_root(){
+ let path=std::env::temp_dir().join(format!("descendant-event-{}",uuid::Uuid::new_v4()));std::fs::write(&path,RAW).unwrap();let e=TraceEngine::new();let sid=e.create_session_from_file(std::fs::File::open(&path).unwrap(),"descendant-event").unwrap().session_id;e.build_index(&sid,BuildOptions{force_rebuild:true,skip_strings:true},None).unwrap();
+ let p=e.get_address_provenance_with_saved_events(&sid,0,1,"App+0x1000",&["App".into()],&[event()]).unwrap();assert!(p.coverage.complete,"{}",serde_json::to_string(&p).unwrap());assert!(p.frames.is_empty());
+ let p=e.get_address_provenance(&sid,0,1,"App+0x1000",&["App".into()]).unwrap();assert!(p.gaps.iter().any(|g|g.seq==2 && g.kind=="external_boundary"));
+ let mut wrong=event();wrong.owner.function="App+0x1000".into();wrong.owner.call_seq=0;wrong.owner.entry_seq=1;wrong.owner.exit_seq=10;wrong.owner.resume_seq=11;assert!(e.get_address_provenance_with_saved_events(&sid,0,1,"App+0x1000",&["App".into()],&[wrong]).is_err());
+ let mut wrong=event();wrong.resume.seq=6;assert!(e.get_address_provenance_with_saved_events(&sid,0,1,"App+0x1000",&["App".into()],&[wrong]).is_err());
+ e.close_session(&sid).unwrap();std::fs::remove_file(path).unwrap();
+}
 #[test]fn incidental_pre_sp_does_not_demand_a_global_only_frame(){
  let p=address_query(&observed_sp_raw());assert!(p.frames.is_empty(),"{}",serde_json::to_string(&p).unwrap());
  assert!(p.coverage.complete);assert!(matches!(p.accesses[0].origin_anchor,Some(trace_core::api_types::AddressOriginDto::GlobalAdrp{seq:5,..})));

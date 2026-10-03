@@ -46,6 +46,22 @@ pub(crate) fn possible_write(line:&str)->bool {
  matches!(classify(m,None),InsnClass::StoreReg|InsnClass::StorePair|InsnClass::StoreExcl|InsnClass::SimdStore|InsnClass::AtomicLoadOp|InsnClass::CompareAndSwap)
   || m.starts_with("st") || (classify(m,None)==InsnClass::Nop && m!="nop")
 }
+/// Called after raw/event validation. Scope admission follows actual confirmed
+/// ancestry, never an outer selector substituted for an event's real owner.
+pub(crate) fn validate_scope(tree:&crate::query::activation::ActivationTree,root:&crate::query::activation::ConfirmedActivation,observations:&[SavedEventObservation])->Result<()> {
+ for e in observations {
+  let owner=tree.activation_for_seq(e.callsite.seq).ok_or_else(||invalid("scope owner"))?;
+  if owner.call_seq!=e.owner.call_seq || owner.entry_seq!=e.owner.entry_seq || owner.exit_seq!=e.owner.exit_seq || owner.resume_seq!=e.owner.resume_seq {return Err(invalid("actual scope owner mismatch"));}
+  let mut current=owner;let mut admitted=false;
+  for _ in 0..128 {
+   if current.unresolved_reason.is_some(){break;}
+   if current.id==root.id{admitted=true;break;}
+   if current.call_seq<root.entry_seq || current.resume_seq>root.exit_seq{break;}
+   let Some(parent)=current.parent_id.and_then(|id|tree.activations.get(id as usize)) else{break;};current=parent;
+  }
+  if !admitted{return Err(invalid("event outside query closure"));}
+ }Ok(())
+}
 pub(crate) fn validate(state:&SessionState,observations:&[SavedEventObservation])->Result<()> {
  if observations.len()>128{return Err(invalid("event capacity"));}
  let tree=state.activation_tree.as_ref().ok_or(TraceError::IndexNotReady)?;
