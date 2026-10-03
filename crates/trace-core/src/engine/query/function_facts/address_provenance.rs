@@ -102,6 +102,9 @@ impl crate::engine::TraceEngine {
         function: &str,
         target_modules: &[String],
     ) -> Result<AddressProvenanceDto> {
+        self.get_address_provenance_with_saved_events(session_id,call_seq,entry_seq,function,target_modules,&[])
+    }
+    pub fn get_address_provenance_with_saved_events(&self,session_id:&str,call_seq:u32,entry_seq:u32,function:&str,target_modules:&[String],saved_event_observations:&[crate::engine::SavedEventObservation])->Result<AddressProvenanceDto> {
         let modules = target_modules.iter().cloned().collect::<BTreeSet<_>>();
         if modules.len() != target_modules.len()
             || modules.len() > 500
@@ -116,6 +119,7 @@ impl crate::engine::TraceEngine {
             .state
             .read()
             .map_err(|e| TraceError::Internal(e.to_string()))?;
+        super::super::saved_events::validate(&state,saved_event_observations)?;
         let tree = state
             .activation_tree
             .as_ref()
@@ -292,7 +296,9 @@ impl crate::engine::TraceEngine {
             .map(|(n, i)| (i.seq, n))
             .collect::<BTreeMap<_, _>>();
         for seq in entry_seq..=root.exit_seq {
+            if handle.build_cancel.load(std::sync::atomic::Ordering::Relaxed){return Err(TraceError::Cancelled);}
             let raw = raw_line(seq)?;
+            if saved_event_observations.iter().any(|e|e.callsite.seq<seq && seq<e.resume.seq){continue;}
             if unresolved_calls.contains(&seq) {
                 gap(
                     &mut gaps,
@@ -600,6 +606,7 @@ impl crate::engine::TraceEngine {
                         .bases
                         .get(&module)
                         .is_some_and(|base| runtime.checked_sub(offset) == Some(*base))
+                        && page & 0xfff == 0
                         && values(&parsed, dst, true) == Some(page)
                     {
                         if let Some(stable) = page.checked_sub(global_map.bases[&module]) {
@@ -660,6 +667,12 @@ impl crate::engine::TraceEngine {
                 proofs.insert(reg, p);
             }
             if external_calls.contains(&seq) {
+                if saved_event_observations.iter().any(|e|e.callsite.seq==seq && e.owner.entry_seq==root.entry_seq) {
+                    // Captured memory is not register-effect authority. All old
+                    // pointer identities die; only independent later origins work.
+                    proofs.clear();
+                    continue;
+                }
                 gap(
                     &mut gaps,
                     seq,

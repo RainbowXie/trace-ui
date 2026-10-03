@@ -12,6 +12,11 @@ pub fn integer_definition(line:&str)->Option<IntegerDefinition> {
   else{s::integer_immediate(operand).and_then(|v|u64::try_from(v).ok())}
  };
  let expected=match (m,args.as_slice()) {
+  ("adrp",[dst,imm]) if dst.starts_with('x')=>{
+   // Trace grammar prints the resolved page, not an encoded page displacement.
+   let page=s::integer_immediate(imm).and_then(|v|u64::try_from(v).ok())?;
+   if page&0xfff!=0{return None;}page
+  },
   ("mov",[_,a])=>source(a)?,
   ("add",[_,a,b])=>source(a)?.checked_add(source(b)?)?,
   ("sub",[_,a,b])=>source(a)?.checked_sub(source(b)?)?,

@@ -32,6 +32,9 @@ struct Store { seq: u32, owner: u32, operand: String, value: u64 }
 struct Chain { slot: u64, store: Store, load: u32, owner: u32, dst: String, value: u64, delta: i64, steps: Vec<AddressDefinitionStepDto> }
 impl crate::engine::TraceEngine {
     pub fn get_output_slot_uses(&self, sid: &str, call_seq: u32, entry_seq: u32, function: &str, target_modules: &[String], slot_ranges: &[OutputSlotRangeDto]) -> Result<OutputSlotUsesDto> {
+        self.get_output_slot_uses_with_saved_events(sid,call_seq,entry_seq,function,target_modules,slot_ranges,&[])
+    }
+    pub fn get_output_slot_uses_with_saved_events(&self,sid:&str,call_seq:u32,entry_seq:u32,function:&str,target_modules:&[String],slot_ranges:&[OutputSlotRangeDto],saved_event_observations:&[crate::engine::SavedEventObservation])->Result<OutputSlotUsesDto> {
         let modules = target_modules.iter().cloned().collect::<BTreeSet<_>>();
         if modules.len() != target_modules.len() || modules.len() > 500 || modules.iter().any(|m| stable_site(&format!("[{m}] 0x0!0x0 nop")).as_deref() != Some(&format!("{m}+0x0"))) { return Err(invalid("invalid target_modules")); }
         if slot_ranges.is_empty() || slot_ranges.len() > 128 { return Err(invalid("slot range count must be 1..128")); }
@@ -46,6 +49,7 @@ impl crate::engine::TraceEngine {
         }
         let handle = self.get_handle(sid)?;
         let state = handle.state.read().map_err(|e| TraceError::Internal(e.to_string()))?;
+        super::super::saved_events::validate(&state,saved_event_observations)?;
         let tree = state.activation_tree.as_ref().ok_or(TraceError::IndexNotReady)?;
         let root = tree.activations.iter().find(|a| a.id != 0 && a.call_seq == call_seq && a.entry_seq == entry_seq).ok_or_else(|| invalid("root selector not found"))?;
         if root.unresolved_reason.is_some() || !(call_seq < entry_seq && entry_seq <= root.exit_seq && root.exit_seq < root.resume_seq && root.resume_seq < state.total_lines) { return Err(invalid("root requires closed confirmed ownership")); }
@@ -75,6 +79,10 @@ impl crate::engine::TraceEngine {
             if seq == root.resume_seq {
                 final_stores = stores.iter().map(|(a,s)| (*a,s.seq)).collect();
                 final_bytes = byte_definitions.clone();
+            }
+            if saved_event_observations.iter().any(|e|e.callsite.seq<seq && seq<e.resume.seq) {
+                let line=raw(seq)?;bytes=bytes.checked_add(line.len()).ok_or_else(||invalid("raw overflow"))?;
+                if bytes>32*1024*1024 || line.len()>4096 {gap(&mut gaps,seq,"raw_capacity");break;}scanned+=1;continue;
             }
             let line = raw(seq)?;
             bytes = bytes.checked_add(line.len()).ok_or_else(|| invalid("raw overflow"))?;
@@ -136,6 +144,17 @@ impl crate::engine::TraceEngine {
                     && raw(a.exit_seq).ok().and_then(trace_parser::strict_memory::instruction_parts).is_some_and(|(m,_)|m=="ret")
                     && raw(a.resume_seq).ok().and_then(stable_runtime_site).is_some_and(|(m,next,_)|m==module && pc.checked_add(4)==Some(next))
             });
+            let observed_external=saved_event_observations.iter().find(|e|e.callsite.seq==seq && e.owner.entry_seq==owner.entry_seq);
+            if let Some(event)=observed_external {
+                if !store_sources.is_empty() || !loaded_values.is_empty() || !chains.is_empty() {gap(&mut gaps,seq,"untracked_store_data_escape");}
+                for &(start,end) in &ranges {for address in start..end {byte_definitions.insert(address,(seq,None));}}
+                // Explicit changes are observation-point definitions, never raw
+                // Store identities. This subset certifies B only via later raw writes.
+                for m in &event.memory_writes {let (start,values)=super::super::saved_events::memory_bytes(m)?;
+                    for (i,v) in values.into_iter().enumerate(){let address=start+i as u64;if ranges.iter().any(|&(b,e)|b<=address && address<e){byte_definitions.insert(address,(seq,Some(v)));}}
+                }
+                stores.clear();chains.clear();continue;
+            }
             if (matches!(m,"bl"|"blr"|"svc") && !internal_call) || (matches!(class,trace_parser::insn_class::InsnClass::Nop) && m != "nop") { stores.clear(); chains.clear(); gap(&mut gaps,seq,"call_external_or_unknown"); continue; }
             // Negative coverage is an instruction-by-instruction mechanical
             // observation, not a language-level scalar/pointer classification.
@@ -309,7 +328,7 @@ impl crate::engine::TraceEngine {
             }
             let inherited_source=definition.as_ref().is_some_and(|d|d.sources.iter().any(|r|store_sources.contains(r)));
             let inherited_load=definition.as_ref().and_then(|d|d.sources.iter().find_map(|r|loaded_values.get(r).copied()));
-            if supported_data && matches!(m,"mov"|"add"|"sub") {
+            if supported_data && matches!(m,"mov"|"add"|"sub"|"adrp") {
                 if let Some(dst) = operands.first().and_then(|s| trace_parser::strict_memory::integer_register(s)) {
                     store_sources.remove(&dst);
                     loaded_values.remove(&dst);
@@ -325,7 +344,7 @@ impl crate::engine::TraceEngine {
         // Every requested byte needs a known real last write. This is separate
         // from source/load use obligations and never a scalar type inference.
         for &(start,end) in &ranges {
-            if (start..end).any(|at| final_bytes.get(&at).is_none_or(|(_,v)| v.is_none())) {
+            if (start..end).any(|at| final_bytes.get(&at).is_none_or(|(seq,v)| v.is_none() || saved_event_observations.iter().any(|e|e.callsite.seq==*seq))) {
                 gap(&mut gaps,root.resume_seq,"final_range_definition_uncovered");
             }
         }

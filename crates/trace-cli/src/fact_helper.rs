@@ -130,6 +130,8 @@ struct AddressProvenanceRequest {
     entry_seq: u32,
     function: String,
     target_modules: Vec<String>,
+    #[serde(default)]
+    saved_event_observations: Vec<trace_core::engine::SavedEventObservation>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -162,6 +164,8 @@ struct OutputSlotRequest {
     function: String,
     target_modules: Vec<String>,
     slot_ranges: Vec<trace_core::api_types::OutputSlotRangeDto>,
+    #[serde(default)]
+    saved_event_observations: Vec<trace_core::engine::SavedEventObservation>,
 }
 #[derive(Debug, Deserialize)]
 enum OutputSlotKind {
@@ -320,9 +324,9 @@ pub(crate) fn run() -> anyhow::Result<()> {
     }
     if let Some(request) = output_request {
         let OutputSlotKind::OutputSlotUses = request.kind;
-        return write_response(&engine.get_output_slot_uses(
+        return write_response(&engine.get_output_slot_uses_with_saved_events(
             &sid, request.call_seq, request.entry_seq, &request.function,
-            &request.target_modules, &request.slot_ranges,
+            &request.target_modules, &request.slot_ranges, &request.saved_event_observations,
         )?);
     }
     if let Some(request) = return_request {
@@ -333,12 +337,13 @@ pub(crate) fn run() -> anyhow::Result<()> {
     }
     if let Some(request) = address_request {
         let AddressProvenanceKind::AddressProvenance = request.kind;
-        let proof = engine.get_address_provenance(
+        let proof = engine.get_address_provenance_with_saved_events(
             &sid,
             request.call_seq,
             request.entry_seq,
             &request.function,
             &request.target_modules,
+            &request.saved_event_observations,
         )?;
         return write_response(&proof);
     }
