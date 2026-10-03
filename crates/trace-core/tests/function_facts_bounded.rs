@@ -99,6 +99,14 @@ fn unknown_writes_revoke_final_contributions_in_both_queries() {
 }
 
 #[test]
+fn split_external_read_fragments_keep_raw_sequences_and_bytes() {
+    let facts=compare("[App] 0x100!0x100 bl #0x200\n[App] 0x200!0x200 strb w2, [x1]; w2=0xaa x1=0x7002 mem_w=0x7002\n[App] 0x204!0x204 ldr x0, [x1]; x1=0x7000 mem_r=0x7000 -> x0=0x0807060504030201\n[App] 0x208!0x208 ret\n[App] 0x104!0x104 nop\n",&[]);
+    assert_eq!(facts["memory_reads"],serde_json::json!([
+        {"address":"0x7000","size":2,"bytes":"0102","read_seqs":[2]},
+        {"address":"0x7003","size":5,"bytes":"0405060708","read_seqs":[2]}
+    ]));
+}
+#[test]
 fn stack_reads_and_external_event() {
     compare("[App] 0x100!0x100 bl #0x200\n[App] 0x200!0x200 ldr x0, [sp]; sp=0x9000 mem_r=0x9000 -> x0=0x7\n[App] 0x204!0x204 bl #0x900\n[App] 0x208!0x208 ret\n[App] 0x104!0x104 nop\n", &[]);
 }

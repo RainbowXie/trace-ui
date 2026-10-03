@@ -13,7 +13,7 @@ impl<T> Fixed<T> {
     pub(super) fn new() -> Result<Self> {
         Self::with_bytes(WORK_BYTES)
     }
-    fn with_bytes(bytes: usize) -> Result<Self> {
+    pub(super) fn with_bytes(bytes: usize) -> Result<Self> {
         let capacity = bytes / std::mem::size_of::<T>();
         let mut values = Vec::new();
         values.try_reserve_exact(capacity).map_err(|_| resource())?;
@@ -26,6 +26,9 @@ impl<T> Fixed<T> {
             return Err(resource());
         }
         Ok(Self { values, capacity })
+    }
+    pub(super) fn push(&mut self, value: T) -> Result<()> {
+        self.insert(self.values.len(), value)
     }
     pub(super) fn insert(&mut self, pos: usize, value: T) -> Result<()> {
         if self.values.len() == self.capacity {

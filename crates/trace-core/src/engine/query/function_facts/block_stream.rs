@@ -60,6 +60,22 @@ pub(super) fn scan_owned(
     scan_owned_impl(state, tree, activation, cancel, true, visit)
 }
 
+struct RawCursor<'a> { remaining: &'a [u8] }
+impl<'a> RawCursor<'a> {
+    fn new(raw: &'a [u8], offset: usize) -> Result<Self> {
+        Ok(Self { remaining: raw.get(offset..).ok_or_else(|| TraceError::InvalidArgument("fact line offset outside trace".into()))? })
+    }
+    fn next(&mut self) -> Result<&'a [u8]> {
+        if self.remaining.is_empty() {return Err(TraceError::InvalidArgument("fact raw range exceeds trace".into()));}
+        let (line, consumed)=match memchr::memchr(b'\n',self.remaining) {
+            Some(end)=>(&self.remaining[..end],end+1),
+            None=>(self.remaining,self.remaining.len()),
+        };
+        self.remaining=&self.remaining[consumed..];
+        Ok(line.strip_suffix(b"\r").unwrap_or(line))
+    }
+}
+
 fn scan_owned_impl(
     state: &SessionState,
     tree: &ActivationTree,
@@ -69,8 +85,15 @@ fn scan_owned_impl(
     mut visit: impl FnMut(BorrowedOwnedInsn<'_>) -> Result<bool>,
 ) -> Result<()> {
     let index = state.line_index_view().ok_or(TraceError::IndexNotReady)?;
+    let offset=index.line_byte_offset(&state.mmap,activation.entry_seq)
+        .and_then(|n|usize::try_from(n).ok())
+        .ok_or_else(||TraceError::InvalidArgument("fact entry missing".into()))?;
+    let mut cursor=RawCursor::new(&state.mmap,offset)?;
     for seq in activation.entry_seq..=activation.exit_seq {
         check_cancel(cancel)?;
+        // Advance before ownership filtering: skipped children and special rows
+        // still occupy raw seqs. Repeated scans must not redo sampled lookups.
+        let raw=cursor.next()?;
         // Same strict-contained interval rule as owned_instructions, including
         // unresolved nested activations. Do not allocate a nested interval list.
         let mut nested = false;
@@ -90,9 +113,6 @@ fn scan_owned_impl(
         if nested {
             continue;
         }
-        let raw = index
-            .get_line(&state.mmap, seq)
-            .ok_or_else(|| TraceError::InvalidArgument(format!("seq {seq} 不在 trace 内")))?;
         if resource_bound {
             check_raw(raw)?;
         }
@@ -170,6 +190,20 @@ fn stream_blocks_impl(
 
 #[cfg(test)]
 mod resource_tests {
+    #[test]
+    fn raw_cursor_advances_every_row_including_skipped_and_final_rows() {
+        let raw="entry\r\nchild\n\r\nμ special\nresume".as_bytes();
+        let mut cursor=super::RawCursor::new(raw,0).unwrap();
+        assert_eq!(cursor.next().unwrap(),b"entry");
+        assert_eq!(cursor.next().unwrap(),b"child");
+        assert_eq!(cursor.next().unwrap(),b"");
+        assert_eq!(cursor.next().unwrap(),"μ special".as_bytes());
+        assert_eq!(cursor.next().unwrap(),b"resume");
+        assert!(cursor.next().is_err());
+        assert!(super::RawCursor::new(raw,raw.len()+1).is_err());
+        let mut terminated=super::RawCursor::new(b"a\n",0).unwrap();
+        assert_eq!(terminated.next().unwrap(),b"a");assert!(terminated.next().is_err());
+    }
     #[test]
     fn raw_resource_boundary_checks_borrowed_bytes() {
         assert!(super::check_raw_limit(b"12345678", 8).is_ok());

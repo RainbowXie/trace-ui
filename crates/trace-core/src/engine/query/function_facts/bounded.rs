@@ -43,7 +43,7 @@ impl crate::engine::TraceEngine {
     /// Generate a complete legacy wire DTO while reserving its formal temporary
     /// bundle projection (trace, activation, anchors; no top-level function).
     /// Source/FD binding must be verified by the caller. No caller-selected quota.
-    /// Two independent fixed-layout working areas are capped at 8 MiB each;
+    /// Three independent fixed-layout working areas are capped at 8 MiB each;
     /// exhaustion is an Internal resource error, not logical bundle overflow.
     /// Raw lines entering this path have a separate 1 MiB parser resource bound
     /// (after CR/LF stripping). The retained trace must remain immutable.
