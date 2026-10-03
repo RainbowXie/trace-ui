@@ -155,7 +155,7 @@ impl crate::engine::TraceEngine {
                 }
                 stores.clear();chains.clear();continue;
             }
-            if (matches!(m,"bl"|"blr"|"svc") && !internal_call) || (matches!(class,trace_parser::insn_class::InsnClass::Nop) && m != "nop") { stores.clear(); chains.clear(); gap(&mut gaps,seq,"call_external_or_unknown"); continue; }
+            if super::super::saved_events::opaque_boundary(&state,tree,seq,line) || (matches!(m,"bl"|"blr"|"svc") && !internal_call) || (matches!(class,trace_parser::insn_class::InsnClass::Nop) && m != "nop") { stores.clear(); chains.clear(); gap(&mut gaps,seq,"call_external_or_unknown"); continue; }
             // Negative coverage is an instruction-by-instruction mechanical
             // observation, not a language-level scalar/pointer classification.
             let args = operand.split(',').map(str::trim).collect::<Vec<_>>();

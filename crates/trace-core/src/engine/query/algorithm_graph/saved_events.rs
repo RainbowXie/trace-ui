@@ -18,14 +18,18 @@ pub(super) fn load_edges(state:&SessionState,events:&[SavedEventObservation],tar
   }
   let raw=index.get_line(&state.mmap,seq).ok_or_else(||TraceError::InvalidArgument("event graph raw missing".into()))?;
   let line=std::str::from_utf8(raw).map_err(|_|TraceError::InvalidArgument("event graph UTF8".into()))?;
-  if trace_parser::strict_memory::instruction_parts(line).is_some_and(|(m,_)|matches!(m,"bl"|"blr"|"svc")) && tree.bypassed_calls.iter().any(|c|c.call_seq==seq) {
+  if super::super::saved_events::opaque_boundary(state,tree,seq,line) {
    // No unknown opaque call can preserve a preceding capture winner.
    bytes.clear();
   }
+  let memory=trace_parser::strict_memory::memory_op(line);
+  // A proved failed exclusive store has no write effect. Unknown success does.
+  if memory.as_ref().is_some_and(|m|m.is_write && m.exclusive_status.is_some_and(|s|s!=0)){continue;}
   let Some((write,address))=trace_parser::strict_memory::memory_marker(line) else{
-   if line.contains("mem_w=") || line.contains("mem[WRITE]") {bytes.clear();}
+   if super::super::saved_events::possible_write(line) || line.contains("mem_w=") || line.contains("mem[WRITE]") {bytes.clear();}
    continue
   };
+  if memory.is_none() || (super::super::saved_events::possible_write(line) && !write){bytes.clear();continue;}
   let Some(elements)=trace_parser::strict_memory::integer_memory_elements(line) else{bytes.clear();continue};
   let width=elements.iter().map(|e|u64::from(e.width)).sum::<u64>();
   let end=address.checked_add(width).ok_or_else(||TraceError::InvalidArgument("event graph address overflow".into()))?;

@@ -666,7 +666,7 @@ impl crate::engine::TraceEngine {
             if let Some((reg, p)) = next.or(loaded_stack) {
                 proofs.insert(reg, p);
             }
-            if external_calls.contains(&seq) {
+            if super::super::saved_events::opaque_boundary(&state,tree,seq,raw) {
                 if saved_event_observations.iter().any(|e|e.callsite.seq==seq && e.owner.entry_seq==root.entry_seq) {
                     // Captured memory is not register-effect authority. All old
                     // pointer identities die; only independent later origins work.

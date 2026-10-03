@@ -26,6 +26,26 @@ pub(crate) fn memory_bytes(m:&SavedEventMemory)->Result<(u64,Vec<u8>)>{
  if hex.len()!=m.size as usize*2 || !hex.bytes().all(|b|b.is_ascii_digit() || (b'a'..=b'f').contains(&b)){return Err(invalid("bytes"));}
  Ok((address,hex.as_bytes().chunks_exact(2).map(|p|u8::from_str_radix(std::str::from_utf8(p).unwrap(),16).unwrap()).collect()))
 }
+/// Same branch classes as the existing annotation-backed Event collector.
+/// Recorded calls keep their body effects visible; opaque effects cannot preserve winners.
+pub(crate) fn opaque_boundary(state:&SessionState,tree:&crate::query::activation::ActivationTree,seq:u32,line:&str)->bool {
+ let Some((m,_))=trace_parser::strict_memory::instruction_parts(line) else{return false};
+ use trace_parser::insn_class::{classify,InsnClass};
+ let class=classify(m,None);
+ if m=="svc" {return true;}
+ if tree.bypassed_calls.iter().any(|c|c.call_seq==seq){return true;}
+ if matches!(class,InsnClass::BranchLink|InsnClass::BranchLinkReg) {
+  return !tree.activations.iter().any(|a|a.id!=0 && a.call_seq==seq && a.unresolved_reason.is_none());
+ }
+ state.call_annotations.contains_key(&seq) && matches!(class,InsnClass::Branch|InsnClass::BranchReg)
+}
+/// An unknown instruction/effect is not evidence that captured memory survived.
+pub(crate) fn possible_write(line:&str)->bool {
+ let Some((m,_))=trace_parser::strict_memory::instruction_parts(line) else{return false};
+ use trace_parser::insn_class::{classify,InsnClass};
+ matches!(classify(m,None),InsnClass::StoreReg|InsnClass::StorePair|InsnClass::StoreExcl|InsnClass::SimdStore|InsnClass::AtomicLoadOp)
+  || m.starts_with("st") || (classify(m,None)==InsnClass::Nop && m!="nop")
+}
 pub(crate) fn validate(state:&SessionState,observations:&[SavedEventObservation])->Result<()> {
  if observations.len()>128{return Err(invalid("event capacity"));}
  let tree=state.activation_tree.as_ref().ok_or(TraceError::IndexNotReady)?;
