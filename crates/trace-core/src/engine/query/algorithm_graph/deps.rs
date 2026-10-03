@@ -38,6 +38,7 @@ pub(super) fn dependency_edges(
     deps: &crate::flat::deps::DepsView<'_>,
     pair_split: &crate::flat::pair_split::PairSplitView<'_>,
     closure: &BTreeSet<u32>,
+    budget:&mut super::budget::GraphBudget,
 ) -> Result<Vec<GraphDependencyEdgeDto>> {
     let mut edges = Vec::new();
     for consumer_seq in closure {
@@ -55,7 +56,7 @@ pub(super) fn dependency_edges(
                 } else {
                     "data"
                 };
-                edges.push(GraphDependencyEdgeDto {
+                budget.push(&mut edges,GraphDependencyEdgeDto {
                     producer: map_endpoint(state, tree, selectors, boundary_index, producer_seq)?,
                     consumer: map_endpoint(state, tree, selectors, boundary_index, *consumer_seq)?,
                     kind: kind.to_owned(),
@@ -66,7 +67,7 @@ pub(super) fn dependency_edges(
                         producers.iter().copied(),
                     )
                     .map(str::to_owned),
-                });
+                })?;
             }
         }
     }

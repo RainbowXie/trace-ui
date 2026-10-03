@@ -6,6 +6,7 @@
 mod boundaries;
 mod deps;
 mod saved_events;
+mod budget;
 
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -125,6 +126,8 @@ impl crate::engine::TraceEngine {
             },
             _=>None,
         };
+        let mut output_budget=budget::GraphBudget::new();
+        output_budget.envelope(&AlgorithmGraphFactBundleDto{target_seq,target:map_endpoint(&state,tree,&selectors,&boundary_index,target_seq)?,activations:Vec::new(),call_edges:Vec::new(),external_call_events:Vec::new(),dependency_edges:Vec::new(),unresolved:Vec::new(),content_identity:"0".repeat(64)})?;
         let mut dependency_edges = deps::dependency_edges(
             &state,
             tree,
@@ -133,14 +136,14 @@ impl crate::engine::TraceEngine {
             &deps,
             &pair_split,
             &closure,
+            &mut output_budget,
         )?;
-        dependency_edges.extend(
-            memory_producers
+        for edge in memory_producers
                 .iter()
                 .copied()
                 .map(|producer_raw| {
                     let producer_seq = producer_raw & LINE_MASK;
-                    Ok(GraphDependencyEdgeDto {
+                    Ok::<_,TraceError>(GraphDependencyEdgeDto {
                         producer: map_endpoint(
                             &state,
                             tree,
@@ -165,8 +168,7 @@ impl crate::engine::TraceEngine {
                         .map(str::to_owned),
                     })
                 })
-                .collect::<Result<Vec<_>>>()?,
-        );
+                {output_budget.push(&mut dependency_edges,edge?)?;}
         for seq in boundary_index.by_seq.iter().filter_map(|(seq, endpoint)| {
             matches!(endpoint, GraphMechanicalEndpointDto::Unresolved { .. }).then_some(*seq)
         }) {
@@ -175,19 +177,19 @@ impl crate::engine::TraceEngine {
                     edge.producer.seq() == Some(seq) || edge.consumer.seq() == Some(seq)
                 })
             {
-                dependency_edges.push(GraphDependencyEdgeDto {
+                output_budget.push(&mut dependency_edges,GraphDependencyEdgeDto {
                     producer: map_endpoint(&state, tree, &selectors, &boundary_index, seq)?,
                     consumer: map_endpoint(&state, tree, &selectors, &boundary_index, target_seq)?,
                     kind: "data".to_owned(),
                     pair_part: None,
-                });
+                })?;
             }
         }
-        for (call,load) in relevant_event_edges {dependency_edges.push(GraphDependencyEdgeDto{
+        for (call,load) in relevant_event_edges {output_budget.push(&mut dependency_edges,GraphDependencyEdgeDto{
             producer:map_endpoint(&state,tree,&selectors,&boundary_index,call)?,consumer:map_endpoint(&state,tree,&selectors,&boundary_index,load)?,kind:"data".into(),pair_part:None,
-        });}
-        dependency_edges.extend(target_global_access);
-        dependency_edges.extend(boundary_index.immediate_edges.iter().cloned());
+        })?;}
+        if let Some(edge)=target_global_access {output_budget.push(&mut dependency_edges,edge)?;}
+        for edge in boundary_index.immediate_edges.iter().cloned(){output_budget.push(&mut dependency_edges,edge)?;}
         dependency_edges.sort_by(dependency_order);
         dependency_edges.dedup();
 
@@ -199,10 +201,8 @@ impl crate::engine::TraceEngine {
         }
 
         let activation_ids = related_activation_ids(tree, &selectors, &closure);
-        let mut activations = activation_ids
-            .iter()
-            .filter_map(|id| selectors.get(id).cloned())
-            .collect::<Vec<_>>();
+        let mut activations=Vec::new();
+        for id in &activation_ids {if let Some(activation)=selectors.get(id){output_budget.push(&mut activations,activation.clone())?;}}
         activations.sort();
 
         let mut call_edges = Vec::new();
@@ -220,24 +220,18 @@ impl crate::engine::TraceEngine {
             let callee = selectors.get(id).ok_or_else(|| {
                 TraceError::InvalidArgument("related callee has no requested selector".to_owned())
             })?;
-            call_edges.push(GraphCallEdgeDto {
+            output_budget.push(&mut call_edges,GraphCallEdgeDto {
                 caller: caller.clone(),
                 callee: callee.clone(),
                 call_seq: activation.call_seq,
-            });
+            })?;
         }
         call_edges.sort_by_key(|edge| edge.call_seq);
 
-        let unresolved = boundary_index
-            .unresolved
-            .iter()
-            .map(|boundary| GraphFactUnresolvedDto {
-                kind: boundary.kind.clone(),
-                seqs: vec![boundary.seq],
-                detail: boundary.detail.clone(),
-            })
-            .collect::<Vec<_>>();
-        let external_call_events = boundary_index.external_events.clone();
+        let mut unresolved=Vec::new();
+        for boundary in &boundary_index.unresolved {output_budget.push(&mut unresolved,GraphFactUnresolvedDto{kind:boundary.kind.clone(),seqs:vec![boundary.seq],detail:boundary.detail.clone()})?;}
+        let mut external_call_events=Vec::new();
+        for event in &boundary_index.external_events {output_budget.push(&mut external_call_events,event.clone())?;}
 
         let mut bundle = AlgorithmGraphFactBundleDto {
             target_seq,
@@ -249,9 +243,11 @@ impl crate::engine::TraceEngine {
             unresolved,
             content_identity: String::new(),
         };
+        output_budget.verify(&bundle)?;
         let bytes =
             serde_json::to_vec(&bundle).map_err(|error| TraceError::Internal(error.to_string()))?;
         bundle.content_identity = format!("{:x}", Sha256::digest(bytes));
+        output_budget.verify(&bundle)?;
         Ok(bundle)
     }
 }
