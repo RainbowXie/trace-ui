@@ -110,6 +110,7 @@ pub(super) fn identity(
     }
     let mut tracked = register;
     let mut before = access;
+    let mut selected_steps=[0u32;128];let mut selected_count=0;
     let (adrp_seq, current, mut value, module, runtime, offset) = loop {
         let mut definition = None;
         let mut invalid = false;
@@ -165,6 +166,8 @@ pub(super) fn identity(
             let Some(source) = second.filter(|s| canonical_register(s)) else {
                 return Ok(None);
             };
+            if selected_count==selected_steps.len(){return Err(TraceError::Internal("global address chain capacity".into()));}
+            selected_steps[selected_count]=seq;selected_count+=1;
             tracked = source;
             before = seq;
         } else {
@@ -215,7 +218,7 @@ pub(super) fn identity(
             (parts.next(), parts.next(), parts.next(), parts.next());
         let current = std::str::from_utf8(&current_storage[..current_len]).expect("register");
         if m=="ret" && current=="x0" && trace_parser::strict_memory::observed_register_value(line,"x0",false)!=Some(value) {valid=false;return Ok(false);}
-        if matches!(m, "add" | "sub")
+        if selected_steps[..selected_count].contains(&seq) && matches!(m, "add" | "sub")
             && extra.is_none()
             && second == Some(current)
             && third.and_then(immediate).is_some()

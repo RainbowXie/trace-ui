@@ -5,6 +5,10 @@ fn bounded(raw:&str)->trace_core::api_types::FunctionFactBundleDto {
  let source=trace_core::engine::FactSourceReference{artifact:"request.json",pointer:"/trace_files/0"};let context=trace_core::engine::FunctionFactContext{trace:source,activation:trace_core::engine::FactActivationSelector{trace:source,function:"App+0x1000",call_seq:0,entry_seq:1}};
  let p=e.get_function_facts_bounded(&sid,context,&["App".into()],&std::sync::atomic::AtomicBool::new(false)).unwrap();e.close_session(&sid).unwrap();std::fs::remove_file(path).unwrap();p
 }
+#[test]fn unrelated_derived_register_does_not_divert_selected_x0_chain(){
+ let raw=RAW.replace("[App] 0x402010!0x2010 mov", "[App] 0x40200e!0x200e add x9, x0, #0; x0=0x404300 -> x9=0x404300\n[App] 0x402010!0x2010 mov");
+ let p=bounded(&raw);assert!(p.global_reads.iter().any(|r|r.global=="App+0x4300" && r.read_seqs==vec![9] && r.bytes.as_deref()==Some("0300000000000000")),"{}",serde_json::to_string(&p).unwrap());assert!(!p.memory_reads.iter().any(|r|r.read_seqs.contains(&9)));
+}
 #[test]fn same_numeric_scalar_or_w_alias_is_not_global_origin(){
  for definition in ["mov x0, #0x404300; -> x0=0x404300", "mov w0, #0x404300; -> x0=0x404300", "add x0, x20, #0x300; x20=0x404000 -> x0=0x404301"] {
   let raw=RAW.replace("add x0, x20, #0x300; x20=0x404000 -> x0=0x404300",definition);
@@ -25,5 +29,9 @@ fn bounded(raw:&str)->trace_core::api_types::FunctionFactBundleDto {
  let facts=e.get_function_facts_bounded(&sid,context,&["App".into()],&std::sync::atomic::AtomicBool::new(false)).unwrap();
  assert!(facts.global_reads.iter().any(|r|r.global=="App+0x4300" && r.read_seqs==vec![8] && r.bytes.as_deref()==Some("0300000000000000")),"{}",serde_json::to_string(&facts).unwrap());
  assert!(!facts.memory_reads.iter().any(|r|r.read_seqs.contains(&8)));
+ let owner=trace_core::api_types::GraphActivationSelectorDto{trace:trace_core::api_types::GraphTraceReferenceDto{artifact:"request.json".into(),pointer:"/trace_files/0".into()},function:"App+0x1000".into(),call_seq:0,entry_seq:1,exit_seq:10,resume_seq:11};
+ let child=trace_core::api_types::GraphActivationSelectorDto{function:"App+0x2000".into(),call_seq:1,entry_seq:2,exit_seq:7,resume_seq:8,..owner.clone()};
+ let graph=e.get_algorithm_graph_facts_for_modules(&sid,9,0x8000,8,Some("write"),&[owner.clone(),child],&["App".into()]).unwrap();
+ assert!(graph.dependency_edges.iter().any(|edge|matches!(&edge.producer,trace_core::api_types::GraphMechanicalEndpointDto::GlobalReference{owner:o,seq:8,access_index:0,global,size:8,bytes:Some(bytes),..} if *o==owner && global=="App+0x4300" && bytes=="0300000000000000")),"{}",serde_json::to_string(&graph).unwrap());
  e.close_session(&sid).unwrap();std::fs::remove_file(path).unwrap();
 }

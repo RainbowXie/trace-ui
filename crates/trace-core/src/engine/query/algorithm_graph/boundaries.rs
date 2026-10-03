@@ -56,10 +56,12 @@ pub(super) fn collect_boundaries(
     tree: &ActivationTree,
     selectors: &BTreeMap<u32, GraphActivationSelectorDto>,
     closure: &BTreeSet<u32>,
-    global_map: &super::super::function_facts::global_map::StableGlobalMap,
+    target_modules: &[String],
+    cancel:&std::sync::atomic::AtomicBool,
 ) -> Result<BoundaryIndex> {
     let mut index = BoundaryIndex::default();
     for (activation_id, selector) in selectors {
+        if cancel.load(std::sync::atomic::Ordering::Relaxed){return Err(TraceError::Cancelled);}
         let activation = &tree.activations[*activation_id as usize];
         let owned =
             super::super::function_facts::blocks::owned_instructions(state, tree, activation)?;
@@ -157,19 +159,13 @@ pub(super) fn collect_boundaries(
                 )?;
             }
         }
-        let return_producer = owned
-            .iter()
-            .rfind(|insn| line_arrow_register_value(&insn.line, "x0").is_some())
-            .map(|insn| insn.seq);
-        let (memory_reads, memory_writes, memory_unresolved) =
-            super::super::function_facts::dataflow::collect_memory_facts(
-                state,
-                &owned,
-                &Default::default(),
-                return_producer,
-            );
-        let literal_reads = memory_reads.clone();
-        for unresolved in &memory_unresolved {
+        // Use the same state-borrowed canonical projection as saved records;
+        // no recursive engine lock, legacy partition, or second index ordering.
+        let source=super::super::function_facts::FactSourceReference{artifact:&selector.trace.artifact,pointer:&selector.trace.pointer};
+        let context=super::super::function_facts::FunctionFactContext{trace:source,activation:super::super::function_facts::FactActivationSelector{trace:source,function:&selector.function,call_seq:selector.call_seq,entry_seq:selector.entry_seq}};
+        let bundle=super::super::function_facts::bounded::from_state(state,context,target_modules,cancel,super::super::function_facts::FACT_BUNDLE_LIMIT)?;
+        let memory_reads=bundle.memory_reads;let global_reads=bundle.global_reads;let global_writes=bundle.global_writes;
+        for unresolved in &bundle.unresolved {
             for seq in &unresolved.seqs {
                 if closure.contains(seq) {
                     index.push_unresolved(
@@ -181,13 +177,7 @@ pub(super) fn collect_boundaries(
                 }
             }
         }
-        let (memory_reads, global_reads, _, global_writes) =
-            super::super::function_facts::globals::partition_memory_facts(
-                &owned,
-                global_map,
-                memory_reads,
-                memory_writes,
-            );
+
         for (read_index, read) in memory_reads.iter().enumerate() {
             for seq in &read.read_seqs {
                 if owned
@@ -265,7 +255,7 @@ pub(super) fn collect_boundaries(
                 literal_sources.entry(insn.seq).or_default();
             }
         }
-        for (source_index, read) in literal_reads.iter().enumerate() {
+        for (source_index, read) in memory_reads.iter().enumerate() {
             for seq in &read.read_seqs {
                 if owned
                     .iter()
@@ -287,7 +277,7 @@ pub(super) fn collect_boundaries(
                 continue;
             }
             let source_index = sources[0];
-            let read = &literal_reads[source_index];
+            let read = &memory_reads[source_index];
             let Some(insn) = owned.iter().find(|insn| insn.seq == *seq) else {
                 continue;
             };
@@ -469,16 +459,4 @@ fn event_special_seqs(
                 })
         })
         .collect()
-}
-
-fn line_arrow_register_value(line: &str, register: &str) -> Option<u64> {
-    let arrow = line.find(" -> ").or_else(|| line.find(" => "))?;
-    let suffix = &line[arrow + 4..];
-    let marker = format!("{register}=0x");
-    let start = suffix.find(&marker)? + marker.len();
-    let digits = suffix[start..]
-        .bytes()
-        .take_while(u8::is_ascii_hexdigit)
-        .count();
-    u64::from_str_radix(&suffix[start..start + digits], 16).ok()
 }

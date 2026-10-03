@@ -93,10 +93,8 @@ impl crate::engine::TraceEngine {
         let mut closure = deps::backward_closure(&deps, &pair_split, &target_seeds);
         let relevant_event_edges=event_load_edges.into_iter().filter(|(_,load)|closure.contains(load)).collect::<Vec<_>>();
         for (call,_) in &relevant_event_edges {closure.insert(*call);}
-        let global_map =
-            super::function_facts::global_map::StableGlobalMap::collect(&state, target_modules)?;
         let mut boundary_index =
-            collect_boundaries(&state, tree, &selectors, &closure, &global_map)?;
+            collect_boundaries(&state, tree, &selectors, &closure, target_modules,&handle.build_cancel)?;
         for observation in saved_event_observations {
             if relevant_event_edges.iter().any(|(call,_)|*call==observation.callsite.seq) {
                 if !selectors.values().any(|s|s==&observation.owner) {return Err(TraceError::InvalidArgument("saved event owner not selected".into()));}

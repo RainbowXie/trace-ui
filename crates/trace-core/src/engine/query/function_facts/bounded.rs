@@ -1,4 +1,4 @@
-//! Bounded production fact generation; legacy graph/provenance collectors remain independent.
+//! Canonical bounded fact generation shared by direct queries and Graph sources.
 use super::super::activation::stable_site;
 use super::{
     block_stream::{scan_owned, stream_executed_blocks},
@@ -81,6 +81,15 @@ impl crate::engine::TraceEngine {
             .state
             .read()
             .map_err(|e| TraceError::Internal(e.to_string()))?;
+        from_state(&state,context,target_modules,cancel,logical_limit)
+    }
+}
+
+pub(crate) fn from_state(
+    state:&crate::session::SessionState,context:FunctionFactContext<'_>,target_modules:&[String],cancel:&AtomicBool,logical_limit:u64,
+)->Result<FunctionFactBundleDto> {
+        validate(context)?;
+        if cancel.load(Ordering::Relaxed){return Err(TraceError::Cancelled);}
         let tree = state
             .activation_tree
             .as_ref()
@@ -358,5 +367,4 @@ impl crate::engine::TraceEngine {
             return Err(TraceError::Cancelled);
         }
         Ok(dto)
-    }
 }

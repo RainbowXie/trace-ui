@@ -11,7 +11,7 @@ mod stack_stream;
 mod fact_work;
 mod memory_stream;
 mod collector;
-mod bounded;
+pub(crate) mod bounded;
 mod global_stream;
 mod global_closure;
 mod read_stream;
@@ -21,6 +21,7 @@ mod replay;
 mod budget_tests;
 #[cfg(test)]
 mod bounded_tests;
+pub(crate) use budget::FACT_BUNDLE_LIMIT;
 pub use budget::{FactSourceReference, FactActivationSelector, FunctionFactContext, write_function_fact_projection};
 mod target_write_history;
 mod abi;
