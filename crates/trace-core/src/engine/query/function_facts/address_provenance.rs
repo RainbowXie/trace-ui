@@ -698,7 +698,9 @@ impl crate::engine::TraceEngine {
             a.entry_seq >= entry_seq && a.exit_seq <= root.exit_seq && a.unresolved_reason.is_none()
         }) {
             let instructions = owned.iter().filter(|i| tree.activation_for_seq(i.seq).is_some_and(|a| a.id == owner.id)).collect::<Vec<_>>();
-            if !instructions.iter().any(|i| i.line.contains("sp=0x") || i.first_operand.as_deref().is_some_and(|o| o.split(|c: char| !c.is_ascii_alphanumeric()).any(|s| s == "sp"))) {
+            let stack_origin=accesses.iter().any(|access|instructions.iter().any(|i|i.seq==access.seq)
+                && matches!(access.origin_anchor,Some(AddressOriginDto::EntrySp{..}|AddressOriginDto::StackArgument{..})));
+            if !stack_origin && !instructions.iter().any(|i|super::frame_demand::instruction_requires_frame(&i.line)) {
                 continue;
             }
             if frames.len() >= MAX_ACCESSES { return Err(invalid("frame capacity exceeded")); }
@@ -741,7 +743,9 @@ impl crate::engine::TraceEngine {
                 let (defs, _) = trace_parser::def_use::determine_def_use(class, &parsed);
                 let parts = operand.split(',').map(str::trim).collect::<Vec<_>>();
                 let wb = memory_operand(operand).filter(|(base, _, _)| *base == "sp").and_then(|(_, _, wb)| wb);
-                let writes_sp = defs.contains(&RegId::SP) || post.is_some() || parts.first() == Some(&"sp") || wb.is_some();
+                let writes_sp = defs.contains(&RegId::SP)
+                    || (super::frame_demand::has_post_sp(raw) && (post.is_none() || pre.is_none() || post!=pre))
+                    || parts.first() == Some(&"sp") || wb.is_some();
                 let mut verified_post = current;
                 if writes_sp {
                     let expected = if let Some(delta) = wb {

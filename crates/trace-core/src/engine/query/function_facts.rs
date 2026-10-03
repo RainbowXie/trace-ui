@@ -24,6 +24,7 @@ pub use budget::{FactSourceReference, FactActivationSelector, FunctionFactContex
 mod target_write_history;
 mod abi;
 mod address_provenance;
+mod frame_demand;
 mod private_frame_operands;
 mod output_slots;
 mod store_flow;
