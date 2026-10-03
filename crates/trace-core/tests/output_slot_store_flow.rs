@@ -4,6 +4,14 @@ fn query(raw:&str)->trace_core::api_types::OutputSlotUsesDto{
  let path=std::env::temp_dir().join(format!("store-flow-{}",uuid::Uuid::new_v4()));std::fs::write(&path,raw).unwrap();let e=TraceEngine::new();let sid=e.create_session_from_file(std::fs::File::open(&path).unwrap(),"store-flow").unwrap().session_id;e.build_index(&sid,BuildOptions{force_rebuild:true,skip_strings:true},None).unwrap();let p=e.get_output_slot_uses(&sid,1,2,"App+0x2000",&["App".into()],&[OutputSlotRangeDto{address:"0x7000".into(),size:8}]).unwrap();e.close_session(&sid).unwrap();std::fs::remove_file(path).unwrap();p
 }
 #[test]fn candidate_data_store_to_distinct_range_is_finite_coverage(){let p=query(RAW);assert!(p.coverage.complete,"{}",serde_json::to_string(&p.gaps).unwrap());assert!(p.uses.is_empty());assert_eq!(p.coverage.scanned_lines,10);assert_eq!(p.coverage.access_count,3);}
+#[test]fn direct_chain_escape_checks_each_pair_element_and_w_alias(){
+ for store in ["stp x6, x9", "str w9", "stp w6, w9"] {
+  let raw=RAW.replace("add x9, x9, x5; x9=0x3 x5=0x1 -> x9=0x4", "mov x6, #0; -> x6=0x0")
+   .replace("str x9, [x3]; x3=0x8000 x9=0x4", &format!("{store}, [x3]; x3=0x8000 x6=0x0 x9=0x3"));
+  let p=query(&raw);assert!(!p.coverage.complete,"{store}: {}",serde_json::to_string(&p).unwrap());
+  assert!(p.gaps.iter().any(|g|g.seq==8 && g.kind=="untracked_store_data_escape"),"{store}: {}",serde_json::to_string(&p.gaps).unwrap());
+ }
+}
 #[test]fn partial_independent_overwrite_keeps_remaining_candidate_bytes(){
  let raw=RAW.replace("[App] 0x401014!", "[App] 0x401011!0x1011 strb w6, [x3]; x3=0x8000 w6=0x0 mem_w=0x8000\n[App] 0x401012!0x1012 ldrb w7, [x3, #1]; x3=0x8000 mem_r=0x8001 -> x7=0x0\n[App] 0x401013!0x1013 cbnz x7, #0x401014; x7=0x0\n[App] 0x401014!");assert!(!query(&raw).coverage.complete);
 }

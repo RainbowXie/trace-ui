@@ -232,6 +232,11 @@ impl crate::engine::TraceEngine {
                             let stop = start + u64::from(e.width);
                             let overlaps = ranges.iter().any(|&(b,end)| start < end && b < stop);
                             if write {
+                                // Pair and narrow data operands share canonical X/W
+                                // identities; every direct Chain must obey the escape rule.
+                                if chains.contains_key(&e.register) && !ranges.iter().any(|&(b,end)|b<=start && stop<=end) {
+                                    gap(&mut gaps,seq,"untracked_store_data_escape");
+                                }
                                 if let Some(value)=e.value {
                                     let candidate=store_sources.contains(&e.register) || loaded_values.contains_key(&e.register) || chains.contains_key(&e.register);
                                     store_flow.write(start,e.width,value,candidate,seq,owner.entry_seq)?;
@@ -276,9 +281,6 @@ impl crate::engine::TraceEngine {
                         }
                     }
                     if write {
-                        if data_reg.is_some_and(|r| chains.contains_key(&r)) && !ranges.iter().any(|&(b,e)|b<=a && end<=e) {
-                            gap(&mut gaps,seq,"untracked_store_data_escape");
-                        }
                         if chains.iter().any(|(r,c)| a < c.slot.saturating_add(8) && c.slot < end && !(Some(*r)==data_reg && a==c.slot && size==8 && observed_data_store)) {
                             gap(&mut gaps,seq,"loaded_identity_overwrite");
                         }
