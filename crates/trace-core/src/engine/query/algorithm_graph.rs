@@ -112,6 +112,21 @@ impl crate::engine::TraceEngine {
             }
         }
         attach_unowned_boundaries(&state, tree, &selectors, &closure, &mut boundary_index)?;
+        // The selected occurrence is an instruction even when its access has a
+        // saved GlobalReference view. Keep that view as a causal access edge,
+        // rather than replacing the Target or changing all global mappings.
+        let target_global_access=match boundary_index.by_seq.get(&target_seq) {
+            Some(access @ GraphMechanicalEndpointDto::GlobalReference{owner,..})=>{
+                let instruction=GraphMechanicalEndpointDto::Instruction{seq:target_seq,owner:owner.clone()};
+                let edge=if matches!(access,GraphMechanicalEndpointDto::GlobalReference{access,..} if access=="read") {
+                    GraphDependencyEdgeDto{producer:access.clone(),consumer:instruction.clone(),kind:"data".into(),pair_part:None}
+                }else{
+                    GraphDependencyEdgeDto{producer:instruction.clone(),consumer:access.clone(),kind:"data".into(),pair_part:None}
+                };
+                boundary_index.by_seq.insert(target_seq,instruction);Some(edge)
+            },
+            _=>None,
+        };
         let mut dependency_edges = deps::dependency_edges(
             &state,
             tree,
@@ -173,6 +188,7 @@ impl crate::engine::TraceEngine {
         for (call,load) in relevant_event_edges {dependency_edges.push(GraphDependencyEdgeDto{
             producer:map_endpoint(&state,tree,&selectors,&boundary_index,call)?,consumer:map_endpoint(&state,tree,&selectors,&boundary_index,load)?,kind:"data".into(),pair_part:None,
         });}
+        dependency_edges.extend(target_global_access);
         dependency_edges.extend(boundary_index.immediate_edges.iter().cloned());
         dependency_edges.sort_by(dependency_order);
         dependency_edges.dedup();
