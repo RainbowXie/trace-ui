@@ -424,6 +424,30 @@ fn helper_rejects_unresolved_activation_fail_closed() {
 }
 
 #[test]
+fn helper_unknown_write_revokes_known_final_bytes() {
+    let path = std::env::temp_dir().join(format!("facts-unknown-write-{}.log", std::process::id()));
+    let cases = [
+        ("st4 {v0.16b, v1.16b, v2.16b, v3.16b}, [x1]; x1=0x7000 mem_w=0x7000", false),
+        ("st4 {v0.16b, v1.16b, v2.16b, v3.16b}, [x1]; x1=0x7040 mem_w=0x7040", true),
+        ("str x0, [x1]; x0=0x22 x1=0x7000 mem_w=0x7000", true),
+    ];
+    for (later, known) in cases {
+        std::fs::write(&path, format!("[App] 0x100!0x100 bl #0x200\n[App] 0x200!0x200 str x0, [x1]; x0=0x11 x1=0x7000 mem_w=0x7000\n[App] 0x204!0x204 st4 {{v0.16b, v1.16b, v2.16b, v3.16b}}, [x1]; x1=0x7040 mem_w=0x7040\n[App] 0x208!0x208 {later}\n[App] 0x20c!0x20c ret\n[App] 0x104!0x104 nop\n")).unwrap();
+        let file = std::fs::File::open(&path).unwrap();
+        let output = run_fact_helper(file.as_raw_fd(), b"{\"call_seq\":0,\"entry_seq\":1}\n");
+        assert!(output.status.success(), "{}", String::from_utf8_lossy(&output.stderr));
+        let facts: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+        assert_eq!(facts["memory_writes"].as_array().unwrap().len(), usize::from(known), "{facts}");
+        if known {
+            let (bytes, seq) = if later.starts_with("str ") { ("2200000000000000", 3) } else { ("1100000000000000", 1) };
+            assert_eq!(facts["memory_writes"][0]["bytes"], bytes);
+            assert_eq!(facts["memory_writes"][0]["write_seqs"], serde_json::json!([seq]));
+        }
+    }
+    std::fs::remove_file(path).unwrap();
+}
+
+#[test]
 fn helper_operates_on_inherited_fd_without_pathname() {
     let root = std::env::temp_dir().join(format!(
         "trace-ui-fact-fd-only-{}-{}",

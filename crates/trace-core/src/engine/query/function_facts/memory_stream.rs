@@ -18,10 +18,10 @@ pub(super) enum Effect {
     },
     Block {
         address: u64,
-        size: u32,
+        size: Option<u32>,
     },
 }
-/// Decode only ISA-width memory items (at most 64 bytes); unknown never becomes zero.
+/// Decode proven-width byte effects; undecoded writes never become zero.
 pub(super) fn effect(line: &str) -> Option<Effect> {
     let address = lines::line_mem_annotation(line, "mem_w")?;
     let (mnemonic, operand) = trace_parser::strict_memory::instruction_parts(line)?;
@@ -33,7 +33,10 @@ pub(super) fn effect(line: &str) -> Option<Effect> {
                 size: width,
                 bytes: super::byte_effect::memory_bytes(line, width),
             },
-            Some(lines::ExclusiveStoreOutcome::Unknown) => Effect::Block { address, size: 64 },
+            Some(lines::ExclusiveStoreOutcome::Unknown) => Effect::Block {
+                address,
+                size: super::byte_effect::blocked_write_width(mnemonic, operand),
+            },
             None => match lines::access_width(mnemonic, operand) {
                 Some(size) if trace_parser::strict_memory::memory_op(line).is_some() => {
                     Effect::Applied {
@@ -42,9 +45,9 @@ pub(super) fn effect(line: &str) -> Option<Effect> {
                         bytes: super::byte_effect::memory_bytes(line, size),
                     }
                 }
-                width => Effect::Block {
+                _ => Effect::Block {
                     address,
-                    size: width.unwrap_or(64),
+                    size: super::byte_effect::blocked_write_width(mnemonic, operand),
                 },
             },
         },
@@ -59,20 +62,27 @@ pub(super) fn final_bytes(
 ) -> Result<Fixed<Cell>> {
     let mut cells = Fixed::<Cell>::new()?;
     scan_owned(state, tree, root, cancel, |insn| {
-        if let Some(Effect::Applied {
-            address,
-            size,
-            bytes,
-        }) = effect(insn.line)
-        {
-            if address.checked_add(u64::from(size) - 1).is_some() {
-                for (offset, value) in bytes.into_iter().enumerate() {
-                    if cancel.load(Ordering::Relaxed) {
-                        return Err(TraceError::Cancelled);
+        match effect(insn.line) {
+            Some(Effect::Applied { address, size, bytes }) => {
+                if address.checked_add(u64::from(size) - 1).is_some() {
+                    for (offset, value) in bytes.into_iter().enumerate() {
+                        if cancel.load(Ordering::Relaxed) {
+                            return Err(TraceError::Cancelled);
+                        }
+                        cells.apply(address + offset as u64, value, insn.seq)?;
                     }
-                    cells.apply(address + offset as u64, value, insn.seq)?;
+                } else {
+                    cells.values.clear();
                 }
             }
+            Some(Effect::Block { address, size }) => {
+                // Uncertain exclusive success is not a proven contributor. Remove
+                // prior proofs instead of assigning its seq to unknown bytes.
+                cells.values.retain(|cell| {
+                    !super::byte_effect::write_covers_byte(address, size, cell.address)
+                });
+            }
+            _ => {}
         }
         Ok(true)
     })?;
@@ -171,15 +181,14 @@ pub(super) fn external_mask(
             return Ok(false);
         }
         let blocked = match effect(insn.line) {
-            Some(Effect::Applied { address, size, .. }) | Some(Effect::Block { address, size }) => {
-                Some((address, size))
-            }
+            Some(Effect::Applied { address, size, .. }) => Some((address, Some(size))),
+            Some(Effect::Block { address, size }) => Some((address, size)),
             _ => None,
         };
         if let Some((start, width)) = blocked {
             for (offset, external) in external.iter_mut().enumerate() {
                 if let Some(byte) = address.checked_add(offset as u64) {
-                    if byte >= start && byte - start < u64::from(width) {
+                    if super::byte_effect::write_covers_byte(start, width, byte) {
                         *external = false;
                     }
                 }

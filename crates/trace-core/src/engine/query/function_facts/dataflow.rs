@@ -13,11 +13,6 @@ use super::lines::{
 use crate::scanner::LINE_MASK;
 use crate::utils::checked_mem_addr;
 
-/// 宽度未知写入的保守阻断半径：SIMD 多寄存器 store（st4 {v0-v3}）是
-/// arm64 最大单条访存（64 字节）。这是 ISA 机械事实而非对合法数据的
-/// 领域上限——只约束内部数据流的排除范围。
-const UNKNOWN_WRITE_WIDTH: u32 = 64;
-
 /// 影响目标的读取集合：从输出（返回值生产者 + 最终写入者）沿依赖图
 /// （deps.row = 消费者→生产者）反向闭包，只走本 Activation 窗口内的
 /// 边——窗口外的生产者是外部输入（caller 提供），不属于本次调用的
@@ -91,7 +86,7 @@ enum WriteEffect {
     /// 真实写入：宽度与逐字节已知/未知值。
     Applied { size: u32, bytes: Vec<Option<u8>> },
     /// 宽度/成败未知：保守阻断重叠读取，不进输出。
-    BlockOnly { size: u32 },
+    BlockOnly { size: Option<u32> },
 }
 
 fn write_effect(insn: &OwnedInsn, mnemonic: &str, operand: &str) -> Option<WriteEffect> {
@@ -106,7 +101,7 @@ fn write_effect(insn: &OwnedInsn, mnemonic: &str, operand: &str) -> Option<Write
             bytes: memory_bytes(&insn.line, width),
         },
         Some(ExclusiveStoreOutcome::Unknown) => WriteEffect::BlockOnly {
-            size: UNKNOWN_WRITE_WIDTH,
+            size: super::byte_effect::blocked_write_width(mnemonic, operand),
         },
         None => match access_width(mnemonic, operand) {
             Some(size) if trace_parser::strict_memory::memory_op(&insn.line).is_some() => {
@@ -115,9 +110,8 @@ fn write_effect(insn: &OwnedInsn, mnemonic: &str, operand: &str) -> Option<Write
                     bytes: memory_bytes(&insn.line, size),
                 }
             }
-            Some(size) => WriteEffect::BlockOnly { size },
-            None => WriteEffect::BlockOnly {
-                size: UNKNOWN_WRITE_WIDTH,
+            _ => WriteEffect::BlockOnly {
+                size: super::byte_effect::blocked_write_width(mnemonic, operand),
             },
         },
     };
@@ -143,7 +137,7 @@ pub(crate) fn collect_memory_facts(
     Vec<FunctionFactUnresolvedDto>,
 ) {
     // (address, size, seq)：只有更早的重叠写才算本调用内部生产（ISSUE-H10）。
-    let mut blocked: Vec<(u64, u32, u32)> = Vec::new();
+    let mut blocked: Vec<(u64, Option<u32>, u32)> = Vec::new();
     let mut final_bytes = FinalByteMap::default();
     let mut write_winners: Vec<u32> = Vec::new();
     let mut write_unresolved: Vec<FunctionFactUnresolvedDto> = Vec::new();
@@ -170,10 +164,10 @@ pub(crate) fn collect_memory_facts(
                 Some(WriteEffect::Applied { size, bytes }) => {
                     if final_bytes.apply(address, &bytes, insn.seq) {
                         write_winners.push(insn.seq);
-                        blocked.push((address, size, insn.seq));
+                        blocked.push((address, Some(size), insn.seq));
                     } else {
-                        // 无法 emit known write，但仍按声明宽度挡住后续短读（ISSUE-H16）。
-                        blocked.push((address, size, insn.seq));
+                        final_bytes.invalidate(address, Some(size));
+                        blocked.push((address, Some(size), insn.seq));
                         write_unresolved.push(FunctionFactUnresolvedDto {
                             kind: "unsupported_instruction".to_string(),
                             seqs: vec![insn.seq],
@@ -184,6 +178,7 @@ pub(crate) fn collect_memory_facts(
                     continue;
                 }
                 Some(WriteEffect::BlockOnly { size }) => {
+                    final_bytes.invalidate(address, size);
                     blocked.push((address, size, insn.seq));
                     write_unresolved.push(FunctionFactUnresolvedDto {
                         kind: "unsupported_instruction".to_string(),
@@ -319,14 +314,6 @@ pub(crate) fn literal_load_address(mnemonic: &str, operand: &str) -> Option<u64>
     u64::from_str_radix(hex, 16).ok()
 }
 
-fn write_covers_byte(waddress: u64, wsize: u32, byte: u64) -> bool {
-    // 用偏移而不是排他终点：完整写到 u64::MAX 时 MAX+1 溢出，不能因此把已写下的字节当成外部。
-    if byte < waddress {
-        return false;
-    }
-    byte - waddress < u64::from(wsize)
-}
-
 /// ISSUE-H12：按字节判断该读取前是否已有本调用写入。只输出外部来源连续子范围；
 /// 无法安全重建外部字节时 bytes 置 null 并留下 unresolved，不得把内部字节标成入口输入。
 fn external_read_ranges(
@@ -334,7 +321,7 @@ fn external_read_ranges(
     size: u32,
     seq: u32,
     bytes: &[Option<u8>],
-    blocked: &[(u64, u32, u32)],
+    blocked: &[(u64, Option<u32>, u32)],
     unresolved: &mut Vec<FunctionFactUnresolvedDto>,
 ) -> Vec<FunctionMemoryReadDto> {
     let mut external: Vec<(u64, Option<u8>)> = Vec::new();
@@ -345,7 +332,7 @@ fn external_read_ranges(
             break;
         };
         let internal = blocked.iter().any(|(waddress, wsize, wseq)| {
-            *wseq < seq && write_covers_byte(*waddress, *wsize, byte)
+            *wseq < seq && super::byte_effect::write_covers_byte(*waddress, *wsize, byte)
         });
         if internal {
             continue;

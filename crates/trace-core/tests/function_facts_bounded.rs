@@ -74,6 +74,31 @@ fn unchanged_small_fields_and_unknown_bytes() {
     compare("[App] 0x100!0x100 bl #0x200\n[App] 0x200!0x200 str x3, [x2]; x2=0x8000 mem_w=0x8000\n[App] 0x204!0x204 ret\n[App] 0x104!0x104 nop\n", &[]);
 }
 #[test]
+fn unknown_writes_revoke_final_contributions_in_both_queries() {
+    for (later, expected) in [
+        ("st4 {v0.16b, v1.16b, v2.16b, v3.16b}, [x1]; x1=0x7000 mem_w=0x7000", 0),
+        ("st4 {v0.16b, v1.16b, v2.16b, v3.16b}, [x1]; x1=0x7040 mem_w=0x7040", 1),
+        ("stxr w2, x3, [x1]; x1=0x7000 mem_w=0x7000", 0),
+        ("stxr w2, x3, [x1]; x1=0x7008 mem_w=0x7008", 1),
+        ("stxr w2, x3, [x1]; x1=0x7000 mem_w=0x7000 -> w2=0x1", 1),
+        ("unknown_store [x1]; x1=0x7100 mem_w=0x7100", 0),
+        ("st4 {v0.16b-v3.16b}, [x1]; x1=0x7100 mem_w=0x7100", 0),
+        ("st4 {v0.16b, v1.16b, v2.16b, v3.16b}, [x1]; x1=0xfffffffffffffff0 mem_w=0xfffffffffffffff0", 0),
+    ] {
+        let trace = format!("[App] 0x100!0x100 bl #0x200\n[App] 0x200!0x200 str x0, [x1]; x0=0x1122334455667788 x1=0x7000 mem_w=0x7000\n[App] 0x204!0x204 {later}\n[App] 0x208!0x208 ret\n[App] 0x104!0x104 nop\n");
+        let facts = compare(&trace, &[]);
+        assert_eq!(facts["memory_writes"].as_array().unwrap().len(), expected, "{later}: {facts}");
+        if expected == 1 {
+            assert_eq!(facts["memory_writes"][0]["bytes"], "8877665544332211");
+            assert_eq!(facts["memory_writes"][0]["write_seqs"], serde_json::json!([1]));
+        }
+    }
+    let restored = compare("[App] 0x100!0x100 bl #0x200\n[App] 0x200!0x200 str x0, [x1]; x0=0x11 x1=0x7000 mem_w=0x7000\n[App] 0x204!0x204 st4 {v0.16b, v1.16b, v2.16b, v3.16b}, [x1]; x1=0x7000 mem_w=0x7000\n[App] 0x208!0x208 str x0, [x1]; x0=0x22 x1=0x7000 mem_w=0x7000\n[App] 0x20c!0x20c ret\n[App] 0x104!0x104 nop\n", &[]);
+    assert_eq!(restored["memory_writes"][0]["bytes"], "2200000000000000");
+    assert_eq!(restored["memory_writes"][0]["write_seqs"], serde_json::json!([3]));
+}
+
+#[test]
 fn stack_reads_and_external_event() {
     compare("[App] 0x100!0x100 bl #0x200\n[App] 0x200!0x200 ldr x0, [sp]; sp=0x9000 mem_r=0x9000 -> x0=0x7\n[App] 0x204!0x204 bl #0x900\n[App] 0x208!0x208 ret\n[App] 0x104!0x104 nop\n", &[]);
 }

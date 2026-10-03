@@ -15,6 +15,53 @@ pub(super) fn memory_bytes(line: &str, size: u32) -> Vec<Option<u8>> {
         .unwrap_or_else(|| vec![None; size as usize])
 }
 
+/// Only explicit full-vector structure stores establish a range here. SVE,
+/// register-range/lane syntax and other undecoded stores have no assumed maximum.
+pub(super) fn blocked_write_width(mnemonic: &str, operand: &str) -> Option<u32> {
+    if let Some(width) = super::lines::access_width(mnemonic, operand) {
+        return Some(width);
+    }
+    let count = match mnemonic {
+        "st1" => None,
+        "st2" => Some(2),
+        "st3" => Some(3),
+        "st4" => Some(4),
+        _ => return None,
+    };
+    let tail = operand.strip_prefix('{')?;
+    let (registers, address) = tail.split_once('}')?;
+    if !address.trim_start().starts_with(", [") {
+        return None;
+    }
+    let mut total = 0;
+    let mut arrangement = None;
+    let mut number = 0;
+    for register in registers.split(',') {
+        let (name, shape) = register.trim().split_once('.')?;
+        let index = name.strip_prefix('v')?.parse::<u8>().ok()?;
+        if index > 31 || name != format!("v{index}") || arrangement.is_some_and(|prior| prior != shape) {
+            return None;
+        }
+        let width = match shape {
+            "8b" | "4h" | "2s" | "1d" => 8,
+            "16b" | "8h" | "4s" | "2d" => 16,
+            _ => return None,
+        };
+        arrangement = Some(shape);
+        total += width;
+        number += 1;
+    }
+    (number >= 1 && number <= 4 && count.is_none_or(|count| count == number)).then_some(total)
+}
+
+pub(super) fn write_covers_byte(address: u64, size: Option<u32>, byte: u64) -> bool {
+    // An unbounded or overflowing range cannot preserve any prior final proof.
+    match size.filter(|size| address.checked_add(u64::from(*size) - 1).is_some()) {
+        Some(size) => byte >= address && byte - address < u64::from(size),
+        None => true,
+    }
+}
+
 #[derive(Default)]
 pub(super) struct FinalByteMap {
     bytes: BTreeMap<u64, (Option<u8>, u32)>,
@@ -28,6 +75,9 @@ impl FinalByteMap {
             self.bytes.insert(address + offset as u64, (value, seq));
         }
         true
+    }
+    pub(super) fn invalidate(&mut self, address: u64, size: Option<u32>) {
+        self.bytes.retain(|byte, _| !write_covers_byte(address, size, *byte));
     }
     pub(super) fn materialize(&self) -> Vec<FunctionMemoryWriteDto> {
         let mut out = Vec::new();
