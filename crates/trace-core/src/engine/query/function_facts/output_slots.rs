@@ -26,6 +26,10 @@ fn address_operand(s: &str) -> Option<(&str, RegId, i64)> {
 fn gap(g: &mut Vec<AddressGapDto>, seq: u32, kind: &str) {
     g.push(AddressGapDto {seq,kind:kind.into(),detail:"coverage/identity interrupted; never negative pointer evidence".into()});
 }
+// Query-local identity: Event bytes are observed before resume execution,
+// never a raw store instruction or a public positive address-chain source.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum ByteDefinition { Raw(u32), EventResume(u32), Unknown(u32) }
 #[derive(Clone)]
 struct Store { seq: u32, owner: u32, operand: String, value: u64 }
 #[derive(Clone)]
@@ -67,8 +71,8 @@ impl crate::engine::TraceEngine {
         if last != wanted { gap(&mut gaps,last,"line_capacity"); }
         let mut stores = HashMap::<u64,Store>::new();
         let mut final_stores = HashMap::<u64,u32>::new();
-        let mut byte_definitions = HashMap::<u64,(u32,Option<u8>)>::new();
-        let mut final_bytes = HashMap::<u64,(u32,Option<u8>)>::new();
+        let mut byte_definitions = HashMap::<u64,(ByteDefinition,Option<u8>)>::new();
+        let mut final_bytes = HashMap::<u64,(ByteDefinition,Option<u8>)>::new();
         let mut loaded_values = HashMap::<RegId,(u64,u64)>::new();
         let mut chains = HashMap::<RegId,Chain>::new();
         let mut store_flow=super::store_flow::StoreFlow::new()?;
@@ -78,6 +82,12 @@ impl crate::engine::TraceEngine {
         let mut uses = Vec::new(); let mut bytes = 0usize; let mut scanned = 0u32; let mut access_count = 0; let mut steps = 0usize;
         for seq in entry_seq..=last {
             if handle.build_cancel.load(std::sync::atomic::Ordering::Relaxed) {return Err(TraceError::Cancelled);}
+            // Apply after the opaque body, before even an internal BL at resume.
+            for event in saved_event_observations.iter().filter(|e|e.resume.seq==seq && e.callsite.seq>=entry_seq) {
+                for m in &event.memory_writes {let (start,values)=super::super::saved_events::memory_bytes(m)?;
+                    for (i,v) in values.into_iter().enumerate(){let address=start+i as u64;if ranges.iter().any(|&(b,e)|b<=address && address<e){byte_definitions.insert(address,(ByteDefinition::EventResume(seq),Some(v)));}}
+                }
+            }
             if seq == root.resume_seq {
                 final_stores = stores.iter().map(|(a,s)| (*a,s.seq)).collect();
                 final_bytes = byte_definitions.clone();
@@ -149,14 +159,11 @@ impl crate::engine::TraceEngine {
                     && raw(a.resume_seq).ok().and_then(stable_runtime_site).is_some_and(|(m,next,_)|m==module && pc.checked_add(4)==Some(next))
             });
             let observed_external=saved_event_observations.iter().find(|e|e.callsite.seq==seq && e.owner.call_seq==owner.call_seq && e.owner.entry_seq==owner.entry_seq && e.owner.exit_seq==owner.exit_seq && e.owner.resume_seq==owner.resume_seq);
-            if let Some(event)=observed_external {
+            if observed_external.is_some() {
                 if !store_sources.is_empty() || !loaded_values.is_empty() || !chains.is_empty() || store_flow.live() {gap(&mut gaps,seq,"untracked_store_data_escape");}
-                for &(start,end) in &ranges {for address in start..end {byte_definitions.insert(address,(seq,None));}}
-                // Explicit changes are observation-point definitions, never raw
-                // Store identities. This subset certifies B only via later raw writes.
-                for m in &event.memory_writes {let (start,values)=super::super::saved_events::memory_bytes(m)?;
-                    for (i,v) in values.into_iter().enumerate(){let address=start+i as u64;if ranges.iter().any(|&(b,e)|b<=address && address<e){byte_definitions.insert(address,(seq,Some(v)));}}
-                }
+                for &(start,end) in &ranges {for address in start..end {byte_definitions.insert(address,(ByteDefinition::Unknown(seq),None));}}
+                // Keep live candidate obligations across the opaque call; the
+                // known payload restores only memory bytes, not provenance.
                 stores.clear();chains.clear();continue;
             }
             if super::super::saved_events::opaque_boundary(&state,tree,seq,line) || (matches!(m,"bl"|"blr"|"svc") && !internal_call) || (matches!(class,trace_parser::insn_class::InsnClass::Nop) && m != "nop") { stores.clear(); chains.clear(); gap(&mut gaps,seq,"call_external_or_unknown"); continue; }
@@ -251,7 +258,7 @@ impl crate::engine::TraceEngine {
                                     for i in 0..e.width {
                                         let at = start + u64::from(i);
                                         if ranges.iter().any(|&(b,end)| b <= at && at < end) {
-                                            byte_definitions.insert(at,(seq,known.map(|v| v[usize::from(i)])));
+                                            byte_definitions.insert(at,(ByteDefinition::Raw(seq),known.map(|v| v[usize::from(i)])));
                                         }
                                     }
                                     if !e.register.is_zero() { stored_sources.push(e.register); }
@@ -274,7 +281,12 @@ impl crate::engine::TraceEngine {
                                     byte_definitions.get(&(start + u64::from(i))).is_none_or(|(_,v)|
                                         v.is_some() && *v == observed.map(|v| v[usize::from(i)]))
                                 });
+                                let event_bytes = (start..stop).any(|at|byte_definitions.get(&at).is_some_and(|(origin,_)|matches!(origin,ByteDefinition::EventResume(_))));
+                                let single_event = (start..stop).all(|at|byte_definitions.get(&at).is_some_and(|(origin,v)|
+                                    matches!(origin,ByteDefinition::EventResume(_)) && v.is_some()
+                                    && byte_definitions.get(&start).is_some_and(|(first,_)|first==origin)));
                                 if !matches { gap(&mut gaps,seq,"load_without_slot_definition"); }
+                                else if event_bytes && !single_event { gap(&mut gaps,seq,"mixed_event_load_definition"); }
                                 else { new_loaded.push((e.register,(start,stop))); }
                                 }
                             }
@@ -303,7 +315,10 @@ impl crate::engine::TraceEngine {
                         let dst = operand.split(',').next().unwrap_or("").trim();
                         if size == 8 && op.value_count == 1 {
                             if ranges.iter().any(|&(b,e)| a < e && b < end) && !stores.contains_key(&a)
-                                && (a..end).all(|at|byte_definitions.contains_key(&at)) {
+                                && (a..end).all(|at|byte_definitions.contains_key(&at))
+                                && !(a..end).all(|at|byte_definitions.get(&at).is_some_and(|(origin,v)|
+                                    matches!(origin,ByteDefinition::EventResume(_)) && v.is_some()
+                                    && byte_definitions.get(&a).is_some_and(|(first,_)|first==origin))) {
                                 gap(&mut gaps,seq,"load_without_single_x_slot_definition");
                             }
                             if let (Some(s),Some(r)) = (stores.get(&a),reg64(dst)) {
@@ -363,17 +378,17 @@ impl crate::engine::TraceEngine {
         }
         // Observation is execution-before resume, not after the resume instruction.
         if last < root.resume_seq { gap(&mut gaps,root.resume_seq,"final_observation_uncovered"); }
-        // Every requested byte needs a known real last write. This is separate
+        // Every requested byte needs a known raw write or resume observation. This is separate
         // from source/load use obligations and never a scalar type inference.
         for &(start,end) in &ranges {
-            if (start..end).any(|at| final_bytes.get(&at).is_none_or(|(seq,v)| v.is_none() || saved_event_observations.iter().any(|e|e.callsite.seq==*seq))) {
+            if (start..end).any(|at| final_bytes.get(&at).is_none_or(|(seq,v)| v.is_none() || matches!(seq,ByteDefinition::Unknown(_)))) {
                 gap(&mut gaps,root.resume_seq,"final_range_definition_uncovered");
             }
         }
         for u in &mut uses {
             let a = u64::from_str_radix(&u.slot_address[2..],16).unwrap();
             u.final_output_definition = final_stores.get(&a) == Some(&u.store_seq)
-                && (a..a+8).all(|at| final_bytes.get(&at).is_some_and(|(seq,v)| *seq == u.store_seq && v.is_some()));
+                && (a..a+8).all(|at| final_bytes.get(&at).is_some_and(|(seq,v)| *seq == ByteDefinition::Raw(u.store_seq) && v.is_some()));
         }
         if uses.iter().any(|u| !u.final_output_definition) {
             gap(&mut gaps,root.resume_seq,"transient_store_not_final_output");
