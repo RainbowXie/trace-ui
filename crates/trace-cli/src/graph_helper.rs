@@ -12,6 +12,7 @@ use std::os::fd::{FromRawFd, RawFd};
 
 use serde::Deserialize;
 use trace_core::api_types::{AlgorithmGraphFactBundleDto, GraphActivationSelectorDto};
+use trace_core::engine::INHERITED_FD_SESSION_PREFIX;
 use trace_core::{BuildOptions, TraceEngine};
 
 const MAX_GRAPH_FACT_BUNDLE_BYTES: usize = 64 * 1024 * 1024;
@@ -55,7 +56,11 @@ pub(crate) fn run() -> anyhow::Result<()> {
         .map_err(|error| anyhow::anyhow!("invalid graph helper request: {error}"))?;
 
     let engine = Arc::new(TraceEngine::new());
-    let session = engine.create_session_from_file(trace, &format!("inherited-fd:{trace_fd}"))?;
+    let session = engine.create_session_from_file(
+        trace,
+        // 标签只用于诊断：内容指纹才是缓存键，fd 号变化不得触发重扫。
+        &format!("{INHERITED_FD_SESSION_PREFIX}{trace_fd}"),
+    )?;
     engine.build_index(
         &session.session_id,
         BuildOptions {

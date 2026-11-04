@@ -2,6 +2,7 @@
 
 use std::collections::{BTreeSet, HashMap, HashSet};
 
+use memchr::memmem;
 use trace_parser::{
     gumtrace, parser,
     types::{MemLayout, MemOp, TraceFormat},
@@ -138,7 +139,7 @@ impl<'a> SearchState<'a> {
     // Filters and the occurrence sink travel together through every replay;
     // grouping them into a struct would only obscure the event loop.
     #[allow(clippy::too_many_arguments)]
-    fn process_event(
+    pub(crate) fn process_event(
         &mut self,
         address: u64,
         values: &[ByteValue],
@@ -249,6 +250,17 @@ pub(crate) fn scan_memory_page(
     })
 }
 
+/// 行级粗筛标记：与各格式解析器产出 mem_op 的唯一字面量一致。memmem 比
+/// `windows()` 的逐窗口比较快一到两个数量级，这是每行都要付的成本。
+fn contains_memory_marker(line: &[u8], format: TraceFormat) -> bool {
+    match format {
+        TraceFormat::Unidbg => memmem::find(line, b"mem[").is_some(),
+        TraceFormat::Gumtrace => {
+            memmem::find(line, b"mem_w=").is_some() || memmem::find(line, b"mem_r=").is_some()
+        }
+    }
+}
+
 pub(crate) fn scan_memory_with_sink(
     data: &[u8],
     format: TraceFormat,
@@ -275,56 +287,56 @@ pub(crate) fn scan_memory_with_sink(
                 detail: "trace line is not valid UTF-8".to_string(),
             });
         };
-        let contains_memory_event = match format {
-            TraceFormat::Unidbg => line_bytes.windows(4).any(|window| window == b"mem["),
-            TraceFormat::Gumtrace => line_bytes
-                .windows(6)
-                .any(|window| window == b"mem_w=" || window == b"mem_r="),
-        };
-        let parsed = match format {
-            TraceFormat::Unidbg => parser::parse_line(line),
-            TraceFormat::Gumtrace => gumtrace::parse_line_gumtrace(line),
-        };
-        let Some(parsed) = parsed else {
-            if contains_memory_event {
+        let contains_memory_event = contains_memory_marker(line_bytes, format);
+        if contains_memory_event {
+            let parsed = match format {
+                TraceFormat::Unidbg => parser::parse_line(line),
+                TraceFormat::Gumtrace => gumtrace::parse_line_gumtrace(line),
+            };
+            #[cfg(test)]
+            super::MEMORY_LINE_PARSE_COUNT.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            let Some(parsed) = parsed else {
                 return Err(TraceError::ParseError {
                     line: Some(seq),
                     detail: "malformed memory event".to_string(),
                 });
+            };
+            // 光解析成功不够：unidbg 解析器会抽取任意引号文本当反汇编，
+            // 普通文本（如 TOML 的 members = ["..."]）也能“解析成功”。
+            // 可识别指令行必须同时带该格式的行首结构签名（与 detect_format
+            // 同一条规则，见 line_matches_format_signature）。
+            if trace_parser::gumtrace::line_matches_format_signature(line_bytes, format) {
+                recognized_instruction_lines = recognized_instruction_lines.saturating_add(1);
             }
+            let Some(mem) = parsed.mem_op.as_ref() else {
+                return Err(TraceError::ParseError {
+                    line: Some(seq),
+                    detail: "malformed memory event".to_string(),
+                });
+            };
+            let rw = if mem.is_write {
+                MemorySearchRw::Write
+            } else {
+                MemorySearchRw::Read
+            };
+            let values = expand_mem_op(mem);
+            state.process_event(
+                mem.abs,
+                &values,
+                seq,
+                rw,
+                options.seq_range,
+                options.memory_range,
+                &mut sink,
+            )?;
             continue;
-        };
-        // 光解析成功不够：unidbg 解析器会抽取任意引号文本当反汇编，
-        // 普通文本（如 TOML 的 members = ["..."]）也能“解析成功”。
-        // 可识别指令行必须同时带该格式的行首结构签名（与 detect_format
-        // 同一条规则，见 line_matches_format_signature）。
+        }
+        // 无内存标记的行不可能产生内存事件：两种解析器的 mem_op 都只来自
+        // 标记自身。这些行只参与可识别指令行计数，跳过完整解析——8.4 GB
+        // trace 里绝大多数行属于这一类，逐行解析正是旧的 30 分钟瓶颈。
         if trace_parser::gumtrace::line_matches_format_signature(line_bytes, format) {
             recognized_instruction_lines = recognized_instruction_lines.saturating_add(1);
         }
-        let Some(mem) = parsed.mem_op.as_ref() else {
-            if contains_memory_event {
-                return Err(TraceError::ParseError {
-                    line: Some(seq),
-                    detail: "malformed memory event".to_string(),
-                });
-            }
-            continue;
-        };
-        let rw = if mem.is_write {
-            MemorySearchRw::Write
-        } else {
-            MemorySearchRw::Read
-        };
-        let values = expand_mem_op(mem);
-        state.process_event(
-            mem.abs,
-            &values,
-            seq,
-            rw,
-            options.seq_range,
-            options.memory_range,
-            &mut sink,
-        )?;
     }
     if recognized_instruction_lines == 0 {
         return Err(TraceError::ParseError {

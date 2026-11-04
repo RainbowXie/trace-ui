@@ -9,7 +9,8 @@ use std::io::{self, Read, Write};
 use std::sync::atomic::AtomicBool;
 use std::sync::Arc;
 use trace_core::engine::{
-    write_function_fact_projection, FactActivationSelector, FactSourceReference, FunctionFactContext,
+    write_function_fact_projection, FactActivationSelector, FactSourceReference,
+    FunctionFactContext, INHERITED_FD_SESSION_PREFIX,
 };
 
 #[cfg(unix)]
@@ -282,7 +283,11 @@ pub(crate) fn run() -> anyhow::Result<()> {
 
     let engine = Arc::new(TraceEngine::new());
     let session_info = engine
-        .create_session_from_file(trace, &format!("inherited-fd:{trace_fd}"))
+        .create_session_from_file(
+            trace,
+            // 标签只用于诊断：内容指纹才是缓存键，fd 号变化不得触发重扫。
+            &format!("{INHERITED_FD_SESSION_PREFIX}{trace_fd}"),
+        )
         .map_err(|error| anyhow::anyhow!("failed to create session from trace fd: {error}"))?;
     let sid = session_info.session_id;
 

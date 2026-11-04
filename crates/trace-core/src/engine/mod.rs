@@ -10,7 +10,11 @@ pub use query::function_facts::{FactSourceReference, FactActivationSelector, Fun
 mod search;
 mod slice;
 
+#[cfg(test)]
+mod cache_identity_tests;
+
 use memmap2::Mmap;
+use sha2::{Digest, Sha256};
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, RwLock};
@@ -19,6 +23,21 @@ use crate::api_types::*;
 use crate::error::{Result, TraceError};
 use crate::session::{SessionHandle, SessionState};
 use trace_parser::types::TraceFormat;
+
+/// fd helper 的会话显示标签前缀。标签只进入诊断输出，不进入持久化缓存键。
+pub const INHERITED_FD_SESSION_PREFIX: &str = "inherited-fd:";
+
+/// fd 号每次 helper 调用都不同，若它直接拼进缓存文件名，同一 trace 永远 miss
+/// 并全量重扫。fd 会话改用内容指纹作缓存身份；内容变化时缓存 header 里的
+/// trace_hash 仍会判定失效，不会返回过期索引。路径会话保持原键，行为不变。
+fn session_cache_identity(display_path: &str, trace_hash: &[u8; 32]) -> String {
+    if !display_path.starts_with(INHERITED_FD_SESSION_PREFIX) {
+        return display_path.to_string();
+    }
+    let mut hasher = Sha256::new();
+    hasher.update(trace_hash);
+    format!("fd-content:{:x}", hasher.finalize())
+}
 
 #[derive(Default)]
 pub struct TraceEngine {
@@ -67,6 +86,7 @@ impl TraceEngine {
         let session_state = SessionState {
             mmap: Arc::new(mmap),
             file_path: path.to_string(),
+            cache_identity: session_cache_identity(path, &trace_hash),
             total_lines: total_lines_estimate,
             file_size,
             trace_hash,

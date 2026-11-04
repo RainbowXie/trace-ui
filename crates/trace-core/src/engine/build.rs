@@ -68,14 +68,14 @@ impl super::TraceEngine {
         options: BuildOptions,
         on_progress: Option<ProgressCallback>,
     ) -> Result<BuildResult> {
-        let (mmap_arc, file_path, trace_hash) = {
+        let (mmap_arc, cache_identity, trace_hash) = {
             let state = handle
                 .state
                 .read()
                 .map_err(|e| TraceError::Internal(e.to_string()))?;
             (
                 state.mmap.clone(),
-                state.file_path.clone(),
+                state.cache_identity.clone(),
                 state.trace_hash,
             )
         };
@@ -88,16 +88,16 @@ impl super::TraceEngine {
         // 检测格式
         let detected_format = trace_parser::gumtrace::detect_format(data);
         eprintln!(
-            "[index] detected_format={:?}, force={}, file_path={}",
-            detected_format, force, file_path
+            "[index] detected_format={:?}, force={}, cache_identity={}",
+            detected_format, force, cache_identity
         );
 
         // 尝试从缓存加载（三个核心缓存全部命中时使用）
         if !force {
             if let (Some(p2_mmap), Some(scan_mmap), Some(lidx_mmap)) = (
-                cache::load_phase2_cache(&file_path, trace_len, &trace_hash),
-                cache::load_scan_cache(&file_path, trace_len, &trace_hash),
-                cache::load_lidx_cache(&file_path, trace_len, &trace_hash),
+                cache::load_phase2_cache(&cache_identity, trace_len, &trace_hash),
+                cache::load_scan_cache(&cache_identity, trace_len, &trace_hash),
+                cache::load_lidx_cache(&cache_identity, trace_len, &trace_hash),
             ) {
                 // 通知进度：缓存加载
                 if let Some(ref cb) = on_progress {
@@ -109,11 +109,11 @@ impl super::TraceEngine {
                     });
                 }
 
-                let string_index = cache::load_string_cache(&file_path, trace_len, &trace_hash);
+                let string_index = cache::load_string_cache(&cache_identity, trace_len, &trace_hash);
 
                 let (call_annotations, consumed_seqs) =
                     if detected_format == trace_parser::types::TraceFormat::Gumtrace {
-                        cache::load_gumtrace_extra(&file_path, trace_len, &trace_hash)
+                        cache::load_gumtrace_extra(&cache_identity, trace_len, &trace_hash)
                             .unwrap_or_else(|| (HashMap::new(), Vec::new()))
                     } else {
                         (HashMap::new(), Vec::new())
@@ -379,7 +379,14 @@ impl super::TraceEngine {
                 );
 
                 // 3. write lock：仅存储数据到 session
-                let (fp, gum_extra, total_lines, has_string_index, trace_len, trace_hash) = {
+                let (
+                    cache_identity,
+                    gum_extra,
+                    total_lines,
+                    has_string_index,
+                    trace_len,
+                    trace_hash,
+                ) = {
                     let mut state = handle
                         .state
                         .write()
@@ -413,7 +420,7 @@ impl super::TraceEngine {
                     };
 
                     (
-                        state.file_path.clone(),
+                        state.cache_identity.clone(),
                         gum_extra,
                         total_lines,
                         has_string_index,
@@ -425,14 +432,20 @@ impl super::TraceEngine {
 
                 // 4. 同步写缓存
                 eprintln!("[index] writing cache files...");
-                cache::save_sections_raw(&fp, trace_len, &trace_hash, ".p2.cache", &p2_bytes);
-                cache::save_sections_raw(&fp, trace_len, &trace_hash, ".scan.cache", &scan_bytes);
-                cache::save_sections_raw(&fp, trace_len, &trace_hash, ".lidx.cache", &lidx_bytes);
+                cache::save_sections_raw(&cache_identity, trace_len, &trace_hash, ".p2.cache", &p2_bytes);
+                cache::save_sections_raw(&cache_identity, trace_len, &trace_hash, ".scan.cache", &scan_bytes);
+                cache::save_sections_raw(
+                    &cache_identity,
+                    trace_len,
+                    &trace_hash,
+                    ".lidx.cache",
+                    &lidx_bytes,
+                );
                 if let Some(ref si_b) = si_bytes {
-                    cache::save_bincode_raw(&fp, trace_len, &trace_hash, ".strings", si_b);
+                    cache::save_bincode_raw(&cache_identity, trace_len, &trace_hash, ".strings", si_b);
                 }
                 if let Some((ref anns, ref seqs)) = gum_extra {
-                    cache::save_gumtrace_extra(&fp, trace_len, &trace_hash, anns, seqs);
+                    cache::save_gumtrace_extra(&cache_identity, trace_len, &trace_hash, anns, seqs);
                 }
                 eprintln!("[index] cache save complete");
 

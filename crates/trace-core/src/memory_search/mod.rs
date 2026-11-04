@@ -63,6 +63,10 @@ pub(crate) const FINGERPRINT_MAGIC: &[u8; 8] = b"TMSFPR01";
 #[cfg(test)]
 pub(crate) static SEARCH_SCAN_COUNT: std::sync::atomic::AtomicUsize =
     std::sync::atomic::AtomicUsize::new(0);
+/// 粗筛探针：只统计真正进入逐行解析器的行。无内存标记的行不应计入。
+#[cfg(test)]
+pub(crate) static MEMORY_LINE_PARSE_COUNT: std::sync::atomic::AtomicUsize =
+    std::sync::atomic::AtomicUsize::new(0);
 #[cfg(test)]
 pub(crate) static TRACE_HASH_COUNT: std::sync::atomic::AtomicUsize =
     std::sync::atomic::AtomicUsize::new(0);

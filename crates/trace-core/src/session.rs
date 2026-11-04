@@ -31,7 +31,11 @@ pub struct SliceOrigin {
 #[allow(dead_code)]
 pub struct SessionState {
     pub mmap: Arc<Mmap>,
+    /// 展示/诊断路径。fd 会话下是 "inherited-fd:<n>"，不是可 reopen 的路径。
     pub file_path: String,
+    /// 持久化缓存与索引的键。路径会话等于 `file_path`；fd 会话是内容指纹，
+    /// 因为 fd 号每次调用都会变。
+    pub cache_identity: String,
     pub total_lines: u32,
     pub file_size: u64,
     /// Fingerprint established when the session opens the trace.  Memory

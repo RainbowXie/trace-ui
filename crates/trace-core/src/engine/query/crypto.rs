@@ -141,7 +141,7 @@ impl crate::engine::TraceEngine {
             }
             // 检查磁盘缓存
             if let Some(cached) = crate::cache::load_crypto_cache(
-                &state.file_path,
+                &state.cache_identity,
                 state.mmap.len() as u64,
                 &state.trace_hash,
             ) {
@@ -244,7 +244,7 @@ impl crate::engine::TraceEngine {
                 .write()
                 .map_err(|e| TraceError::Internal(e.to_string()))?;
             crate::cache::save_crypto_cache(
-                &state.file_path,
+                &state.cache_identity,
                 state.mmap.len() as u64,
                 &state.trace_hash,
                 &result,
@@ -266,7 +266,7 @@ impl crate::engine::TraceEngine {
             return Ok(state.crypto_cache.clone());
         }
         if let Some(cached) = crate::cache::load_crypto_cache(
-            &state.file_path,
+            &state.cache_identity,
             state.mmap.len() as u64,
             &state.trace_hash,
         ) {

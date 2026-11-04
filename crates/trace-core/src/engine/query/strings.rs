@@ -207,7 +207,7 @@ impl crate::engine::TraceEngine {
                     .write()
                     .map_err(|e| TraceError::Internal(e.to_string()))?;
                 crate::cache::save_string_cache(
-                    &state.file_path,
+                    &state.cache_identity,
                     state.mmap.len() as u64,
                     &state.trace_hash,
                     &string_index,

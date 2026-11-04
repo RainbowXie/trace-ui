@@ -5,6 +5,7 @@ use trace_core::control_flow::{
     render_dot,
     types::{CfgPage, CfgView},
 };
+use trace_core::engine::INHERITED_FD_SESSION_PREFIX;
 use trace_core::TraceEngine;
 
 const MAX_CONTROL_BYTES: usize = 1024 * 1024;
@@ -149,7 +150,11 @@ fn execute() -> anyhow::Result<()> {
     validate_function(&function)?;
     let (blocks, occurrences) = pages(&format, blocks, occurrences)?;
     let engine = TraceEngine::new();
-    let session_id = engine.create_control_flow_session_from_file(trace, &format!("inherited-fd:{fd}"))?;
+    // 标签只用于诊断：内容指纹才是缓存键，fd 号变化不得触发重扫。
+    let session_id = engine.create_control_flow_session_from_file(
+        trace,
+        &format!("{INHERITED_FD_SESSION_PREFIX}{fd}"),
+    )?;
     engine.build_disk_control_flow_index(&session_id, false, trace_core::control_flow::disk::BuildBudget::default())?;
     let view = if let Some((call, entry)) = anchors {
         engine.get_activation_cfg(
