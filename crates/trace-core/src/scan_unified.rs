@@ -24,6 +24,53 @@ pub type ProgressFn = Box<dyn Fn(usize, usize) + Send + Sync>;
 
 const CHECKPOINT_INTERVAL: u32 = 1000;
 
+/// 行级粗筛：两个格式的行解析器第一道门都是行首结构签名
+/// （`unidbg_instruction_prefix` / `gumtrace_instruction_prefix`，见
+/// trace-parser 的 `format_detect`），签名不匹配的行 `parse_line` /
+/// `parse_line_gumtrace` 必然返回 `None`。所以跳过这些行的完整解析不会改变
+/// 任何索引字段（deps 行、reg/mem 状态、调用树、检查点都按“解析失败”处理）。
+/// 空行、日志残留、形似行因此不再付出操作数/注解扫描的成本。
+pub(crate) fn line_can_parse(line: &[u8], format: types::TraceFormat) -> bool {
+    #[cfg(test)]
+    if line_parse_probe::skip_prefilter() {
+        return true;
+    }
+    trace_parser::gumtrace::line_matches_format_signature(line, format)
+}
+
+/// 只编进测试的探针：证明粗筛跳过的行确实没进解析器，并提供“关闭粗筛”
+/// 的差分开关，用来和逐行解析的索引逐字节对照。
+/// 状态按线程保存：并行跑的其他测试既不污染探针读数，也不会被差分开关影响。
+#[cfg(test)]
+pub(crate) mod line_parse_probe {
+    use std::cell::Cell;
+
+    thread_local! {
+        static PARSED_LINES: Cell<u64> = const { Cell::new(0) };
+        static SKIP_PREFILTER: Cell<bool> = const { Cell::new(false) };
+    }
+
+    pub(crate) fn record() {
+        PARSED_LINES.with(|count| count.set(count.get() + 1));
+    }
+
+    pub(crate) fn reset() {
+        PARSED_LINES.with(|count| count.set(0));
+    }
+
+    pub(crate) fn count() -> u64 {
+        PARSED_LINES.with(Cell::get)
+    }
+
+    pub(crate) fn skip_prefilter() -> bool {
+        SKIP_PREFILTER.with(Cell::get)
+    }
+
+    pub(crate) fn set_skip_prefilter(skip: bool) {
+        SKIP_PREFILTER.with(|value| value.set(skip));
+    }
+}
+
 /// Phase 2 索引数据（CallTree + MemAccessIndex + RegCheckpoints + StringIndex + ActivationTree）
 pub struct Phase2State {
     pub call_tree: crate::query::call_tree::CallTree,
@@ -262,10 +309,17 @@ pub fn scan_unified(
             }
         }
 
-        // Parse; unparseable lines get an empty dep set
-        let parsed = match format {
-            types::TraceFormat::Unidbg => parser::parse_line(raw_line),
-            types::TraceFormat::Gumtrace => gumtrace_parser::parse_line_gumtrace(raw_line),
+        // Parse; unparseable lines get an empty dep set. 签名不匹配的行两个
+        // 解析器都必然拒绝，跳过它们不改变任何索引字段（见 line_can_parse）。
+        let parsed = if line_can_parse(raw_line.as_bytes(), format) {
+            #[cfg(test)]
+            line_parse_probe::record();
+            match format {
+                types::TraceFormat::Unidbg => parser::parse_line(raw_line),
+                types::TraceFormat::Gumtrace => gumtrace_parser::parse_line_gumtrace(raw_line),
+            }
+        } else {
+            None
         };
         let Some(line) = parsed else {
             state.line_count += 1;
@@ -746,7 +800,135 @@ pub fn scan_unified(
 
 #[cfg(test)]
 mod tests {
-    use super::scan_unified;
+    use super::{line_can_parse, line_parse_probe, scan_unified, ScanResult};
+    use trace_parser::{gumtrace as gumtrace_parser, parser, types};
+
+    /// 混合 gumtrace：指令行（含/不含内存标记）、被行首结构签名拒绝的形似行、
+    /// 以及解析前就被 special line 拦下的注解行。
+    const GUMTRACE_MIXED: &str = concat!(
+        "[App] 0x400000!0x0 bl #0x401000\n",
+        "[App] 0x401004!0x1004 ldr x9, [x0]; x0=0x6000 mem_r=0x6000 -> x9=0x1\n",
+        "[x] ! \"mov x0, x1\"\n",
+        "[App] 0x401008!0x1008 add x9, x9, #2; x9=0x1 -> x9=0x3\n",
+        "[mod] zz!0x2 nop\n",
+        "[App] 0x40100c!0x100c str x9, [x3]; x9=0x3 x3=0x7000 mem_w=0x7000\n",
+        "ret: 0x1\n",
+    );
+
+    /// 混合 unidbg：unidbg 没有 special line 拦截，无签名的空行/日志行都会
+    /// 一直走到解析点。
+    const UNIDBG_MIXED: &str = concat!(
+        "[00:00:00 001][lib.so 0x100] [d2800000] 0x40000100: \"mov x8, #5\" => x8=0x5\n",
+        "[00:00:00 002][lib.so 0x104] [f9400000] 0x40000104: \"ldr x0, [sp, #0x10]\" ; mem[READ] abs=0xbffff010 sp=0xbffff000 => x0=0x2a\n",
+        "ordinary application log text without a trace signature\n",
+        "\n",
+        "[00:00:00 003][lib.so 0x108] [8b000000] 0x40000108: \"add x0, x8, x0\" x8=0x5 x0=0x2a => x0=0x2f\n",
+        "[00:00:00 004][lib.so 0x10c] [f9000be8] 0x4000010c: \"str x0, [sp, #0x10]\" ; mem[WRITE] abs=0xbffff010 x0=0x2f sp=0xbffff000 => x0=0x2f\n",
+    );
+
+    /// 用 build.rs 写缓存同一套 archive 序列化产出 .p2/.scan/.lidx 字节：
+    /// 粗筛的等价性必须比到这些字节上，而不是只比几个计数。
+    fn index_bytes(result: &mut ScanResult) -> Vec<u8> {
+        use crate::flat::{archives, convert};
+
+        // build.rs 写缓存前先 compact，这里保持一致。
+        result.scan_state.compact();
+        let phase2 = &result.phase2;
+        let phase2_archive = archives::Phase2Archive {
+            mem_accesses: convert::mem_access_to_flat(&phase2.mem_accesses),
+            reg_checkpoints: convert::reg_checkpoints_to_flat(&phase2.reg_checkpoints),
+            call_tree: phase2.call_tree.clone(),
+            activation_tree: phase2.activation_tree.clone(),
+        };
+        let scan = &result.scan_state;
+        let scan_archive = archives::ScanArchive {
+            deps: convert::deps_to_flat(&scan.deps),
+            mem_last_def: convert::mem_last_def_to_flat(&scan.mem_last_def),
+            pair_split: convert::pair_split_to_flat(&scan.pair_split),
+            init_mem_loads: convert::bitvec_to_flat(&scan.init_mem_loads),
+            reg_last_def_inner: scan.reg_last_def.inner().to_vec(),
+            line_count: scan.line_count,
+            parsed_count: scan.parsed_count,
+            mem_op_count: scan.mem_op_count,
+        };
+        let lidx_archive = convert::line_index_to_archive(&result.line_index);
+
+        let mut bytes = phase2_archive.to_sections();
+        bytes.extend(scan_archive.to_sections());
+        bytes.extend(lidx_archive.to_sections());
+        bytes.extend(bincode::serialize(&phase2.string_index).unwrap());
+        bytes.extend(bincode::serialize(&scan.unknown_mnemonics).unwrap());
+        bytes.extend(bincode::serialize(&scan.resolved_targets).unwrap());
+        bytes.extend(bincode::serialize(&result.call_annotations).unwrap());
+        bytes.extend(bincode::serialize(&result.consumed_seqs).unwrap());
+        bytes
+    }
+
+    #[test]
+    fn signature_mismatched_lines_are_unparseable_in_both_formats() {
+        // 粗筛等价的前提：签名不匹配 ⇒ 两种解析器都返回 None。
+        for line in [
+            "[x] ! \"mov x0, x1\"",
+            "[mod] zz!0x2 nop",
+            "ordinary application log text without a trace signature",
+            "",
+        ] {
+            assert!(!line_can_parse(
+                line.as_bytes(),
+                types::TraceFormat::Gumtrace
+            ));
+            assert!(gumtrace_parser::parse_line_gumtrace(line).is_none());
+            assert!(!line_can_parse(line.as_bytes(), types::TraceFormat::Unidbg));
+            assert!(parser::parse_line(line).is_none());
+        }
+    }
+
+    #[test]
+    fn signature_mismatched_lines_never_enter_the_parser() {
+        for (trace, format, parsed_lines) in [
+            (GUMTRACE_MIXED, types::TraceFormat::Gumtrace, 4u64),
+            (UNIDBG_MIXED, types::TraceFormat::Unidbg, 4u64),
+        ] {
+            line_parse_probe::reset();
+            let result = scan_unified(trace.as_bytes(), false, false, true, None).unwrap();
+
+            assert_eq!(result.format, format);
+            assert_eq!(u64::from(result.scan_state.parsed_count), parsed_lines);
+            assert_eq!(
+                line_parse_probe::count(),
+                parsed_lines,
+                "只有带行首结构签名的行才允许进入解析器（format={:?}）",
+                format
+            );
+            assert!(
+                u64::from(result.scan_state.line_count) > parsed_lines,
+                "样本必须同时含无签名行（format={:?}）",
+                format
+            );
+        }
+    }
+
+    #[test]
+    fn coarse_filter_index_is_byte_identical_to_full_parse() {
+        for (trace, format) in [
+            (GUMTRACE_MIXED, types::TraceFormat::Gumtrace),
+            (UNIDBG_MIXED, types::TraceFormat::Unidbg),
+        ] {
+            let mut coarse = scan_unified(trace.as_bytes(), false, false, false, None).unwrap();
+            line_parse_probe::set_skip_prefilter(true);
+            let mut full = scan_unified(trace.as_bytes(), false, false, false, None).unwrap();
+            line_parse_probe::set_skip_prefilter(false);
+
+            assert_eq!(coarse.format, format);
+            let coarse_bytes = index_bytes(&mut coarse);
+            assert_eq!(
+                coarse_bytes,
+                index_bytes(&mut full),
+                "粗筛索引必须与逐行解析逐字节一致（format={:?}）",
+                format
+            );
+        }
+    }
 
     #[test]
     fn gumtrace_external_return_redefines_x0_for_dependency_tracking() {

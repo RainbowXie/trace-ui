@@ -316,3 +316,105 @@ fn test_scan_chunk_empty_trace() {
     assert_eq!(result.end_line, 0);
     assert!(result.deps.is_empty());
 }
+
+/// 混合 gumtrace：指令行、被行首结构签名拒绝的形似行、special line。
+const GUMTRACE_MIXED: &str = concat!(
+    "[App] 0x400000!0x0 bl #0x401000\n",
+    "[App] 0x401004!0x1004 ldr x9, [x0]; x0=0x6000 mem_r=0x6000 -> x9=0x1\n",
+    "[x] ! \"mov x0, x1\"\n",
+    "[App] 0x401008!0x1008 add x9, x9, #2; x9=0x1 -> x9=0x3\n",
+    "[mod] zz!0x2 nop\n",
+    "[App] 0x40100c!0x100c str x9, [x3]; x9=0x3 x3=0x7000 mem_w=0x7000\n",
+    "ret: 0x1\n",
+);
+
+fn scan_mixed_gumtrace() -> ChunkResult {
+    let data = GUMTRACE_MIXED.as_bytes();
+    scan_chunk(
+        data,
+        ScanChunkConfig {
+            start_byte: 0,
+            end_byte: data.len(),
+            start_line: 0,
+            format: TraceFormat::Gumtrace,
+            data_only: false,
+            no_prune: false,
+            skip_strings: false,
+            progress_cb: None,
+        },
+    )
+}
+
+/// chunk 里能落进缓存的字段：粗筛只允许改变“是否调用解析器”，不允许改变
+/// 任何一个产出字节。事件日志未派生 PartialEq，只比长度。
+fn chunk_digest(result: &ChunkResult) -> Vec<u8> {
+    let mut bytes = Vec::new();
+    for line in 0..(result.end_line - result.start_line) as usize {
+        for dep in result.deps.row(line) {
+            bytes.extend(dep.to_le_bytes());
+        }
+        bytes.push(0xff);
+    }
+    bytes.extend(result.init_mem_loads.iter().by_vals().map(u8::from));
+    bytes.extend(result.needs_control_dep.iter().by_vals().map(u8::from));
+    bytes.extend(bincode::serialize(&result.mem_access_index).unwrap());
+    bytes.extend(bincode::serialize(&result.reg_checkpoints).unwrap());
+    bytes.extend(bincode::serialize(&result.string_index).unwrap());
+    bytes.extend(bincode::serialize(&result.pair_split).unwrap());
+    bytes.extend(bincode::serialize(&result.string_accesses).unwrap());
+    bytes.extend(bincode::serialize(&result.consumed_seqs).unwrap());
+    bytes.extend(crate::flat::convert::line_index_to_archive(&result.line_index).to_sections());
+    for count in [
+        result.unresolved_loads.len(),
+        result.partial_unresolved_loads.len(),
+        result.unresolved_pair_loads.len(),
+        result.partial_unresolved_pair_loads.len(),
+        result.unresolved_reg_uses.len(),
+        result.call_tree_events.len(),
+        result.gumtrace_annot_events.len(),
+        result.activation_events.len(),
+    ] {
+        bytes.extend((count as u64).to_le_bytes());
+    }
+    for count in [
+        result.boundary.final_line_count,
+        result.boundary.final_parsed_count,
+        result.boundary.final_mem_op_count,
+    ] {
+        bytes.extend(count.to_le_bytes());
+    }
+    bytes.extend(
+        result
+            .boundary
+            .final_reg_last_def
+            .inner()
+            .iter()
+            .flat_map(|line| line.to_le_bytes()),
+    );
+    bytes.extend(format!("{:?}", result.boundary.final_last_cond_branch).into_bytes());
+    bytes
+}
+
+#[test]
+fn test_scan_chunk_skips_signature_mismatched_lines() {
+    line_parse_probe::reset();
+    let result = scan_mixed_gumtrace();
+
+    assert_eq!(
+        line_parse_probe::count(),
+        4,
+        "只有带行首结构签名的行才允许进入解析器"
+    );
+    assert_eq!(result.boundary.final_parsed_count, 4);
+    assert_eq!(result.end_line, 7);
+}
+
+#[test]
+fn test_scan_chunk_coarse_filter_matches_full_parse() {
+    let coarse = scan_mixed_gumtrace();
+    line_parse_probe::set_skip_prefilter(true);
+    let full = scan_mixed_gumtrace();
+    line_parse_probe::set_skip_prefilter(false);
+
+    assert_eq!(chunk_digest(&coarse), chunk_digest(&full));
+}

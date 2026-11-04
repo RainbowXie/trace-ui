@@ -789,3 +789,39 @@ fn test_parallel_no_prune_mode() {
         assert_scan_results_match(&baseline, &parallel, &format!("no_prune chunks={}", chunks));
     }
 }
+
+#[test]
+fn test_parallel_mixed_signature_garbage_matches_unified() {
+    // 无签名行（日志残留、空行）与指令行交错：chunk 路径的粗筛同样只能把
+    // 这些行按“解析失败”计入，合并结果必须与单线程扫描逐字段一致。
+    let mut lines = Vec::new();
+    for seq in 0..40u64 {
+        lines.push(unidbg_line(
+            0x40000000 + seq * 4,
+            &format!("mov x0, #{}", seq),
+            "",
+            &format!("x0=0x{:x}", seq),
+            "",
+        ));
+        if seq % 3 == 0 {
+            lines.push("ordinary application log text without a trace signature".to_string());
+        }
+        if seq % 5 == 0 {
+            lines.push(String::new());
+        }
+    }
+    let trace = lines.join("\n") + "\n";
+    let data = trace.as_bytes();
+
+    let baseline = crate::scan_unified::scan_unified(data, false, false, true, None).unwrap();
+    assert!(baseline.scan_state.parsed_count > 0);
+
+    for chunks in [2, 3, 4] {
+        let parallel = scan_parallel_force(data, false, false, true, chunks).unwrap();
+        assert_scan_results_match(
+            &baseline,
+            &parallel,
+            &format!("mixed_signature_garbage chunks={}", chunks),
+        );
+    }
+}

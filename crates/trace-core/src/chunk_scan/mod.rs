@@ -19,6 +19,9 @@ use crate::query::mem_access::{MemAccessIndex, MemAccessRecord, MemRw};
 use crate::query::registers::RegCheckpoints;
 use crate::query::strings::{StringBuilder, StringRw};
 use crate::scan_unified::bytes_to_hex_escaped;
+use crate::scan_unified::line_can_parse;
+#[cfg(test)]
+use crate::scan_unified::line_parse_probe;
 use crate::scanner::{
     mem_access_width, push_unique, CompactDeps, MemLastDef, PairSplitDeps, RegLastDef,
     CONTROL_DEP_BIT, PAIR_HALF2_BIT, PAIR_SHARED_BIT,
@@ -248,10 +251,17 @@ pub fn scan_chunk(data: &[u8], config: ScanChunkConfig) -> ChunkResult {
         deps.start_row();
         init_mem_loads.push(false);
 
-        // Parse line
-        let parsed = match format {
-            TraceFormat::Unidbg => parser::parse_line(raw_line),
-            TraceFormat::Gumtrace => gumtrace_parser::parse_line_gumtrace(raw_line),
+        // Parse line。签名不匹配的行两个解析器都必然拒绝，跳过它们不改变任何
+        // 索引字段（见 line_can_parse）：大文件路径也不能为这些行付解析成本。
+        let parsed = if line_can_parse(raw_line.as_bytes(), format) {
+            #[cfg(test)]
+            line_parse_probe::record();
+            match format {
+                TraceFormat::Unidbg => parser::parse_line(raw_line),
+                TraceFormat::Gumtrace => gumtrace_parser::parse_line_gumtrace(raw_line),
+            }
+        } else {
+            None
         };
         let Some(line) = parsed else {
             needs_control_dep.push(false);
