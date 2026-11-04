@@ -30,6 +30,8 @@ pub struct CallerReturnUseDto {
     pub size: u32,
     pub rw: String,
     pub address_operand: String,
+    /// 返回值在这次访存中的角色：`address` 表示它是被访问的地址，`data` 表示它本身被写入。
+    pub value_role: String,
     pub definition_steps: Vec<AddressDefinitionStepDto>,
     pub integer_delta: i64,
     /// This chain has no intervening source/ownership gap; overall coverage may be incomplete.

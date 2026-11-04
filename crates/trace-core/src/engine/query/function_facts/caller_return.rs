@@ -267,6 +267,10 @@ impl crate::engine::TraceEngine {
         let mut steps = 0usize;
         let mut access_count = 0usize;
         let mut scanned = 0u32;
+        // 返回寄存器在 caller 窗口内被重新定义后，其后的写入不能继承原返回值来源。
+        let mut anchor_redefined = false;
+        // 已接受的“返回值直接写入”范围；其后的重叠访存会让该证明不再完整。
+        let mut stored: Option<(u64, u64)> = None;
         for seq in root.resume_seq..=last {
             let line = raw(seq)?;
             bytes = bytes
@@ -358,61 +362,178 @@ impl crate::engine::TraceEngine {
                         "memory_parse",
                         "unknown width, conflicting annotation or unsuccessful exclusive effect",
                     );
-                } else if let Some((label, base, off)) = address_operand(operand) {
-                    if let Some(reg) = reg64(base) {
-                        if let Some(c) = chains.get(&reg) {
-                            if p.base_reg == Some(reg)
-                                && value(&p, reg, false) == Some(c.value)
-                                && c.value.checked_add_signed(off) == Some(address)
-                                && c.delta.checked_add(off).is_some()
-                            {
-                                let count = c.steps.len() + 1;
-                                if count > MAX_CHAIN
-                                    || steps.checked_add(count).is_none_or(|n| n > MAX_STEPS)
+                } else {
+                    let size = size.expect("valid access width");
+                    // 已接受的返回值写入被后续 store 覆盖或被 load 读回时，就不再是“最终输出”。
+                    if let Some((start, end)) = stored {
+                        if address < end && start < address + u64::from(size) {
+                            gap(
+                                &mut gaps,
+                                seq,
+                                if write {
+                                    "data_store_overwritten"
+                                } else {
+                                    "data_store_reload"
+                                },
+                                if write {
+                                    "a later store covers the returned value's final bytes"
+                                } else {
+                                    "bytes written by the returned value are read back; memory propagation is not covered"
+                                },
+                            );
+                        }
+                    }
+                    let operand_address = address_operand(operand);
+                    let mut address_use = false;
+                    if let Some((label, base, off)) = operand_address {
+                        if let Some(reg) = reg64(base) {
+                            if let Some(c) = chains.get(&reg) {
+                                if p.base_reg == Some(reg)
+                                    && value(&p, reg, false) == Some(c.value)
+                                    && c.value.checked_add_signed(off) == Some(address)
+                                    && c.delta.checked_add(off).is_some()
                                 {
-                                    return Err(invalid("return step capacity exceeded"));
+                                    let count = c.steps.len() + 1;
+                                    if count > MAX_CHAIN
+                                        || steps.checked_add(count).is_none_or(|n| n > MAX_STEPS)
+                                    {
+                                        return Err(invalid("return step capacity exceeded"));
+                                    }
+                                    steps += count;
+                                    let mut definition_steps = c.steps.clone();
+                                    definition_steps.push(AddressDefinitionStepDto {
+                                        seq,
+                                        operation: "address".into(),
+                                        source_operand: base.into(),
+                                        target_operand: label.into(),
+                                        pre_value: hex(c.value),
+                                        post_value: hex(address),
+                                    });
+                                    uses.push(CallerReturnUseDto {
+                                        register: "x0".into(),
+                                        value: anchors[0].value.clone(),
+                                        use_seq: seq,
+                                        address: hex(address),
+                                        size,
+                                        rw: if write { "write" } else { "read" }.into(),
+                                        address_operand: label.into(),
+                                        value_role: "address".into(),
+                                        definition_steps,
+                                        integer_delta: c.delta.checked_add(off).unwrap(),
+                                        chain_complete: true,
+                                    });
+                                    address_use = true;
+                                } else {
+                                    chains.clear();
+                                    gap(
+                                        &mut gaps,
+                                        seq,
+                                        "address_mismatch",
+                                        "return chain disagrees with real address operand",
+                                    );
                                 }
-                                steps += count;
-                                let mut definition_steps = c.steps.clone();
-                                definition_steps.push(AddressDefinitionStepDto {
-                                    seq,
-                                    operation: "address".into(),
-                                    source_operand: base.into(),
-                                    target_operand: label.into(),
-                                    pre_value: hex(c.value),
-                                    post_value: hex(address),
-                                });
-                                uses.push(CallerReturnUseDto {
-                                    register: "x0".into(),
-                                    value: anchors[0].value.clone(),
-                                    use_seq: seq,
-                                    address: hex(address),
-                                    size: size.unwrap(),
-                                    rw: if write { "write" } else { "read" }.into(),
-                                    address_operand: label.into(),
-                                    definition_steps,
-                                    integer_delta: c.delta.checked_add(off).unwrap(),
-                                    chain_complete: true,
-                                });
-                            } else {
-                                chains.clear();
+                            }
+                        }
+                    } else {
+                        chains.clear();
+                        gap(
+                            &mut gaps,
+                            seq,
+                            "unsupported_address",
+                            "indexed/writeback address not covered",
+                        );
+                    }
+                    if write && !address_use {
+                        // 返回值作为数据写入：只有“仍在原返回寄存器、地址已证明、宽度完整”的
+                        // 唯一写入才能作为最终输出；其它写入内存的返回值仍是显式缺口。
+                        let mut data = operand
+                            .split('[')
+                            .next()
+                            .unwrap_or("")
+                            .split(',')
+                            .map(str::trim)
+                            .filter(|part| !part.is_empty());
+                        let data_register = data.next().and_then(trace_parser::types::parse_reg);
+                        let single_data = data.next().is_none();
+                        let mentions_anchor = single_data && data_register == Some(RegId(0));
+                        let tracked = data_register.is_some_and(|reg| chains.contains_key(&reg));
+                        let proven_address = operand_address.and_then(|(label, base, off)| {
+                            let reg = reg64(base)?;
+                            (p.base_reg == Some(reg)
+                                && value(&p, reg, false)
+                                    .is_none_or(|v| v.checked_add_signed(off) == Some(address)))
+                            .then_some(label)
+                        });
+                        let address_disagrees = operand_address.is_some_and(|(_, base, off)| {
+                            reg64(base).is_some_and(|reg| {
+                                p.base_reg == Some(reg)
+                                    && value(&p, reg, false)
+                                        .is_some_and(|v| v.checked_add_signed(off) != Some(address))
+                            })
+                        });
+                        let direct = mentions_anchor
+                            && !anchor_redefined
+                            && stored.is_none()
+                            && size == 8
+                            && chains
+                                .get(&RegId(0))
+                                .is_some_and(|chain| chain.steps.is_empty() && chain.delta == 0);
+                        if direct && proven_address.is_some() {
+                            let chain = chains
+                                .get(&RegId(0))
+                                .expect("direct store keeps the return chain");
+                            stored = Some((address, address + u64::from(size)));
+                            uses.push(CallerReturnUseDto {
+                                register: "x0".into(),
+                                value: hex(chain.value),
+                                use_seq: seq,
+                                address: hex(address),
+                                size,
+                                rw: "write".into(),
+                                address_operand: proven_address.unwrap_or_default().into(),
+                                value_role: "data".into(),
+                                definition_steps: Vec::new(),
+                                integer_delta: 0,
+                                chain_complete: true,
+                            });
+                        } else if direct {
+                            chains.clear();
+                            gap(
+                                &mut gaps,
+                                seq,
+                                if address_disagrees {
+                                    "address_mismatch"
+                                } else {
+                                    "unsupported_address"
+                                },
+                                "returned value store address is not proven",
+                            );
+                        } else if mentions_anchor || tracked {
+                            chains.clear();
+                            if mentions_anchor && address_disagrees {
                                 gap(
                                     &mut gaps,
                                     seq,
                                     "address_mismatch",
                                     "return chain disagrees with real address operand",
                                 );
+                            } else if mentions_anchor && stored.is_some() {
+                                gap(
+                                    &mut gaps,
+                                    seq,
+                                    "duplicate_data_store",
+                                    "the returned value is written more than once",
+                                );
+                            } else {
+                                gap(
+                                    &mut gaps,
+                                    seq,
+                                    "store_data_escape",
+                                    "returned value stored as data without a direct unmodified 8 byte final write",
+                                );
                             }
                         }
                     }
-                } else {
-                    chains.clear();
-                    gap(
-                        &mut gaps,
-                        seq,
-                        "unsupported_address",
-                        "indexed/writeback address not covered",
-                    );
                 }
             } else if mem.is_some()
                 || m.starts_with("ld")
@@ -483,31 +604,13 @@ impl crate::engine::TraceEngine {
                     }
                 }
             }
-            // All real DEFs, including W aliases, kill old identities. Other reads of
-            // a tracked value are not covered negative evidence (store-data included).
+            // 已接受的直接写入已经固定了输出字节；其后对返回寄存器的普通读取或再定义
+            // 不会改变这些字节，因此不再当作覆盖证据（内存读回和第二次写入仍分别拒绝）。
             let (_, read_regs) = trace_parser::def_use::determine_def_use(class, &p);
-            if marker.is_some_and(|(write, _)| write) {
-                // Data operands are separate from the bracketed address operand.
-                // Report their use, but never certify address use by equal numbers.
-                let data = operand.split('[').next().unwrap_or("");
-                if data
-                    .split(',')
-                    .map(str::trim)
-                    .filter_map(trace_parser::types::parse_reg)
-                    .any(|r| chains.contains_key(&r))
-                {
-                    gap(
-                        &mut gaps,
-                        seq,
-                        "store_data_escape",
-                        "returned value stored as data; later memory propagation is not covered",
-                    );
-                    chains.clear();
-                }
-            }
             if next.is_none()
                 && marker.is_none()
                 && m != "ret"
+                && stored.is_none()
                 && read_regs.iter().any(|r| chains.contains_key(r))
             {
                 gap(
@@ -519,6 +622,10 @@ impl crate::engine::TraceEngine {
                 chains.clear();
             }
             for reg in defs {
+                // RET 的 x0 DEF 是合成来源，不算 caller 重定义。
+                if reg == RegId(0) && m != "ret" {
+                    anchor_redefined = true;
+                }
                 chains.remove(&reg);
             }
             if let Some((r, c)) = next {
