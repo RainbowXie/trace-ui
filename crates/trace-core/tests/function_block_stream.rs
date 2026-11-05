@@ -157,3 +157,31 @@ fn selector_mismatch_never_visits_sink() {
         assert!(matches!(result, Err(TraceError::InvalidArgument(_))));
     }
 }
+
+/// 窗口第一条指令本身就是子调用时，子 activation 仍被严格排除：嵌套区间
+/// 的下界是 `call_seq >= entry_seq`，用 `>` 会把子窗口当成 owned 指令。
+#[test]
+fn nested_call_on_the_entry_instruction_stays_excluded() {
+    let trace = "[App] 0x100!0x100 bl #0x200\n\
+[App] 0x200!0x200 bl #0x300\n\
+[App] 0x300!0x300 nop\n\
+[App] 0x304!0x304 ret\n\
+[App] 0x204!0x204 ret\n\
+[App] 0x104!0x104 nop\n";
+    let f = Fixture::with_trace(trace);
+    let mut blocks = Vec::new();
+    f.engine
+        .visit_function_executed_blocks(
+            &f.sid,
+            0,
+            1,
+            "App+0x200",
+            &AtomicBool::new(false),
+            |site, seq| {
+                blocks.push((site.to_owned(), seq));
+                Ok(())
+            },
+        )
+        .unwrap();
+    assert_eq!(blocks, vec![("App+0x200".into(), 1), ("App+0x204".into(), 4)]);
+}

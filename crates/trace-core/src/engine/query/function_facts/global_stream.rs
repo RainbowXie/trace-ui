@@ -11,38 +11,9 @@ pub(super) fn validate_mappings(
     modules: &[String],
     cancel: &AtomicBool,
 ) -> Result<()> {
-    let index = state.line_index_view().ok_or(TraceError::IndexNotReady)?;
-    for module in modules {
-        let mut base = None;
-        for seq in 0..state.total_lines {
-            if cancel.load(std::sync::atomic::Ordering::Relaxed) {
-                return Err(TraceError::Cancelled);
-            }
-            let Some(raw) = index.get_line(&state.mmap, seq) else {
-                continue;
-            };
-            super::block_stream::check_raw(raw)?;
-            if let Some((name, runtime, offset)) =
-                std::str::from_utf8(raw).ok().and_then(stable_runtime_site)
-            {
-                if &name != module {
-                    continue;
-                }
-                let next = runtime.checked_sub(offset).ok_or_else(|| {
-                    TraceError::InvalidArgument(format!(
-                        "module {name} runtime address is below its stable offset"
-                    ))
-                })?;
-                if base.is_some_and(|old| old != next) {
-                    return Err(TraceError::InvalidArgument(format!(
-                        "module {name} has inconsistent runtime bases"
-                    )));
-                }
-                base = Some(next);
-            }
-        }
-    }
-    Ok(())
+    // 模块基址的全表扫描与旁路缓存属于 global_map 的模块索引：这里只保留
+    // 查询侧入口，避免两处各扫一遍整份 trace。
+    super::global_map::validate_mappings(state, modules, cancel)
 }
 
 fn immediate(s: &str) -> Option<u64> {
@@ -177,26 +148,9 @@ pub(super) fn identity(
     let Some(module_base) = runtime.checked_sub(offset) else {
         return Ok(None);
     };
-    // Check the whole trace's mapping agreement without collecting a module map.
-    for seq in 0..state.total_lines {
-        if cancel.load(std::sync::atomic::Ordering::Relaxed) {
-            return Err(TraceError::Cancelled);
-        }
-        let Some(bytes) = index.get_line(&state.mmap, seq) else {
-            continue;
-        };
-        super::block_stream::check_raw(bytes)?;
-        if let Some((other, runtime, offset)) = std::str::from_utf8(bytes)
-            .ok()
-            .and_then(stable_runtime_site)
-        {
-            if other == module && runtime.checked_sub(offset) != Some(module_base) {
-                return Err(TraceError::InvalidArgument(format!(
-                    "module {module} has inconsistent runtime bases"
-                )));
-            }
-        }
-    }
+    // 该模块在整份 trace 内的基址一致性已由 validate_mappings 在入口处
+    // 整份验证过一次；这里不再为**每个**全局读写重扫全表（那是 10 余次
+    // 128.5 倍全表放大的来源）。
     let mut current_storage = [0u8; 4];
     let mut current_len = current.len();
     current_storage[..current_len].copy_from_slice(current.as_bytes());

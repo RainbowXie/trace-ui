@@ -68,6 +68,13 @@ pub(crate) fn stable_site(line: &str) -> Option<String> {
 
 /// 按稳定模块位置语法拼装身份；模块名或 offset 不合法时返回 None。
 pub(crate) fn stable_runtime_site(line: &str) -> Option<(String, u64, u64)> {
+    stable_runtime_parts(line).map(|(module, runtime, offset)| (module.to_owned(), runtime, offset))
+}
+
+/// 同 [`stable_runtime_site`]，但模块名借自输入行。整份 trace 单遍提取模块
+/// 基址时，逐行 `to_owned` 会产生与行数同量级的分配；借用的形式只在首次
+/// 出现的新模块上分配，且能让调用方用行切片直接查表。
+pub(crate) fn stable_runtime_parts(line: &str) -> Option<(&str, u64, u64)> {
     if let Some(bracket_end) = line.find("] 0x") {
         let rest = &line[bracket_end + 4..];
         if let Some(bang) = rest.find("!0x") {
@@ -82,18 +89,20 @@ pub(crate) fn stable_runtime_site(line: &str) -> Option<(String, u64, u64)> {
                 .find(|c: char| !c.is_ascii_hexdigit())
                 .unwrap_or(offset_hex.len());
             return Some((
-                module.to_owned(),
+                module,
                 u64::from_str_radix(runtime_hex, 16).ok()?,
                 u64::from_str_radix(&offset_hex[..offset_end], 16).ok()?,
             ));
         }
     }
-    let runtime_end = line.find(": \"").or_else(|| line.find(": \""))?;
+    let runtime_end = line.find(": \"")?;
     let runtime_start = line[..runtime_end].rfind("0x")? + 2;
     let runtime = u64::from_str_radix(&line[runtime_start..runtime_end], 16).ok()?;
     let before_runtime = &line[..runtime_start];
-    let fields = before_runtime.match_indices('[').collect::<Vec<_>>();
-    let module_start = fields.get(1)?.0;
+    // 模块名从第二个 '[' 开始（第一个是时间戳/字段前缀）。
+    let mut brackets = before_runtime.match_indices('[');
+    brackets.next()?;
+    let module_start = brackets.next()?.0;
     let module_end = line[module_start..].find(']')? + module_start;
     let module_info = &line[module_start + 1..module_end];
     let space = module_info.rfind(" 0x")?;
@@ -102,7 +111,7 @@ pub(crate) fn stable_runtime_site(line: &str) -> Option<(String, u64, u64)> {
         return None;
     }
     let offset = u64::from_str_radix(&module_info[space + 3..], 16).ok()?;
-    Some((module.to_owned(), runtime, offset))
+    Some((module, runtime, offset))
 }
 
 fn build_site(module: &str, offset_hex: &str) -> Option<String> {

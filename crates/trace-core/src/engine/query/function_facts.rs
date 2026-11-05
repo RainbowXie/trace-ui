@@ -21,6 +21,8 @@ mod replay;
 mod budget_tests;
 #[cfg(test)]
 mod bounded_tests;
+#[cfg(test)]
+mod global_map_tests;
 pub(crate) use budget::FACT_BUNDLE_LIMIT;
 pub use budget::{FactSourceReference, FactActivationSelector, FunctionFactContext, write_function_fact_projection};
 mod target_write_history;

@@ -74,7 +74,17 @@ impl TraceEngine {
     pub fn create_session_from_file(&self, file: std::fs::File, path: &str) -> Result<SessionInfo> {
         let metadata = file.metadata().map_err(TraceError::Io)?;
         let file_size = metadata.len();
+        // 签名基线必须在 mmap **之前**取：否则 mmap 与首次 fstat 之间的文件
+        // 增长会把旧内容的指纹绑到新长度上。签名一致时直接复用持久化指纹，
+        // 每个短生命周期 helper 子进程就不必重算整份 trace 的 SHA-256。
+        #[cfg(unix)]
+        let signature = crate::memory_search::fd_signature(&file)?;
         let mmap = unsafe { Mmap::map(&file) }.map_err(TraceError::Io)?;
+        #[cfg(unix)]
+        let trace_hash =
+            crate::memory_search::fd_trace_hash_verified(&file, &mmap, &signature, None)?;
+        // 非 Unix 没有 fstat 内容签名，只能每次完整哈希（即原行为）。
+        #[cfg(not(unix))]
         let trace_hash = crate::memory_search::compute_trace_content_hash(&mmap);
 
         #[cfg(unix)]

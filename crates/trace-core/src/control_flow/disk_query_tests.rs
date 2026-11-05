@@ -91,7 +91,8 @@ fn disk_sessions_cold_hot_force_pages_fd_identity_and_core_dot() {
     std::fs::remove_file(&target).unwrap();std::fs::write(&target,&old).unwrap();
     let raw2=dir.join("raw2");std::fs::write(&raw2,text().replace("mov x0, x1","mov x0, x3")).unwrap();
     let second=engine.create_control_flow_session_from_file(File::open(&raw2).unwrap(),"same-label").unwrap();engine.build_disk_control_flow_index(&second,false,tiny_budget()).unwrap();
-    assert_eq!(std::fs::read_dir(&cache).unwrap().count(),2);
+    // 只数本用例的 CFG 缓存文件：缓存目录同时存放内容指纹等其它旁路文件。
+    assert_eq!(std::fs::read_dir(&cache).unwrap().flatten().filter(|e|e.file_name().to_string_lossy().starts_with("fd-")).count(),2);
     assert_ne!(serde_json::to_value(&cold.blocks).unwrap(),serde_json::to_value(engine.get_function_cfg(&second,"tiny.so+0x200",full(),full()).unwrap().blocks).unwrap());
     engine.close_session(&second).unwrap();assert!(engine.get_function_cfg(&second,"tiny.so+0x200",full(),full()).is_err());
     engine.cancel_build(&hot);assert!(engine.get_function_cfg(&hot,"tiny.so+0x200",full(),full()).is_err());

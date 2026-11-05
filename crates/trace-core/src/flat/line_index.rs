@@ -2,6 +2,19 @@ use memchr::memchr;
 
 const BLOCK_SIZE: u32 = 256;
 
+#[cfg(test)]
+thread_local! {
+    /// 查询期探针：逐行 `get_line` 的整表循环会把计数放大到行数量级。
+    /// thread_local 使并发测试互不干扰，每个测试在自己的线程上读自己的计数。
+    static LINE_LOOKUPS: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
+}
+
+/// 读取并归零本线程的 `get_line` 计数。
+#[cfg(test)]
+pub(crate) fn take_line_lookups() -> u64 {
+    LINE_LOOKUPS.with(|count| count.replace(0))
+}
+
 pub struct LineIndexArchive {
     pub sampled_offsets: Vec<u64>,
     pub total: u32,
@@ -53,6 +66,8 @@ impl<'a> LineIndexView<'a> {
 
     /// Return the raw bytes for the given line in `data` (newline stripped), or None.
     pub fn get_line<'d>(&self, data: &'d [u8], seq: u32) -> Option<&'d [u8]> {
+        #[cfg(test)]
+        LINE_LOOKUPS.with(|count| count.set(count.get() + 1));
         if seq >= self.total {
             return None;
         }

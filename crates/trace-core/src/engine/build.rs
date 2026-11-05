@@ -26,8 +26,9 @@ struct CacheHitData {
     /// 反序列化接口签名，None 不可能出现（出现即上层已判 miss）。
     activation_tree: crate::query::activation::ActivationTree,
     string_index: Option<crate::query::strings::StringIndex>,
-    scan_store: CachedStore<ScanArchive>,
-    reg_last_def: crate::scanner::RegLastDef,
+    /// `None` = 本次查询不访问 `deps`/`pair_split`，跳过了 `.scan.cache`。
+    scan_store: Option<CachedStore<ScanArchive>>,
+    reg_last_def: Option<crate::scanner::RegLastDef>,
     lidx_store: CachedStore<LineIndexArchive>,
     total_lines: u32,
     format: trace_parser::types::TraceFormat,
@@ -35,11 +36,49 @@ struct CacheHitData {
     consumed_seqs: Vec<u32>,
 }
 
+/// 缓存命中路径是否必须加载 `.scan.cache`。
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum ScanCacheRequirement {
+    Required,
+    Deferred,
+}
+
 impl super::TraceEngine {
     pub fn build_index(
         &self,
         session_id: &str,
         options: BuildOptions,
+        on_progress: Option<ProgressCallback>,
+    ) -> Result<BuildResult> {
+        self.build_index_with(session_id, options, ScanCacheRequirement::Required, on_progress)
+    }
+
+    /// 为只依赖 `Phase2Archive` 与 `LineIndexArchive` 的 fact 查询建立索引。
+    ///
+    /// 这类查询（runtime mapping 等 6 类 helper 请求）从不读 `deps`/`pair_split`，
+    /// 缓存命中时无需加载 931 MiB 的 `.scan.cache`；冷路径仍然完整扫描并落盘，
+    /// 因此后续需要扫描索引的查询仍能命中同一批缓存。
+    pub fn build_fact_index(
+        &self,
+        session_id: &str,
+        on_progress: Option<ProgressCallback>,
+    ) -> Result<BuildResult> {
+        self.build_index_with(
+            session_id,
+            BuildOptions {
+                force_rebuild: false,
+                skip_strings: true,
+            },
+            ScanCacheRequirement::Deferred,
+            on_progress,
+        )
+    }
+
+    fn build_index_with(
+        &self,
+        session_id: &str,
+        options: BuildOptions,
+        scan_cache: ScanCacheRequirement,
         on_progress: Option<ProgressCallback>,
     ) -> Result<BuildResult> {
         let handle = self.get_handle(session_id)?;
@@ -53,7 +92,7 @@ impl super::TraceEngine {
         // 重置取消标志
         handle.build_cancel.store(false, Ordering::SeqCst);
 
-        let result = self.build_index_inner(session_id, &handle, options, on_progress);
+        let result = self.build_index_inner(session_id, &handle, options, scan_cache, on_progress);
 
         // 无论成功或失败，都重置 building 标志
         handle.building.store(false, Ordering::SeqCst);
@@ -66,6 +105,7 @@ impl super::TraceEngine {
         session_id: &str,
         handle: &crate::session::SessionHandle,
         options: BuildOptions,
+        scan_cache: ScanCacheRequirement,
         on_progress: Option<ProgressCallback>,
     ) -> Result<BuildResult> {
         let (mmap_arc, cache_identity, trace_hash) = {
@@ -92,13 +132,25 @@ impl super::TraceEngine {
             detected_format, force, cache_identity
         );
 
-        // 尝试从缓存加载（三个核心缓存全部命中时使用）
+        // 尝试从缓存加载（p2 + lidx 命中时成立；需要 deps 的查询另需 scan 命中）
         if !force {
-            if let (Some(p2_mmap), Some(scan_mmap), Some(lidx_mmap)) = (
+            if let (Some(p2_mmap), Some(lidx_mmap)) = (
                 cache::load_phase2_cache(&cache_identity, trace_len, &trace_hash),
-                cache::load_scan_cache(&cache_identity, trace_len, &trace_hash),
                 cache::load_lidx_cache(&cache_identity, trace_len, &trace_hash),
             ) {
+                let scan_mmap = match scan_cache {
+                    ScanCacheRequirement::Required => {
+                        cache::load_scan_cache(&cache_identity, trace_len, &trace_hash)
+                    }
+                    // 不访问 deps 的查询不读 .scan.cache：省掉 931 MiB 的
+                    // mmap、布局预检与摘要校验。
+                    ScanCacheRequirement::Deferred => None,
+                };
+                if scan_cache == ScanCacheRequirement::Required && scan_mmap.is_none() {
+                    return self.rescan(
+                        session_id, handle, skip_strings, scan_cache, on_progress,
+                    );
+                }
                 // 通知进度：缓存加载
                 if let Some(ref cb) = on_progress {
                     cb(Progress {
@@ -133,40 +185,50 @@ impl super::TraceEngine {
                     Some(t) => t,
                     None => {
                         eprintln!("[index] p2 cache payload corrupt; falling back to full rescan");
-                        return self.build_index_inner(
-                            session_id,
-                            handle,
-                            BuildOptions {
-                                force_rebuild: true,
-                                skip_strings,
-                            },
-                            on_progress,
+                        return self.rescan(
+                            session_id, handle, skip_strings, scan_cache, on_progress,
                         );
                     }
                 };
 
-                let scan_store = CachedStore::Mapped(scan_mmap);
-                let reg_last_def = scan_store.deserialize_reg_last_def();
+                let scan_store = scan_mmap.map(CachedStore::Mapped);
+                let reg_last_def = scan_store
+                    .as_ref()
+                    .map(CachedStore::deserialize_reg_last_def);
 
                 let lidx_store = CachedStore::Mapped(lidx_mmap);
                 let total_lines = lidx_store.total_lines();
                 // 三个文件独立原子发布只能保证“每个文件完整”，不能保证
                 // 读者没有跨代混合。scan 与 lidx 的共享行数是加载时可验证的
-                // generation 边界；不一致时放弃整组缓存并重扫。
-                if scan_store.line_count() != total_lines {
-                    eprintln!(
-                        "[index] cache generation mismatch: scan_lines={} lidx_lines={}; falling back to full rescan",
-                        scan_store.line_count(),
-                        total_lines
-                    );
-                    return self.build_index_inner(
-                        session_id,
-                        handle,
-                        BuildOptions {
-                            force_rebuild: true,
-                            skip_strings,
-                        },
-                        on_progress,
+                // generation 边界；跳过 scan 时改用 p2 里 ActivationTree 的
+                // root exit（同一份构建的 total_lines）作同一道边界。不一致时
+                // 放弃整组缓存并重扫。
+                let stale = match &scan_store {
+                    Some(scan) => {
+                        let scan_lines = scan.line_count();
+                        if scan_lines != total_lines {
+                            eprintln!(
+                                "[index] cache generation mismatch: scan_lines={scan_lines} lidx_lines={total_lines}; falling back to full rescan"
+                            );
+                        }
+                        scan_lines != total_lines
+                    }
+                    None => {
+                        // root activation 的 exit_seq 就是同一份构建的 total_lines。
+                        // 反序列化可以接受 activations 为空的树，取首元素前必须
+                        // 过滤：没有 root 就无从确定 generation，等同于跨代混合。
+                        let p2_lines = activation_tree.activations.first().map(|root| root.exit_seq);
+                        if p2_lines != Some(total_lines) {
+                            eprintln!(
+                                "[index] cache generation mismatch: p2_lines={p2_lines:?} lidx_lines={total_lines}; falling back to full rescan"
+                            );
+                        }
+                        p2_lines != Some(total_lines)
+                    }
+                };
+                if stale {
+                    return self.rescan(
+                        session_id, handle, skip_strings, scan_cache, on_progress,
                     );
                 }
 
@@ -268,6 +330,28 @@ impl super::TraceEngine {
         )
     }
 
+    /// 放弃缓存命中并全量重扫：缓存损坏或跨代混合时必须重建，而不是带着
+    /// 半可信的索引继续查询。
+    fn rescan(
+        &self,
+        session_id: &str,
+        handle: &crate::session::SessionHandle,
+        skip_strings: bool,
+        scan_cache: ScanCacheRequirement,
+        on_progress: Option<ProgressCallback>,
+    ) -> Result<BuildResult> {
+        self.build_index_inner(
+            session_id,
+            handle,
+            BuildOptions {
+                force_rebuild: true,
+                skip_strings,
+            },
+            scan_cache,
+            on_progress,
+        )
+    }
+
     fn apply_index_result(
         &self,
         _session_id: &str,
@@ -308,9 +392,9 @@ impl super::TraceEngine {
                 state.call_tree = Some(call_tree);
                 state.activation_tree = Some(activation_tree);
                 state.string_index = string_index;
-                state.reg_last_def = Some(reg_last_def);
+                state.reg_last_def = reg_last_def;
                 state.phase2_store = Some(phase2_store);
-                state.scan_store = Some(scan_store);
+                state.scan_store = scan_store;
                 state.lidx_store = Some(lidx_store);
 
                 eprintln!("[index] session populated from section cache");

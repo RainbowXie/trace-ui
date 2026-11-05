@@ -2,8 +2,8 @@
 //!
 //! This is only the block component, not a bounded FunctionFactBundle builder.
 //! The sink must reserve the actual formal envelope before retaining each item.
-//! Retroactive block starts use repeated scans: worst-case quadratic in owned
-//! instructions, with an additional activation-tree scan per raw instruction.
+//! Retroactive block starts are resolved from one collected transfer-target list
+//! (two linear passes) instead of re-scanning the window per instruction.
 
 use std::sync::atomic::{AtomicBool, Ordering};
 
@@ -37,15 +37,21 @@ fn check_cancel(cancel: &AtomicBool) -> Result<()> {
     }
 }
 
+/// 单行工作区上限：解析器与模块索引共用同一条资源边界。
+pub(super) const RAW_LINE_LIMIT: usize = 1024 * 1024;
+
+/// 越界行是资源错误而不是逻辑错误：两条路径必须报出同一段文本。
+pub(super) fn oversize_error() -> TraceError {
+    TraceError::Internal("function facts raw-line working memory resource limit exceeded".into())
+}
+
 // LineIndex strips LF and optional CR before returning this slice.
 pub(super) fn check_raw(raw: &[u8]) -> Result<()> {
-    check_raw_limit(raw, 1024 * 1024)
+    check_raw_limit(raw, RAW_LINE_LIMIT)
 }
 fn check_raw_limit(raw: &[u8], limit: usize) -> Result<()> {
     if raw.len() > limit {
-        return Err(TraceError::Internal(
-            "function facts raw-line working memory resource limit exceeded".into(),
-        ));
+        return Err(oversize_error());
     }
     Ok(())
 }
@@ -76,6 +82,49 @@ impl<'a> RawCursor<'a> {
     }
 }
 
+/// 窗口内被严格包含的 activation 区间，按 entry_seq 升序。
+///
+/// `all_by_call` 已按 call_seq 严格递增：先用二分跳到 call_seq 落在窗口内的
+/// 第一个候选，再沿该窗口前缀线性推进。原实现对窗口内每一行都遍历全部
+/// activations（vbxk 样本 33,498 个节点），使窗口扫描退化为
+/// O(W × |activations|)。
+fn nested_intervals(
+    tree: &ActivationTree,
+    activation: &ConfirmedActivation,
+) -> Vec<(u32, u32)> {
+    let ids = &tree.all_by_call;
+    let mut lo = 0usize;
+    let mut hi = ids.len();
+    while lo < hi {
+        let mid = lo + (hi - lo) / 2;
+        // 窗口第一个指令本身可能就是子调用指令：下界是 >= entry_seq，
+        // 不是 > entry_seq。
+        if tree.activations[ids[mid] as usize].call_seq < activation.entry_seq {
+            lo = mid + 1;
+        } else {
+            hi = mid;
+        }
+    }
+    let mut intervals = Vec::new();
+    for &id in &ids[lo..] {
+        let other = &tree.activations[id as usize];
+        // 被严格包含的 activation 的 call 必在窗口内；再往后不可能命中。
+        if other.call_seq > activation.exit_seq {
+            break;
+        }
+        if other.id != activation.id
+            && other.entry_seq > activation.entry_seq
+            && other.exit_seq < activation.exit_seq
+            && other.exit_seq >= other.entry_seq
+        {
+            intervals.push((other.entry_seq, other.exit_seq));
+        }
+    }
+    // activation 区间是 laminar 的，按 entry 排序后就是嵌套开括号顺序。
+    intervals.sort_unstable();
+    intervals
+}
+
 fn scan_owned_impl(
     state: &SessionState,
     tree: &ActivationTree,
@@ -89,28 +138,28 @@ fn scan_owned_impl(
         .and_then(|n|usize::try_from(n).ok())
         .ok_or_else(||TraceError::InvalidArgument("fact entry missing".into()))?;
     let mut cursor=RawCursor::new(&state.mmap,offset)?;
+    let nested = nested_intervals(tree, activation);
+    // 开括号栈：栈内是已开始且尚未结束的严格包含区间（只保留 exit）。
+    let mut open: Vec<u32> = Vec::new();
+    let mut next_nested = 0usize;
     for seq in activation.entry_seq..=activation.exit_seq {
         check_cancel(cancel)?;
         // Advance before ownership filtering: skipped children and special rows
         // still occupy raw seqs. Repeated scans must not redo sampled lookups.
         let raw=cursor.next()?;
         // Same strict-contained interval rule as owned_instructions, including
-        // unresolved nested activations. Do not allocate a nested interval list.
-        let mut nested = false;
-        for other in &tree.activations {
-            check_cancel(cancel)?;
-            if other.id != activation.id
-                && other.entry_seq > activation.entry_seq
-                && other.exit_seq < activation.exit_seq
-                && other.exit_seq >= other.entry_seq
-                && seq >= other.entry_seq
-                && seq <= other.exit_seq
-            {
-                nested = true;
-                break;
+        // unresolved nested activations, now driven by the call-sequence index.
+        while open.last().is_some_and(|&exit| exit < seq) {
+            open.pop();
+        }
+        while next_nested < nested.len() && nested[next_nested].0 <= seq {
+            let (_, exit) = nested[next_nested];
+            next_nested += 1;
+            if exit >= seq {
+                open.push(exit);
             }
         }
-        if nested {
+        if !open.is_empty() {
             continue;
         }
         if resource_bound {
@@ -133,27 +182,6 @@ fn scan_owned_impl(
     Ok(())
 }
 
-fn is_observed_target(
-    state: &SessionState,
-    tree: &ActivationTree,
-    activation: &ConfirmedActivation,
-    cancel: &AtomicBool,
-    site: &str,
-    resource_bound: bool,
-) -> Result<bool> {
-    let mut previous_transfer = false;
-    let mut found = false;
-    scan_owned_impl(state, tree, activation, cancel, resource_bound, |insn| {
-        if previous_transfer && insn.site == site {
-            found = true;
-            return Ok(false);
-        }
-        previous_transfer = insn.transfer();
-        Ok(true)
-    })?;
-    Ok(found)
-}
-
 pub(super) fn stream_executed_blocks(
     state: &SessionState,
     tree: &ActivationTree,
@@ -171,12 +199,30 @@ fn stream_blocks_impl(
     resource_bound: bool,
     mut sink: impl FnMut(&str, u32) -> Result<()>,
 ) -> Result<()> {
+    // 第一遍只收集「紧跟在控制转移之后」的落点 site：原来对每条指令重跑一遍
+    // 窗口扫描（O(W²)）只是为了回答同一个问题。收集后第二遍用二分查询，
+    // 观测序列与重新扫描完全一致。
+    let mut observed: Vec<String> = Vec::new();
+    {
+        let mut previous_transfer = false;
+        scan_owned_impl(state, tree, activation, cancel, resource_bound, |insn| {
+            let transfer = insn.transfer();
+            if previous_transfer {
+                observed.push(insn.site);
+            }
+            previous_transfer = transfer;
+            Ok(true)
+        })?;
+    }
+    observed.sort_unstable();
+    observed.dedup();
+
     let mut first = true;
     let mut previous_transfer = false;
     scan_owned_impl(state, tree, activation, cancel, resource_bound, |insn| {
         let starts = first
             || previous_transfer
-            || is_observed_target(state, tree, activation, cancel, &insn.site, resource_bound)?;
+            || observed.binary_search(&insn.site).is_ok();
         if starts {
             check_cancel(cancel)?;
             sink(&insn.site, insn.seq)?;

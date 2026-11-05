@@ -1,9 +1,12 @@
+#[cfg(unix)]
+use crate::memory_search::{fd_signature, FdSignature};
 use crate::query::strings::StringIndex;
 use crate::staging;
 use memmap2::Mmap;
 use sha2::{Digest, Sha256};
+use std::fs::File;
 use std::io::{BufReader, Read, Write};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::{Arc, RwLock};
 
 // MAGIC 版本即缓存布局版本：布局变更（如 .p2.cache 增加 ActivationTree section）
@@ -19,6 +22,16 @@ const MAGIC_V7: &[u8; 8] = b"TCACHE08";
 const MAGIC: &[u8; 8] = b"TCACHE03";
 const HEADER_LEN_V7: usize = 64;
 const SECTION_DIGEST_LEN: usize = 16;
+
+// 大型 section 缓存的 payload 摘要（.scan.cache 931 MiB）每次 helper 子进程
+// 都要重算一遍 SHA-256，这是纯重复劳动：文件内容只可能通过写入改变，而
+// Linux 上任何写入都会推进 ctime。把「上次完整校验时的文件指纹 + 摘要」记在
+// 旁路记录里，fstat 签名不变即可免算；小文件仍走全量摘要，保证损坏检测
+// 测试与同纳秒篡改的判定不受影响。
+const VERIFIED_MAGIC: &[u8; 8] = b"TCVERIFY";
+const VERIFIED_LEN: usize = 8 + 56 + SECTION_DIGEST_LEN;
+const SMALL_CACHE_FULL_DIGEST_LIMIT: u64 = 16 * 1024 * 1024;
+const VERIFIED_SUFFIX: &str = ".verified";
 
 static CACHE_DIR_OVERRIDE: RwLock<Option<PathBuf>> = RwLock::new(None);
 
@@ -77,6 +90,55 @@ fn cache_path_ext(file_path: &str, suffix: &str) -> Option<PathBuf> {
     let hash = format!("{:x}", hasher.finalize());
     cache_dir().map(|d| d.join(format!("{}{}", hash, suffix)))
 }
+
+fn verified_path(cache_path: &Path) -> PathBuf {
+    let mut name = cache_path.as_os_str().to_os_string();
+    name.push(VERIFIED_SUFFIX);
+    PathBuf::from(name)
+}
+
+/// 旁路记录只在「文件指纹 + 头部摘要」都被证明一致时才算数；任何读取失败
+/// 都退化为重算全量摘要，正确性不依赖它。
+#[cfg(unix)]
+fn verified_digest_matches(file: &File, path: &Path, digest: &[u8; SECTION_DIGEST_LEN]) -> bool {
+    let Ok(signature) = fd_signature(file) else {
+        return false;
+    };
+    let Ok(record) = std::fs::read(verified_path(path)) else {
+        return false;
+    };
+    if record.len() != VERIFIED_LEN || &record[..8] != VERIFIED_MAGIC {
+        return false;
+    }
+    if FdSignature::decode(&record[8..64]) != Some(signature) {
+        return false;
+    }
+    record[64..].try_into().ok() == Some(*digest)
+}
+
+#[cfg(unix)]
+fn store_verified_digest(file: &File, path: &Path, digest: &[u8; SECTION_DIGEST_LEN]) {
+    let Ok(signature) = fd_signature(file) else {
+        return;
+    };
+    let mut record = Vec::with_capacity(VERIFIED_LEN);
+    record.extend_from_slice(VERIFIED_MAGIC);
+    record.extend_from_slice(&signature.encode());
+    record.extend_from_slice(digest);
+    let _ = staging::atomic_publish(&verified_path(path), move |writer| {
+        writer.write_all(&record).is_ok()
+    });
+}
+
+// 非 Unix 平台无法从 fstat 得到 (dev, ino, ctime) 这项绑定证据，旁路记录
+// 一律不成立：加载时照旧对整份 payload 重算 SHA-256。
+#[cfg(not(unix))]
+fn verified_digest_matches(_: &File, _: &Path, _: &[u8; SECTION_DIGEST_LEN]) -> bool {
+    false
+}
+
+#[cfg(not(unix))]
+fn store_verified_digest(_: &File, _: &Path, _: &[u8; SECTION_DIGEST_LEN]) {}
 
 fn section_digest(data: &[u8]) -> [u8; SECTION_DIGEST_LEN] {
     Sha256::digest(data)[..SECTION_DIGEST_LEN]
@@ -200,13 +262,22 @@ pub fn save_sections_raw(
     header.extend_from_slice(MAGIC_V7);
     header.extend_from_slice(&trace_len.to_le_bytes());
     header.extend_from_slice(trace_hash);
-    header.extend_from_slice(&section_digest(section_bytes));
+    let digest = section_digest(section_bytes);
+    header.extend_from_slice(&digest);
     debug_assert_eq!(header.len(), HEADER_LEN_V7);
 
     let payload_len = section_bytes.len();
     if staging::atomic_publish(&path, move |w| {
         w.write_all(&header).is_ok() && w.write_all(section_bytes).is_ok()
     }) {
+        // 刚写入的字节就是下一次进程要校验的字节：立即记录文件指纹，
+        // 下次加载无需再对整份 payload 重算 SHA-256。小文件仍按全量摘要校验，
+        // 不为它们留无用的旁路记录。
+        if payload_len as u64 > SMALL_CACHE_FULL_DIGEST_LIMIT {
+            if let Ok(published) = File::open(&path) {
+                store_verified_digest(&published, &path, &digest);
+            }
+        }
         eprintln!(
             "[cache] saved {} ({} + {} bytes)",
             suffix, HEADER_LEN_V7, payload_len
@@ -254,9 +325,16 @@ fn load_cache_mmap(
     }
     let cached_payload_digest: [u8; SECTION_DIGEST_LEN] =
         mmap[48..HEADER_LEN_V7].try_into().ok()?;
-    if cached_payload_digest != section_digest(&mmap[HEADER_LEN_V7..]) {
-        eprintln!("[cache] {} payload digest mismatch", suffix);
-        return None;
+    let verified = mmap.len() as u64 > SMALL_CACHE_FULL_DIGEST_LIMIT
+        && verified_digest_matches(&file, &path, &cached_payload_digest);
+    if !verified {
+        if cached_payload_digest != section_digest(&mmap[HEADER_LEN_V7..]) {
+            eprintln!("[cache] {} payload digest mismatch", suffix);
+            return None;
+        }
+        if mmap.len() as u64 > SMALL_CACHE_FULL_DIGEST_LIMIT {
+            store_verified_digest(&file, &path, &cached_payload_digest);
+        }
     }
 
     // 布局预检：三个核心缓存（p2/scan/lidx）的 section 布局在加载时统一
@@ -312,6 +390,27 @@ pub fn load_lidx_cache(
     trace_hash: &[u8; 32],
 ) -> Option<Arc<Mmap>> {
     load_cache_mmap(file_path, trace_len, trace_hash, ".lidx.cache")
+}
+
+// ── 通用 raw payload 旁路缓存（TCACHE03 header + 调用方自定义字节）──
+
+/// 读取 `save_bincode_raw` 写入的 payload（不含头部）。载荷自己的布局标识
+/// 必须由调用方校验：TCACHE03 头部只绑定 trace 身份，不描述载荷形状，
+/// 直接 bincode 反序列化旧字节会读到垃圾长度。
+pub(crate) fn load_bincode_raw(
+    file_path: &str,
+    trace_len: u64,
+    trace_hash: &[u8; 32],
+    suffix: &str,
+) -> Option<Vec<u8>> {
+    let path = cache_path(file_path, suffix)?;
+    let mut reader = BufReader::new(std::fs::File::open(&path).ok()?);
+    if !validate_header_from_reader(&mut reader, trace_len, trace_hash) {
+        return None;
+    }
+    let mut payload = Vec::new();
+    reader.read_to_end(&mut payload).ok()?;
+    Some(payload)
 }
 
 // ── StringIndex bincode 缓存 ──
@@ -392,9 +491,11 @@ pub fn delete_cache(file_path: &str) {
         ".strings.bin",
         ".gum-extra.bin",
         ".crypto.bin",
+        ".modules.bin",
     ] {
         if let Some(p) = cache_path_ext(file_path, suffix) {
-            let _ = std::fs::remove_file(p);
+            let _ = std::fs::remove_file(&p);
+            let _ = std::fs::remove_file(verified_path(&p));
         }
     }
     // Old rkyv suffixes (cleanup)
@@ -430,7 +531,14 @@ pub fn clear_all_cache() -> (u32, u64) {
             let name = path.file_name().and_then(|n| n.to_str()).unwrap_or("");
             let is_staging = name.starts_with('.') && name.contains(".tmp.");
             let ext = path.extension().and_then(|e| e.to_str());
-            if is_staging || ext == Some("bin") || ext == Some("rkyv") || ext == Some("cache") {
+            // `.verified` 是缓存文件的旁路校验记录：清缓存时一并回收，
+            // 否则每次重建都会留下无人引用的陈旧记录。
+            if is_staging
+                || ext == Some("bin")
+                || ext == Some("rkyv")
+                || ext == Some("cache")
+                || ext == Some("verified")
+            {
                 if let Ok(meta) = path.metadata() {
                     total_size += meta.len();
                 }
@@ -499,6 +607,63 @@ mod magic_version_tests {
         assert!(
             load_lidx_cache(path, changed.len() as u64, &changed_hash).is_none(),
             "same-size trace changes after the first MiB must invalidate caches"
+        );
+
+        set_cache_dir_override(None);
+        let _ = std::fs::remove_dir_all(dir);
+    }
+}
+
+#[cfg(test)]
+mod verified_digest_tests {
+    use super::*;
+
+    /// 大型 section 缓存的完整摘要被绑定到缓存文件自身的 fstat 签名：
+    /// 命中时不必重算 931 MiB SHA-256，但任何改写都会让旁路记录失配并
+    /// 重新完整校验（fail-closed）。
+    #[test]
+    fn large_section_cache_digest_binds_to_the_cache_file_signature() {
+        let _guard = cache_dir_override_test_lock();
+        let dir = std::env::temp_dir().join(format!(
+            "trace-ui-verified-{}-{}",
+            std::process::id(),
+            uuid::Uuid::new_v4()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        set_cache_dir_override(Some(dir.clone()));
+
+        let path = "/tmp/trace-ui-verified-large.trace";
+        // 2.2M 采样点 = 17.6 MiB payload，超过小文件阈值才会走旁路记录。
+        let samples = 2_200_000u64;
+        let archive = crate::flat::line_index::LineIndexArchive {
+            sampled_offsets: (0..samples).collect(),
+            total: u32::try_from(samples * 256).unwrap(),
+        };
+        let bytes = archive.to_sections();
+        assert!(bytes.len() as u64 > SMALL_CACHE_FULL_DIGEST_LIMIT);
+        let trace_hash = [9u8; 32];
+        save_sections_raw(path, 4242, &trace_hash, ".lidx.cache", &bytes);
+
+        let cache_file = cache_path_ext(path, ".lidx.cache").expect("cache path");
+        let file = File::open(&cache_file).expect("open cache file");
+        let digest = section_digest(&bytes);
+        assert!(
+            verified_digest_matches(&file, &cache_file, &digest),
+            "保存后必须立即写入与文件指纹绑定的摘要记录"
+        );
+        assert!(load_lidx_cache(path, 4242, &trace_hash).is_some());
+        // 旁路记录缺失时回退全量摘要，仍然命中。
+        std::fs::remove_file(verified_path(&cache_file)).unwrap();
+        assert!(load_lidx_cache(path, 4242, &trace_hash).is_some());
+
+        // 改写 payload：文件指纹失效，必须重新全量校验并拒绝。
+        let mut corrupted = std::fs::read(&cache_file).unwrap();
+        let last = corrupted.len() - 1;
+        corrupted[last] ^= 1;
+        std::fs::write(&cache_file, &corrupted).unwrap();
+        assert!(
+            load_lidx_cache(path, 4242, &trace_hash).is_none(),
+            "文件指纹变化后不得凭借旁路记录跳过完整摘要校验"
         );
 
         set_cache_dir_override(None);

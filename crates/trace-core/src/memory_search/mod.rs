@@ -29,8 +29,8 @@ pub(crate) use cached::search_memory_cached_with_trace_hash;
 pub use cached::{search_memory_cached, search_memory_cached_occurrences};
 #[cfg(unix)]
 pub use fingerprint::{
-    fd_signature, search_memory_fd_verified, search_memory_fd_verified_with_signature, FdSignature,
-    FingerprintSource,
+    fd_signature, fd_trace_hash_verified, search_memory_fd_verified,
+    search_memory_fd_verified_with_signature, FdSignature, FingerprintSource,
 };
 pub use scan::search_memory;
 pub(crate) use scan::expand_mem_op;

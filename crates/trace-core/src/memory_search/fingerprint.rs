@@ -45,6 +45,46 @@ pub fn fd_signature(file: &File) -> Result<FdSignature> {
     })
 }
 
+impl FdSignature {
+    /// 固定 56 字节编码（7 × little-endian u64/i64）。缓存旁路校验记录要在
+    /// 文件里保存一份签名并逐字节比较，因此编码必须无填充、顺序固定。
+    pub(crate) fn encode(&self) -> [u8; 56] {
+        let mut out = [0u8; 56];
+        for (slot, value) in out.chunks_exact_mut(8).zip([
+            self.dev,
+            self.ino,
+            self.len,
+            self.mtime as u64,
+            self.mtime_nsec as u64,
+            self.ctime as u64,
+            self.ctime_nsec as u64,
+        ]) {
+            slot.copy_from_slice(&value.to_le_bytes());
+        }
+        out
+    }
+
+    pub(crate) fn decode(bytes: &[u8]) -> Option<Self> {
+        if bytes.len() != 56 {
+            return None;
+        }
+        let field = |index: usize| -> Option<u64> {
+            Some(u64::from_le_bytes(
+                bytes[index * 8..index * 8 + 8].try_into().ok()?,
+            ))
+        };
+        Some(Self {
+            dev: field(0)?,
+            ino: field(1)?,
+            len: field(2)?,
+            mtime: field(3)? as i64,
+            mtime_nsec: field(4)? as i64,
+            ctime: field(5)? as i64,
+            ctime_nsec: field(6)? as i64,
+        })
+    }
+}
+
 pub(crate) fn fingerprint_path(signature: &FdSignature) -> Option<PathBuf> {
     let mut hasher = Sha256::new();
     hasher.update(signature.dev.to_le_bytes());
@@ -118,6 +158,47 @@ pub enum FingerprintSource {
     Reused,
 }
 
+/// 取得 trace 的内容指纹：`fstat` 签名与持久化 fingerprint 完全一致时直接
+/// 复用已验证的 hash，否则完整 SHA-256 一次并写回。两次 fstat 复验保证
+/// 「读到旧 fingerprint、随后文件被改写」或「计算期间文件被改写」都不会把
+/// 旧内容的身份绑定到新内容上。
+pub fn fd_trace_hash_verified(
+    file: &File,
+    data: &[u8],
+    baseline: &FdSignature,
+    probe: Option<&mut dyn FnMut(FingerprintSource)>,
+) -> Result<[u8; 32]> {
+    let before = *baseline;
+    if fd_signature(file)? != before {
+        return Err(TraceError::CacheError(
+            "trace fd changed between mmap and the start of hashing".to_string(),
+        ));
+    }
+    if let Some(hash) = load_fd_fingerprint(&before) {
+        // 复用前复验：读取 fingerprint 期间 fd 可能已被改写。
+        if fd_signature(file)? != before {
+            return Err(TraceError::CacheError(
+                "trace fd changed while loading its fingerprint".to_string(),
+            ));
+        }
+        if let Some(probe) = probe {
+            probe(FingerprintSource::Reused);
+        }
+        return Ok(hash);
+    }
+    let hash = trace_content_hash(data);
+    if fd_signature(file)? != before {
+        return Err(TraceError::CacheError(
+            "trace fd changed while computing its content hash".to_string(),
+        ));
+    }
+    store_fd_fingerprint(&before, &hash);
+    if let Some(probe) = probe {
+        probe(FingerprintSource::Computed);
+    }
+    Ok(hash)
+}
+
 /// fd helper 的搜索入口。trace 内容身份只通过 trace-ui 自己验证过的机制获得：
 /// 首次对 mmap 做完整 SHA-256 并把 hash 与 fd 元数据签名绑定持久化；后续
 /// 只有在 fstat 签名完全一致时才复用。搜索完成后再次 fstat，任何中途的
@@ -148,38 +229,7 @@ pub fn search_memory_fd_verified_with_signature(
 ) -> Result<MemorySearchOccurrenceResult> {
     validate_options(&options)?;
     let before = *baseline;
-    if fd_signature(file)? != before {
-        return Err(TraceError::CacheError(
-            "trace fd changed between mmap and the start of the search".to_string(),
-        ));
-    }
-    let trace_hash = match load_fd_fingerprint(&before) {
-        Some(hash) => {
-            // 复用前复验：读取 fingerprint 文件期间 fd 可能已被改写。
-            if fd_signature(file)? != before {
-                return Err(TraceError::CacheError(
-                    "trace fd changed while loading its fingerprint".to_string(),
-                ));
-            }
-            if let Some(probe) = probe {
-                probe(FingerprintSource::Reused);
-            }
-            hash
-        }
-        None => {
-            let hash = trace_content_hash(data);
-            if fd_signature(file)? != before {
-                return Err(TraceError::CacheError(
-                    "trace fd changed while computing its content hash".to_string(),
-                ));
-            }
-            store_fd_fingerprint(&before, &hash);
-            if let Some(probe) = probe {
-                probe(FingerprintSource::Computed);
-            }
-            hash
-        }
-    };
+    let trace_hash = fd_trace_hash_verified(file, data, baseline, probe)?;
     let pattern_hash = sha256(&options.pattern);
     let content_identity =
         memory_search_content_identity(&trace_hash, &pattern_hash, format, &options);

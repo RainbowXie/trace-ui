@@ -89,3 +89,66 @@ fn immediate_gap_keeps_missing_dependency_coverage_conservative() {
         line
     ));
 }
+
+/// 模块基址校验与全局地址映射只沿 mmap 单遍推进：旧实现每个目标模块（以及
+/// 每个全局读写）都跑一遍 `0..total_lines` 的 `get_line` 全表取样。
+#[test]
+fn module_base_queries_do_not_walk_the_whole_trace_line_by_line() {
+    let _lock = crate::cache::cache_dir_override_test_lock();
+    let dir = std::env::temp_dir().join(format!("facts-modules-probe-{}", uuid::Uuid::new_v4()));
+    std::fs::create_dir_all(dir.join("cache")).unwrap();
+    crate::cache::set_cache_dir_override(Some(dir.join("cache")));
+    struct Reset;
+    impl Drop for Reset {
+        fn drop(&mut self) {
+            crate::cache::set_cache_dir_override(None);
+        }
+    }
+    let _reset = Reset;
+
+    let path = dir.join("trace.log");
+    std::fs::write(
+        &path,
+        "[App] 0x400000!0x0 bl #0x401000; x0=0x6000 sp=0x8000\n\
+[App] 0x401004!0x1004 ldr x9, [x0]; x0=0x6000 mem_r=0x6000 -> x9=0x1\n\
+[App] 0x401008!0x1008 str x9, [x3]; x9=0x1 x3=0x7000 mem_w=0x7000\n\
+[App] 0x40100c!0x100c ret; x0=0x6000\n",
+    )
+    .unwrap();
+    let engine = TraceEngine::new();
+    let sid = engine
+        .create_session(path.to_str().unwrap())
+        .unwrap()
+        .session_id;
+    engine
+        .build_index(
+            &sid,
+            BuildOptions {
+                force_rebuild: true,
+                skip_strings: true,
+            },
+            None,
+        )
+        .unwrap();
+    let handle = engine.get_handle(&sid).unwrap();
+    let state = handle.state.read().unwrap();
+    let modules = vec!["App".to_owned()];
+    let _ = crate::flat::line_index::take_line_lookups();
+    super::global_map::validate_mappings(&state, &modules, &AtomicBool::new(false)).unwrap();
+    assert_eq!(
+        crate::flat::line_index::take_line_lookups(),
+        0,
+        "模块基址校验不得逐行调用 LineIndexView::get_line"
+    );
+    let map = super::global_map::StableGlobalMap::collect(&state, &modules).unwrap();
+    assert_eq!(map.bases.get("App"), Some(&0x400000));
+    assert_eq!(
+        crate::flat::line_index::take_line_lookups(),
+        0,
+        "模块映射读取必须复用同一次单遍扫描结果"
+    );
+    drop(state);
+    drop(handle);
+    engine.close_session(&sid).unwrap();
+    std::fs::remove_dir_all(dir).unwrap();
+}

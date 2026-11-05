@@ -291,16 +291,25 @@ pub(crate) fn run() -> anyhow::Result<()> {
         .map_err(|error| anyhow::anyhow!("failed to create session from trace fd: {error}"))?;
     let sid = session_info.session_id;
 
-    engine
-        .build_index(
-            &sid,
-            BuildOptions {
-                force_rebuild: false,
-                skip_strings: true,
-            },
-            None,
-        )
-        .map_err(|error| anyhow::anyhow!("failed to build index: {error}"))?;
+    // 只有 bounded 与 legacy（无 kind）请求会读 deps/pair_split；其余 6 类
+    // 只依赖 .p2.cache/.lidx.cache，命中时跳过 931 MiB .scan.cache 加载。
+    let needs_scan_store = bounded_request.is_some() || fact_request.is_some();
+    if needs_scan_store {
+        engine
+            .build_index(
+                &sid,
+                BuildOptions {
+                    force_rebuild: false,
+                    skip_strings: true,
+                },
+                None,
+            )
+            .map_err(|error| anyhow::anyhow!("failed to build index: {error}"))?;
+    } else {
+        engine
+            .build_fact_index(&sid, None)
+            .map_err(|error| anyhow::anyhow!("failed to build index: {error}"))?;
+    }
 
     if let Some(request) = bounded_request {
         let BoundedFactKind::FunctionFactsBounded = request.kind;

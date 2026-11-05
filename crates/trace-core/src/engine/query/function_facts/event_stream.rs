@@ -156,11 +156,10 @@ pub(super) fn collect(
         previous = Some(call.call_seq);
     }
     scan_owned(state, tree, root, cancel, |insn| {
-        if tree.bypassed_calls.iter().any(|c| c.call_seq == insn.seq)
-            || tree
-                .activations
-                .iter()
-                .any(|a| a.id != 0 && a.call_seq == insn.seq)
+        // bypassed_calls 与 all_by_call 都按 call_seq 严格递增：原来对每条指令
+        // 线性扫两个索引表，在 33K 节点窗口上退化为 O(W × |activations|)。
+        if tree.find_bypassed_by_call_seq(insn.seq).is_some()
+            || tree.find_call(insn.seq).is_some()
         {
             return Ok(true);
         }
