@@ -101,19 +101,38 @@ fn verified_path(cache_path: &Path) -> PathBuf {
 /// 都退化为重算全量摘要，正确性不依赖它。
 #[cfg(unix)]
 fn verified_digest_matches(file: &File, path: &Path, digest: &[u8; SECTION_DIGEST_LEN]) -> bool {
+    use std::os::unix::fs::OpenOptionsExt;
     let Ok(signature) = fd_signature(file) else {
         return false;
     };
-    let Ok(record) = std::fs::read(verified_path(path)) else {
+    // 旁路记录住在缓存目录里，同样是不可信输入：符号链接可指向任意目标，
+    // FIFO/设备文件会在 open()/read() 上永久阻塞，超大文件会导致不受控
+    // 分配。no-follow + non-block + fstat + 精确长度让这些情形立即判 miss，
+    // 回退到全量摘要校验。
+    let Ok(mut record) = std::fs::OpenOptions::new()
+        .read(true)
+        .custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK)
+        .open(verified_path(path))
+    else {
         return false;
     };
-    if record.len() != VERIFIED_LEN || &record[..8] != VERIFIED_MAGIC {
+    let Ok(metadata) = record.metadata() else {
+        return false;
+    };
+    if !metadata.is_file() || metadata.len() != VERIFIED_LEN as u64 {
         return false;
     }
-    if FdSignature::decode(&record[8..64]) != Some(signature) {
+    let mut bytes = [0u8; VERIFIED_LEN];
+    if record.read_exact(&mut bytes).is_err() {
         return false;
     }
-    record[64..].try_into().ok() == Some(*digest)
+    if &bytes[..8] != VERIFIED_MAGIC {
+        return false;
+    }
+    if FdSignature::decode(&bytes[8..64]) != Some(signature) {
+        return false;
+    }
+    bytes[64..].try_into().ok() == Some(*digest)
 }
 
 #[cfg(unix)]
@@ -664,6 +683,68 @@ mod verified_digest_tests {
         assert!(
             load_lidx_cache(path, 4242, &trace_hash).is_none(),
             "文件指纹变化后不得凭借旁路记录跳过完整摘要校验"
+        );
+
+        set_cache_dir_override(None);
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    /// 旁路记录住在缓存目录里，同样是不可信输入：它必须像 fingerprint 一样
+    /// no-follow 打开。否则一个符号链接就能把「摘要正确」这句话绕开，让损坏
+    /// 的 payload 直接命中。
+    #[cfg(unix)]
+    #[test]
+    fn symlinked_verified_record_cannot_bypass_the_payload_digest() {
+        let _guard = cache_dir_override_test_lock();
+        let dir = std::env::temp_dir().join(format!(
+            "trace-ui-verified-link-{}-{}",
+            std::process::id(),
+            uuid::Uuid::new_v4()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        set_cache_dir_override(Some(dir.clone()));
+
+        let path = "/tmp/trace-ui-verified-link.trace";
+        // 偶数步长让 sampled_offsets 留出间隙：改动一个值仍保持严格递增，
+        // 因此被拒只能是因为摘要校验，而不是 section 布局预检。
+        let samples = 2_200_000u64;
+        let archive = crate::flat::line_index::LineIndexArchive {
+            sampled_offsets: (0..samples).map(|index| index * 2).collect(),
+            total: u32::try_from(samples * 256).unwrap(),
+        };
+        let bytes = archive.to_sections();
+        assert!(bytes.len() as u64 > SMALL_CACHE_FULL_DIGEST_LIMIT);
+        let trace_hash = [7u8; 32];
+        save_sections_raw(path, 4242, &trace_hash, ".lidx.cache", &bytes);
+
+        let cache_file = cache_path_ext(path, ".lidx.cache").expect("cache path");
+        let digest = section_digest(&bytes);
+        let mut corrupted = std::fs::read(&cache_file).unwrap();
+        corrupted[HEADER_LEN_V7 + 1000 * 8] ^= 1;
+        std::fs::write(&cache_file, &corrupted).unwrap();
+        assert!(
+            crate::flat::line_index::LineIndexArchive::views_from_sections(
+                &corrupted[HEADER_LEN_V7..]
+            )
+            .is_some(),
+            "损坏后的布局仍然合法，拒绝只能来自摘要校验"
+        );
+
+        // 伪造一条「摘要 + 当前文件指纹」都正确的旁路记录，只通过符号链接
+        // 暴露：跟随链接就会跳过整份 payload 的摘要校验。
+        let signature = fd_signature(&File::open(&cache_file).unwrap()).unwrap();
+        let mut record = Vec::with_capacity(VERIFIED_LEN);
+        record.extend_from_slice(VERIFIED_MAGIC);
+        record.extend_from_slice(&signature.encode());
+        record.extend_from_slice(&digest);
+        let real = dir.join("real.verified");
+        std::fs::write(&real, record).unwrap();
+        let _ = std::fs::remove_file(verified_path(&cache_file));
+        std::os::unix::fs::symlink(&real, verified_path(&cache_file)).unwrap();
+
+        assert!(
+            load_lidx_cache(path, 4242, &trace_hash).is_none(),
+            "符号链接的旁路记录不得被采信"
         );
 
         set_cache_dir_override(None);

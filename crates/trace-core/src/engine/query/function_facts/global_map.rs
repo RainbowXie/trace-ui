@@ -178,7 +178,10 @@ fn apply_line(record: &mut ModuleRecord, runtime: u64, offset: u64, seq: u32, li
 /// 取整份 trace 的模块基址索引：缓存命中即返回，否则单遍扫描后落盘。
 ///
 /// `cancel` 只覆盖扫描本身；缓存命中不读原文，没有可取消的工作。
-pub(super) fn module_index(state: &SessionState, cancel: Option<&AtomicBool>) -> Result<ModuleIndex> {
+pub(super) fn module_index(
+    state: &SessionState,
+    cancel: Option<&AtomicBool>,
+) -> Result<ModuleIndex> {
     if let Some(index) = ModuleIndex::load(state) {
         return Ok(index);
     }
@@ -200,13 +203,16 @@ pub(super) fn validate_mappings(
     }
     let index = module_index(state, Some(cancel))?;
     for module in modules {
-        let Some(record) = index.modules.get(module) else {
-            continue;
-        };
-        let module_error = match record.base {
-            BaseStatus::Unique(_) => None,
-            BaseStatus::Underflow(seq) => Some((seq, false)),
-            BaseStatus::Inconsistent(seq) => Some((seq, true)),
+        // 未出现在 trace 中的模块没有基址记录，但它不等于「没有问题」：
+        // 原实现对每个模块都先逐行 `check_raw`，缺模块时同样会撞上越界行。
+        // 因此这里只把基址错误降级为 None，继续走下面的单行上限判定。
+        let module_error = match index.modules.get(module) {
+            None => None,
+            Some(record) => match record.base {
+                BaseStatus::Unique(_) => None,
+                BaseStatus::Underflow(seq) => Some((seq, false)),
+                BaseStatus::Inconsistent(seq) => Some((seq, true)),
+            },
         };
         // 原实现逐模块按行序扫描，且 `check_raw` 先于基址解析执行：整份 trace
         // 的单行上限错误若出现在该模块的基址冲突之前——或与它同行——就先报

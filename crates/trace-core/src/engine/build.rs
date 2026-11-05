@@ -50,7 +50,12 @@ impl super::TraceEngine {
         options: BuildOptions,
         on_progress: Option<ProgressCallback>,
     ) -> Result<BuildResult> {
-        self.build_index_with(session_id, options, ScanCacheRequirement::Required, on_progress)
+        self.build_index_with(
+            session_id,
+            options,
+            ScanCacheRequirement::Required,
+            on_progress,
+        )
     }
 
     /// 为只依赖 `Phase2Archive` 与 `LineIndexArchive` 的 fact 查询建立索引。
@@ -147,9 +152,7 @@ impl super::TraceEngine {
                     ScanCacheRequirement::Deferred => None,
                 };
                 if scan_cache == ScanCacheRequirement::Required && scan_mmap.is_none() {
-                    return self.rescan(
-                        session_id, handle, skip_strings, scan_cache, on_progress,
-                    );
+                    return self.rescan(session_id, handle, skip_strings, scan_cache, on_progress);
                 }
                 // 通知进度：缓存加载
                 if let Some(ref cb) = on_progress {
@@ -161,7 +164,8 @@ impl super::TraceEngine {
                     });
                 }
 
-                let string_index = cache::load_string_cache(&cache_identity, trace_len, &trace_hash);
+                let string_index =
+                    cache::load_string_cache(&cache_identity, trace_len, &trace_hash);
 
                 let (call_annotations, consumed_seqs) =
                     if detected_format == trace_parser::types::TraceFormat::Gumtrace {
@@ -186,7 +190,11 @@ impl super::TraceEngine {
                     None => {
                         eprintln!("[index] p2 cache payload corrupt; falling back to full rescan");
                         return self.rescan(
-                            session_id, handle, skip_strings, scan_cache, on_progress,
+                            session_id,
+                            handle,
+                            skip_strings,
+                            scan_cache,
+                            on_progress,
                         );
                     }
                 };
@@ -217,7 +225,10 @@ impl super::TraceEngine {
                         // root activation 的 exit_seq 就是同一份构建的 total_lines。
                         // 反序列化可以接受 activations 为空的树，取首元素前必须
                         // 过滤：没有 root 就无从确定 generation，等同于跨代混合。
-                        let p2_lines = activation_tree.activations.first().map(|root| root.exit_seq);
+                        let p2_lines = activation_tree
+                            .activations
+                            .first()
+                            .map(|root| root.exit_seq);
                         if p2_lines != Some(total_lines) {
                             eprintln!(
                                 "[index] cache generation mismatch: p2_lines={p2_lines:?} lidx_lines={total_lines}; falling back to full rescan"
@@ -227,9 +238,7 @@ impl super::TraceEngine {
                     }
                 };
                 if stale {
-                    return self.rescan(
-                        session_id, handle, skip_strings, scan_cache, on_progress,
-                    );
+                    return self.rescan(session_id, handle, skip_strings, scan_cache, on_progress);
                 }
 
                 eprintln!(
@@ -516,8 +525,20 @@ impl super::TraceEngine {
 
                 // 4. 同步写缓存
                 eprintln!("[index] writing cache files...");
-                cache::save_sections_raw(&cache_identity, trace_len, &trace_hash, ".p2.cache", &p2_bytes);
-                cache::save_sections_raw(&cache_identity, trace_len, &trace_hash, ".scan.cache", &scan_bytes);
+                cache::save_sections_raw(
+                    &cache_identity,
+                    trace_len,
+                    &trace_hash,
+                    ".p2.cache",
+                    &p2_bytes,
+                );
+                cache::save_sections_raw(
+                    &cache_identity,
+                    trace_len,
+                    &trace_hash,
+                    ".scan.cache",
+                    &scan_bytes,
+                );
                 cache::save_sections_raw(
                     &cache_identity,
                     trace_len,
@@ -526,7 +547,13 @@ impl super::TraceEngine {
                     &lidx_bytes,
                 );
                 if let Some(ref si_b) = si_bytes {
-                    cache::save_bincode_raw(&cache_identity, trace_len, &trace_hash, ".strings", si_b);
+                    cache::save_bincode_raw(
+                        &cache_identity,
+                        trace_len,
+                        &trace_hash,
+                        ".strings",
+                        si_b,
+                    );
                 }
                 if let Some((ref anns, ref seqs)) = gum_extra {
                     cache::save_gumtrace_extra(&cache_identity, trace_len, &trace_hash, anns, seqs);

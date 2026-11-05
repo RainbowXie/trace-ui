@@ -54,7 +54,9 @@ fn inherited_fd_sessions_reuse_index_across_fd_numbers() {
             .from_cache,
         "首次构建必须真正扫描"
     );
-    engine.close_session(&first.session_id).expect("close first");
+    engine
+        .close_session(&first.session_id)
+        .expect("close first");
 
     // 每次 helper 调用拿到的 fd 号都不同；标签随之变化，缓存键只能看内容。
     let second = engine
@@ -67,7 +69,9 @@ fn inherited_fd_sessions_reuse_index_across_fd_numbers() {
             .from_cache,
         "fd 号变化不得使同一内容的索引缓存失效"
     );
-    engine.close_session(&second.session_id).expect("close second");
+    engine
+        .close_session(&second.session_id)
+        .expect("close second");
 }
 
 #[test]
@@ -88,10 +92,15 @@ fn inherited_fd_sessions_do_not_reuse_index_across_contents() {
     engine
         .build_index(&first.session_id, options(), None)
         .expect("cold build");
-    engine.close_session(&first.session_id).expect("close first");
+    engine
+        .close_session(&first.session_id)
+        .expect("close first");
 
     let other = engine
-        .create_session_from_file(File::open(&changed).expect("open changed"), "inherited-fd:7")
+        .create_session_from_file(
+            File::open(&changed).expect("open changed"),
+            "inherited-fd:7",
+        )
         .expect("other session");
     assert!(
         !engine
@@ -100,7 +109,9 @@ fn inherited_fd_sessions_do_not_reuse_index_across_contents() {
             .from_cache,
         "内容不同的 trace 不得复用同一标签下的索引"
     );
-    engine.close_session(&other.session_id).expect("close other");
+    engine
+        .close_session(&other.session_id)
+        .expect("close other");
 }
 
 /// 不访问 deps/pair_split 的 fact 查询在缓存命中时跳过 931 MiB `.scan.cache`：

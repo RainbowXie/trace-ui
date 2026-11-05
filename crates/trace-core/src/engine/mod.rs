@@ -1,12 +1,17 @@
 mod browse;
+mod build;
 mod control_flow;
 mod disk_control_flow;
-mod build;
 mod memory;
 mod query;
-pub use query::saved_events::{SavedEventObservation,SavedEventMemory,SavedEventAnchor,SavedEventTarget};
-pub(crate) use query::activation::{stable_site, stable_runtime_site};
-pub use query::function_facts::{FactSourceReference, FactActivationSelector, FunctionFactContext, write_function_fact_projection};
+pub(crate) use query::activation::{stable_runtime_site, stable_site};
+pub use query::function_facts::{
+    write_function_fact_projection, FactActivationSelector, FactSourceReference,
+    FunctionFactContext,
+};
+pub use query::saved_events::{
+    SavedEventAnchor, SavedEventMemory, SavedEventObservation, SavedEventTarget,
+};
 mod search;
 mod slice;
 
@@ -152,7 +157,11 @@ impl TraceEngine {
 
     pub fn close_session(&self, session_id: &str) -> Result<()> {
         if session_id.starts_with("disk-cfg:") {
-            let removed = self.disk_cfg_sessions.write().map_err(|e| TraceError::Internal(e.to_string()))?.remove(session_id);
+            let removed = self
+                .disk_cfg_sessions
+                .write()
+                .map_err(|e| TraceError::Internal(e.to_string()))?
+                .remove(session_id);
             if let Some(handle) = removed {
                 handle.closed.store(true, Ordering::SeqCst);
                 handle.cancel.store(true, Ordering::SeqCst);

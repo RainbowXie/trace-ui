@@ -1,4 +1,3 @@
-
 //! 模块基址流式扫描与旁路缓存的回归测试：结果必须与旧的逐行取样实现一致。
 
 use std::collections::BTreeMap;
@@ -34,15 +33,23 @@ fn error_text<T>(result: crate::error::Result<T>) -> String {
 }
 
 fn session(trace: &str, label: &str) -> (TraceEngine, String, std::path::PathBuf) {
-    let path =
-        std::env::temp_dir().join(format!("facts-modules-{label}-{}.log", uuid::Uuid::new_v4()));
+    let path = std::env::temp_dir().join(format!(
+        "facts-modules-{label}-{}.log",
+        uuid::Uuid::new_v4()
+    ));
     std::fs::write(&path, trace).unwrap();
     let engine = TraceEngine::new();
-    let sid = engine.create_session(path.to_str().unwrap()).unwrap().session_id;
+    let sid = engine
+        .create_session(path.to_str().unwrap())
+        .unwrap()
+        .session_id;
     engine
         .build_index(
             &sid,
-            BuildOptions { force_rebuild: true, skip_strings: true },
+            BuildOptions {
+                force_rebuild: true,
+                skip_strings: true,
+            },
             None,
         )
         .unwrap();
@@ -126,11 +133,7 @@ fn module_error_order_matches_full_scan_semantics() {
         collect_error,
         "invalid argument: module Amod has inconsistent runtime bases"
     );
-    let validate_error = error_text(validate_mappings(
-        &state,
-        &modules,
-        &AtomicBool::new(false),
-    ));
+    let validate_error = error_text(validate_mappings(&state, &modules, &AtomicBool::new(false)));
     assert_eq!(
         validate_error,
         "invalid argument: module Zmod has inconsistent runtime bases"
@@ -172,6 +175,32 @@ fn oversize_row_wins_over_the_base_conflict_it_also_carries() {
             "{pass}: collect 不受单行上限影响"
         );
     }
+    drop(state);
+    engine.close_session(&sid).unwrap();
+    std::fs::remove_file(path).unwrap();
+}
+
+/// 目标模块根本不在 trace 里也不能盖掉整份 trace 的单行上限：原实现对每个
+/// 模块都先逐行 `check_raw`，缺模块同样会撞上越界行。
+#[test]
+fn missing_target_module_still_reports_the_oversize_row() {
+    let _lock = crate::cache::cache_dir_override_test_lock();
+    let _iso = isolated();
+    let padding = "a".repeat(1024 * 1024);
+    let trace = format!("[App] 0x400000!0x0 nop {padding}\n");
+    let (engine, sid, path) = session(&trace, "oversize-missing");
+    let modules = vec!["MissingMod".to_owned()];
+    let handle = engine.get_handle(&sid).unwrap();
+    let state = handle.state.read().unwrap();
+    for pass in ["first scan", "cached index"] {
+        assert_eq!(
+            error_text(validate_mappings(&state, &modules, &AtomicBool::new(false))),
+            "internal error: function facts raw-line working memory resource limit exceeded",
+            "{pass}: 缺模块不得跳过单行上限判定"
+        );
+    }
+    // collect 从不借用行文本，缺模块对它只是「没有基址」。
+    assert!(StableGlobalMap::collect(&state, &modules).is_ok());
     drop(state);
     engine.close_session(&sid).unwrap();
     std::fs::remove_file(path).unwrap();

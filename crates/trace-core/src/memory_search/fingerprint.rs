@@ -14,6 +14,11 @@ use super::{
 };
 use crate::error::{Result, TraceError};
 
+/// 小文件的内容校验上限：这个尺寸以内的完整 SHA-256 与一次 fstat 同量级，
+/// 因此可以逐次用内容本身确认 fingerprint，而不只是信任时间戳签名。
+/// 超过此上限的文件只能依赖签名——正是 fingerprint 存在的理由。
+const SMALL_FINGERPRINT_VERIFY_LIMIT: usize = 64 * 1024;
+
 /// 同一 fd 的文件身份签名（dev/ino/len/mtime/ctime）。任一变化都意味着内容
 /// 可能已变，此时持久化 fingerprint 一律失效。
 ///
@@ -158,10 +163,10 @@ pub enum FingerprintSource {
     Reused,
 }
 
-/// 取得 trace 的内容指纹：`fstat` 签名与持久化 fingerprint 完全一致时直接
-/// 复用已验证的 hash，否则完整 SHA-256 一次并写回。两次 fstat 复验保证
-/// 「读到旧 fingerprint、随后文件被改写」或「计算期间文件被改写」都不会把
-/// 旧内容的身份绑定到新内容上。
+/// 取得 trace 的内容指纹：`fstat` 签名与持久化 fingerprint 一致、且（小文件）
+/// 内容也与记录相符时直接复用已验证的 hash，否则完整 SHA-256 一次并写回。
+/// 两次 fstat 复验保证「读到旧 fingerprint、随后文件被改写」或「计算期间文件
+/// 被改写」都不会把旧内容的身份绑定到新内容上。
 pub fn fd_trace_hash_verified(
     file: &File,
     data: &[u8],
@@ -174,19 +179,31 @@ pub fn fd_trace_hash_verified(
             "trace fd changed between mmap and the start of hashing".to_string(),
         ));
     }
+    // mtime/ctime 的纳秒精度在部分文件系统上只有 1-4ms 粒度：同毫秒内等长
+    // 的原地改写不会改变签名，只按签名复用会把旧内容的 hash 绑定到新内容上。
+    // 小文件因此额外用内容本身校验，命中才复用；大文件承担不起这次全量哈希，
+    // 仍按签名判定（已知边界，与 .scan.cache 旁路记录同一条取舍）。
+    let small = data.len() <= SMALL_FINGERPRINT_VERIFY_LIMIT;
+    let computed = if small {
+        Some(trace_content_hash(data))
+    } else {
+        None
+    };
     if let Some(hash) = load_fd_fingerprint(&before) {
-        // 复用前复验：读取 fingerprint 期间 fd 可能已被改写。
-        if fd_signature(file)? != before {
-            return Err(TraceError::CacheError(
-                "trace fd changed while loading its fingerprint".to_string(),
-            ));
+        if computed.is_none_or(|computed| computed == hash) {
+            // 复用前复验：读取 fingerprint 期间 fd 可能已被改写。
+            if fd_signature(file)? != before {
+                return Err(TraceError::CacheError(
+                    "trace fd changed while loading its fingerprint".to_string(),
+                ));
+            }
+            if let Some(probe) = probe {
+                probe(FingerprintSource::Reused);
+            }
+            return Ok(hash);
         }
-        if let Some(probe) = probe {
-            probe(FingerprintSource::Reused);
-        }
-        return Ok(hash);
     }
-    let hash = trace_content_hash(data);
+    let hash = computed.unwrap_or_else(|| trace_content_hash(data));
     if fd_signature(file)? != before {
         return Err(TraceError::CacheError(
             "trace fd changed while computing its content hash".to_string(),

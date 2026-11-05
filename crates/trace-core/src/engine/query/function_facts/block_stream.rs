@@ -66,32 +66,39 @@ pub(super) fn scan_owned(
     scan_owned_impl(state, tree, activation, cancel, true, visit)
 }
 
-struct RawCursor<'a> { remaining: &'a [u8] }
+struct RawCursor<'a> {
+    remaining: &'a [u8],
+}
 impl<'a> RawCursor<'a> {
     fn new(raw: &'a [u8], offset: usize) -> Result<Self> {
-        Ok(Self { remaining: raw.get(offset..).ok_or_else(|| TraceError::InvalidArgument("fact line offset outside trace".into()))? })
+        Ok(Self {
+            remaining: raw.get(offset..).ok_or_else(|| {
+                TraceError::InvalidArgument("fact line offset outside trace".into())
+            })?,
+        })
     }
     fn next(&mut self) -> Result<&'a [u8]> {
-        if self.remaining.is_empty() {return Err(TraceError::InvalidArgument("fact raw range exceeds trace".into()));}
-        let (line, consumed)=match memchr::memchr(b'\n',self.remaining) {
-            Some(end)=>(&self.remaining[..end],end+1),
-            None=>(self.remaining,self.remaining.len()),
+        if self.remaining.is_empty() {
+            return Err(TraceError::InvalidArgument(
+                "fact raw range exceeds trace".into(),
+            ));
+        }
+        let (line, consumed) = match memchr::memchr(b'\n', self.remaining) {
+            Some(end) => (&self.remaining[..end], end + 1),
+            None => (self.remaining, self.remaining.len()),
         };
-        self.remaining=&self.remaining[consumed..];
+        self.remaining = &self.remaining[consumed..];
         Ok(line.strip_suffix(b"\r").unwrap_or(line))
     }
 }
 
-/// 窗口内被严格包含的 activation 区间，按 entry_seq 升序。
+/// 窗口内第一个 call_seq 落在窗口内的 `all_by_call` 下标。
 ///
-/// `all_by_call` 已按 call_seq 严格递增：先用二分跳到 call_seq 落在窗口内的
-/// 第一个候选，再沿该窗口前缀线性推进。原实现对窗口内每一行都遍历全部
-/// activations（vbxk 样本 33,498 个节点），使窗口扫描退化为
+/// `all_by_call` 已按 call_seq 严格递增：二分跳过后再顺序推进就是
+/// entry 升序（嵌套/先后关系与 entry 同序）。原实现对窗口内每一行都遍历
+/// 全部 activations（vbxk 样本 33,498 个节点），使窗口扫描退化为
 /// O(W × |activations|)。
-fn nested_intervals(
-    tree: &ActivationTree,
-    activation: &ConfirmedActivation,
-) -> Vec<(u32, u32)> {
+fn first_call_at_or_after(tree: &ActivationTree, seq: u32) -> usize {
     let ids = &tree.all_by_call;
     let mut lo = 0usize;
     let mut hi = ids.len();
@@ -99,30 +106,13 @@ fn nested_intervals(
         let mid = lo + (hi - lo) / 2;
         // 窗口第一个指令本身可能就是子调用指令：下界是 >= entry_seq，
         // 不是 > entry_seq。
-        if tree.activations[ids[mid] as usize].call_seq < activation.entry_seq {
+        if tree.activations[ids[mid] as usize].call_seq < seq {
             lo = mid + 1;
         } else {
             hi = mid;
         }
     }
-    let mut intervals = Vec::new();
-    for &id in &ids[lo..] {
-        let other = &tree.activations[id as usize];
-        // 被严格包含的 activation 的 call 必在窗口内；再往后不可能命中。
-        if other.call_seq > activation.exit_seq {
-            break;
-        }
-        if other.id != activation.id
-            && other.entry_seq > activation.entry_seq
-            && other.exit_seq < activation.exit_seq
-            && other.exit_seq >= other.entry_seq
-        {
-            intervals.push((other.entry_seq, other.exit_seq));
-        }
-    }
-    // activation 区间是 laminar 的，按 entry 排序后就是嵌套开括号顺序。
-    intervals.sort_unstable();
-    intervals
+    lo
 }
 
 fn scan_owned_impl(
@@ -134,32 +124,42 @@ fn scan_owned_impl(
     mut visit: impl FnMut(BorrowedOwnedInsn<'_>) -> Result<bool>,
 ) -> Result<()> {
     let index = state.line_index_view().ok_or(TraceError::IndexNotReady)?;
-    let offset=index.line_byte_offset(&state.mmap,activation.entry_seq)
-        .and_then(|n|usize::try_from(n).ok())
-        .ok_or_else(||TraceError::InvalidArgument("fact entry missing".into()))?;
-    let mut cursor=RawCursor::new(&state.mmap,offset)?;
-    let nested = nested_intervals(tree, activation);
-    // 开括号栈：栈内是已开始且尚未结束的严格包含区间（只保留 exit）。
-    let mut open: Vec<u32> = Vec::new();
-    let mut next_nested = 0usize;
+    let offset = index
+        .line_byte_offset(&state.mmap, activation.entry_seq)
+        .and_then(|n| usize::try_from(n).ok())
+        .ok_or_else(|| TraceError::InvalidArgument("fact entry missing".into()))?;
+    let mut cursor = RawCursor::new(&state.mmap, offset)?;
+    // 严格包含区间直接从 all_by_call 的窗口前缀推进，不再为每次调用分配
+    // 区间表：区间是 laminar 的，内层 exit 一定小于外层，所以「所有已开始
+    // 且尚未结束的区间」等价于一个最大的 exit 标量（开括号栈的退化形式），
+    // 同理也不再分配 open 栈。
+    let ids = &tree.all_by_call;
+    let mut next_nested = first_call_at_or_after(tree, activation.entry_seq);
+    let mut skip_until_exit: Option<u32> = None;
     for seq in activation.entry_seq..=activation.exit_seq {
         check_cancel(cancel)?;
         // Advance before ownership filtering: skipped children and special rows
         // still occupy raw seqs. Repeated scans must not redo sampled lookups.
-        let raw=cursor.next()?;
-        // Same strict-contained interval rule as owned_instructions, including
-        // unresolved nested activations, now driven by the call-sequence index.
-        while open.last().is_some_and(|&exit| exit < seq) {
-            open.pop();
-        }
-        while next_nested < nested.len() && nested[next_nested].0 <= seq {
-            let (_, exit) = nested[next_nested];
+        let raw = cursor.next()?;
+        while let Some(&id) = ids.get(next_nested) {
+            let other = &tree.activations[id as usize];
+            // 被严格包含的 activation 的 call 必在窗口内；再往后不可能命中。
+            if other.call_seq > activation.exit_seq || other.entry_seq > seq {
+                break;
+            }
             next_nested += 1;
-            if exit >= seq {
-                open.push(exit);
+            // Same strict-contained interval rule as owned_instructions, including
+            // unresolved nested activations, now driven by the call-sequence index.
+            if other.id != activation.id
+                && other.entry_seq > activation.entry_seq
+                && other.exit_seq < activation.exit_seq
+                && other.exit_seq >= seq
+            {
+                skip_until_exit =
+                    Some(skip_until_exit.map_or(other.exit_seq, |exit| exit.max(other.exit_seq)));
             }
         }
-        if !open.is_empty() {
+        if skip_until_exit.is_some_and(|exit| exit >= seq) {
             continue;
         }
         if resource_bound {
@@ -220,9 +220,7 @@ fn stream_blocks_impl(
     let mut first = true;
     let mut previous_transfer = false;
     scan_owned_impl(state, tree, activation, cancel, resource_bound, |insn| {
-        let starts = first
-            || previous_transfer
-            || observed.binary_search(&insn.site).is_ok();
+        let starts = first || previous_transfer || observed.binary_search(&insn.site).is_ok();
         if starts {
             check_cancel(cancel)?;
             sink(&insn.site, insn.seq)?;
@@ -238,17 +236,18 @@ fn stream_blocks_impl(
 mod resource_tests {
     #[test]
     fn raw_cursor_advances_every_row_including_skipped_and_final_rows() {
-        let raw="entry\r\nchild\n\r\nμ special\nresume".as_bytes();
-        let mut cursor=super::RawCursor::new(raw,0).unwrap();
-        assert_eq!(cursor.next().unwrap(),b"entry");
-        assert_eq!(cursor.next().unwrap(),b"child");
-        assert_eq!(cursor.next().unwrap(),b"");
-        assert_eq!(cursor.next().unwrap(),"μ special".as_bytes());
-        assert_eq!(cursor.next().unwrap(),b"resume");
+        let raw = "entry\r\nchild\n\r\nμ special\nresume".as_bytes();
+        let mut cursor = super::RawCursor::new(raw, 0).unwrap();
+        assert_eq!(cursor.next().unwrap(), b"entry");
+        assert_eq!(cursor.next().unwrap(), b"child");
+        assert_eq!(cursor.next().unwrap(), b"");
+        assert_eq!(cursor.next().unwrap(), "μ special".as_bytes());
+        assert_eq!(cursor.next().unwrap(), b"resume");
         assert!(cursor.next().is_err());
-        assert!(super::RawCursor::new(raw,raw.len()+1).is_err());
-        let mut terminated=super::RawCursor::new(b"a\n",0).unwrap();
-        assert_eq!(terminated.next().unwrap(),b"a");assert!(terminated.next().is_err());
+        assert!(super::RawCursor::new(raw, raw.len() + 1).is_err());
+        let mut terminated = super::RawCursor::new(b"a\n", 0).unwrap();
+        assert_eq!(terminated.next().unwrap(), b"a");
+        assert!(terminated.next().is_err());
     }
     #[test]
     fn raw_resource_boundary_checks_borrowed_bytes() {

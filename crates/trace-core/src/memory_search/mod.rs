@@ -22,6 +22,8 @@ mod scan;
 mod cache_publish_tests;
 #[cfg(test)]
 mod cache_tests;
+#[cfg(all(test, unix))]
+mod fingerprint_tests;
 #[cfg(test)]
 mod tests;
 
@@ -32,8 +34,8 @@ pub use fingerprint::{
     fd_signature, fd_trace_hash_verified, search_memory_fd_verified,
     search_memory_fd_verified_with_signature, FdSignature, FingerprintSource,
 };
-pub use scan::search_memory;
 pub(crate) use scan::expand_mem_op;
+pub use scan::search_memory;
 
 pub(crate) const MAX_PAGE_SIZE: u32 = 200;
 const MAX_PATTERN_SIZE: usize = 64 * 1024 * 1024;

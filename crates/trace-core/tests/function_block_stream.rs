@@ -23,7 +23,9 @@ struct Fixture {
     path: std::path::PathBuf,
 }
 impl Fixture {
-    fn new() -> Self { Self::with_trace(TRACE) }
+    fn new() -> Self {
+        Self::with_trace(TRACE)
+    }
     fn with_trace(trace: &str) -> Self {
         let path =
             std::env::temp_dir().join(format!("trace-block-stream-{}.log", uuid::Uuid::new_v4()));
@@ -97,10 +99,33 @@ fn late_target_and_nested_owner_match_existing_facts() {
 
 #[test]
 fn raw_cursor_preserves_nested_and_blank_crlf_seq_numbers_without_final_lf() {
-    let text=TRACE.replace("\n","\r\n").replace("[App] 0x304!", "\r\n[App] 0x304!");
-    let f=Fixture::with_trace(text.trim_end_matches(['\r','\n']));let mut blocks=Vec::new();
-    f.engine.visit_function_executed_blocks(&f.sid,0,1,"App+0x200",&AtomicBool::new(false),|site,seq|{blocks.push((site.to_owned(),seq));Ok(())}).unwrap();
-    assert_eq!(blocks,vec![("App+0x200".into(),1),("App+0x204".into(),2),("App+0x20c".into(),7),("App+0x204".into(),8)]);
+    let text = TRACE
+        .replace("\n", "\r\n")
+        .replace("[App] 0x304!", "\r\n[App] 0x304!");
+    let f = Fixture::with_trace(text.trim_end_matches(['\r', '\n']));
+    let mut blocks = Vec::new();
+    f.engine
+        .visit_function_executed_blocks(
+            &f.sid,
+            0,
+            1,
+            "App+0x200",
+            &AtomicBool::new(false),
+            |site, seq| {
+                blocks.push((site.to_owned(), seq));
+                Ok(())
+            },
+        )
+        .unwrap();
+    assert_eq!(
+        blocks,
+        vec![
+            ("App+0x200".into(), 1),
+            ("App+0x204".into(), 2),
+            ("App+0x20c".into(), 7),
+            ("App+0x204".into(), 8)
+        ]
+    );
 }
 #[test]
 fn rejecting_sink_and_cancellation_stop_without_success() {
@@ -183,5 +208,8 @@ fn nested_call_on_the_entry_instruction_stays_excluded() {
             },
         )
         .unwrap();
-    assert_eq!(blocks, vec![("App+0x200".into(), 1), ("App+0x204".into(), 4)]);
+    assert_eq!(
+        blocks,
+        vec![("App+0x200".into(), 1), ("App+0x204".into(), 4)]
+    );
 }

@@ -4,42 +4,45 @@
 //! 指令集合与两阶段块切分）、`abi`（栈参数三门）、`dataflow`（producer→
 //! consumer 读写）、`events`（External Call Event）。
 
-pub(crate) mod immediate;
 mod block_stream;
-mod budget;
-mod stack_stream;
-mod fact_work;
-mod memory_stream;
-mod collector;
 pub(crate) mod bounded;
-mod global_stream;
-mod global_closure;
-mod read_stream;
-mod event_stream;
-mod replay;
-#[cfg(test)]
-mod budget_tests;
 #[cfg(test)]
 mod bounded_tests;
+mod budget;
+#[cfg(test)]
+mod budget_tests;
+mod collector;
+mod event_stream;
+mod fact_work;
+mod global_closure;
 #[cfg(test)]
 mod global_map_tests;
+mod global_stream;
+pub(crate) mod immediate;
+mod memory_stream;
+mod read_stream;
+mod replay;
+mod stack_stream;
 pub(crate) use budget::FACT_BUNDLE_LIMIT;
-pub use budget::{FactSourceReference, FactActivationSelector, FunctionFactContext, write_function_fact_projection};
-mod target_write_history;
+pub use budget::{
+    write_function_fact_projection, FactActivationSelector, FactSourceReference,
+    FunctionFactContext,
+};
 mod abi;
 mod address_provenance;
-mod frame_demand;
-mod private_frame_operands;
-mod output_slots;
-mod store_flow;
-mod caller_return;
 pub(crate) mod blocks;
 mod byte_effect;
+mod caller_return;
 pub(crate) mod dataflow;
 pub(crate) mod events;
+mod frame_demand;
 pub(crate) mod global_map;
 pub(crate) mod globals;
 pub(crate) mod lines;
+mod output_slots;
+mod private_frame_operands;
+mod store_flow;
+mod target_write_history;
 
 use std::collections::BTreeMap;
 
@@ -153,8 +156,15 @@ impl crate::engine::TraceEngine {
         let blocks = split_executed_blocks(&owned);
         for insn in &owned {
             if immediate::candidate(&insn.line)
-                && immediate_gap(tree, activation, &blocks, relevant.as_ref(),
-                    state.pair_split_view().is_some(), insn.seq, &insn.line)
+                && immediate_gap(
+                    tree,
+                    activation,
+                    &blocks,
+                    relevant.as_ref(),
+                    state.pair_split_view().is_some(),
+                    insn.seq,
+                    &insn.line,
+                )
             {
                 access_unresolved.push(crate::api_types::FunctionFactUnresolvedDto {
                     kind: "unsupported_instruction".to_owned(),
@@ -228,8 +238,14 @@ fn immediate_gap(
     seq: u32,
     line: &str,
 ) -> bool {
-    let Some(relevant) = relevant.filter(|_| pair_ready) else { return true; };
-    if relevant.values.binary_search_by_key(&seq, |d| d.seq).is_err() {
+    let Some(relevant) = relevant.filter(|_| pair_ready) else {
+        return true;
+    };
+    if relevant
+        .values
+        .binary_search_by_key(&seq, |d| d.seq)
+        .is_err()
+    {
         return false;
     }
     immediate::decode(line).is_none()

@@ -95,9 +95,9 @@ impl BoundedFactRequest {
             if bytes.is_empty()
                 || bytes.len() > 128
                 || !bytes[0].is_ascii_alphanumeric()
-                || !bytes[1..].iter().all(|b| {
-                    b.is_ascii_alphanumeric() || matches!(b, b'.' | b'_' | b'-')
-                })
+                || !bytes[1..]
+                    .iter()
+                    .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'.' | b'_' | b'-'))
                 || self.target_modules[..index].contains(module)
             {
                 anyhow::bail!("invalid or duplicate target_modules");
@@ -250,9 +250,9 @@ pub(crate) fn run() -> anyhow::Result<()> {
         _ => None,
     };
     let output_request = match control.get("kind") {
-        Some(serde_json::Value::String(kind)) if kind == "output_slot_uses" => Some(
-            serde_json::from_slice::<OutputSlotRequest>(&request_bytes)?,
-        ),
+        Some(serde_json::Value::String(kind)) if kind == "output_slot_uses" => {
+            Some(serde_json::from_slice::<OutputSlotRequest>(&request_bytes)?)
+        }
         _ => None,
     };
     let return_request = match control.get("kind") {
@@ -272,10 +272,26 @@ pub(crate) fn run() -> anyhow::Result<()> {
         Some(serde_json::Value::String(kind)) if kind == "runtime_mapping" => Some(
             serde_json::from_slice::<RuntimeMappingRequest>(&request_bytes)?,
         ),
-        Some(serde_json::Value::String(kind)) if kind == "address_provenance" || kind == "caller_return_uses" || kind == "output_slot_uses" || kind == "private_frame_operands" || kind == "target_write_history" || kind == "function_facts_bounded" => None,
+        Some(serde_json::Value::String(kind))
+            if kind == "address_provenance"
+                || kind == "caller_return_uses"
+                || kind == "output_slot_uses"
+                || kind == "private_frame_operands"
+                || kind == "target_write_history"
+                || kind == "function_facts_bounded" =>
+        {
+            None
+        }
         Some(_) => anyhow::bail!("unknown fact helper request kind"),
     };
-    let fact_request = if bounded_request.is_none() && mapping_request.is_none() && address_request.is_none() && return_request.is_none() && output_request.is_none() && private_request.is_none() && history_request.is_none() {
+    let fact_request = if bounded_request.is_none()
+        && mapping_request.is_none()
+        && address_request.is_none()
+        && return_request.is_none()
+        && output_request.is_none()
+        && private_request.is_none()
+        && history_request.is_none()
+    {
         Some(serde_json::from_slice::<FactHelperRequest>(&request_bytes)?)
     } else {
         None
@@ -328,27 +344,46 @@ pub(crate) fn run() -> anyhow::Result<()> {
     if let Some(request) = history_request {
         let TargetHistoryKind::TargetWriteHistory = request.kind;
         return write_response(&engine.get_target_write_history_with_saved_events(
-            &sid, request.call_seq, request.entry_seq, &request.function,
-            &request.target_modules, &request.selected, request.capture_seq, &request.saved_event_observations,
+            &sid,
+            request.call_seq,
+            request.entry_seq,
+            &request.function,
+            &request.target_modules,
+            &request.selected,
+            request.capture_seq,
+            &request.saved_event_observations,
         )?);
     }
     if let Some(request) = private_request {
         let PrivateFrameKind::PrivateFrameOperands = request.kind;
         return write_response(&engine.get_private_frame_operands(
-            &sid, request.call_seq, request.entry_seq, &request.function, &request.target_modules,
+            &sid,
+            request.call_seq,
+            request.entry_seq,
+            &request.function,
+            &request.target_modules,
         )?);
     }
     if let Some(request) = output_request {
         let OutputSlotKind::OutputSlotUses = request.kind;
         return write_response(&engine.get_output_slot_uses_with_saved_events(
-            &sid, request.call_seq, request.entry_seq, &request.function,
-            &request.target_modules, &request.slot_ranges, &request.saved_event_observations,
+            &sid,
+            request.call_seq,
+            request.entry_seq,
+            &request.function,
+            &request.target_modules,
+            &request.slot_ranges,
+            &request.saved_event_observations,
         )?);
     }
     if let Some(request) = return_request {
         let CallerReturnKind::CallerReturnUses = request.kind;
         return write_response(&engine.get_caller_return_uses(
-            &sid, request.call_seq, request.entry_seq, &request.function, &request.target_modules,
+            &sid,
+            request.call_seq,
+            request.entry_seq,
+            &request.function,
+            &request.target_modules,
         )?);
     }
     if let Some(request) = address_request {

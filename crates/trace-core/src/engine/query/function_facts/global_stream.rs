@@ -81,11 +81,12 @@ pub(super) fn identity(
     }
     let mut tracked = register;
     let mut before = access;
-    let mut selected_steps=[0u32;128];let mut selected_count=0;
+    let mut selected_steps = [0u32; 128];
+    let mut selected_count = 0;
     let (adrp_seq, current, mut value, module, runtime, offset) = loop {
         let mut definition = None;
         let mut invalid = false;
-        super::global_closure::scan(state, tree, root, cancel, |seq,line| {
+        super::global_closure::scan(state, tree, root, cancel, |seq, line| {
             if seq >= before {
                 return Ok(false);
             }
@@ -93,10 +94,26 @@ pub(super) fn identity(
                 invalid = true;
                 return Ok(true);
             };
-            if super::super::saved_events::opaque_boundary(state,tree,seq,line){definition=None;invalid=true;}
-            let parsed=if line.contains("!0x"){trace_parser::gumtrace::parse_line_gumtrace_full(line)}else{trace_parser::parser::parse_line_full(line)};
-            let alias_def=parsed.as_ref().is_some_and(|p|trace_parser::def_use::determine_def_use(trace_parser::insn_class::classify_and_refine(p),p).0.contains(&trace_parser::types::parse_reg(tracked).unwrap()));
-            if alias_def || (op.split(',').next().map(str::trim) == Some(tracked) && writes_first(m)) {
+            if super::super::saved_events::opaque_boundary(state, tree, seq, line) {
+                definition = None;
+                invalid = true;
+            }
+            let parsed = if line.contains("!0x") {
+                trace_parser::gumtrace::parse_line_gumtrace_full(line)
+            } else {
+                trace_parser::parser::parse_line_full(line)
+            };
+            let alias_def = parsed.as_ref().is_some_and(|p| {
+                trace_parser::def_use::determine_def_use(
+                    trace_parser::insn_class::classify_and_refine(p),
+                    p,
+                )
+                .0
+                .contains(&trace_parser::types::parse_reg(tracked).unwrap())
+            });
+            if alias_def
+                || (op.split(',').next().map(str::trim) == Some(tracked) && writes_first(m))
+            {
                 definition = Some(seq);
                 invalid = false;
             }
@@ -137,8 +154,11 @@ pub(super) fn identity(
             let Some(source) = second.filter(|s| canonical_register(s)) else {
                 return Ok(None);
             };
-            if selected_count==selected_steps.len(){return Err(TraceError::Internal("global address chain capacity".into()));}
-            selected_steps[selected_count]=seq;selected_count+=1;
+            if selected_count == selected_steps.len() {
+                return Err(TraceError::Internal("global address chain capacity".into()));
+            }
+            selected_steps[selected_count] = seq;
+            selected_count += 1;
             tracked = source;
             before = seq;
         } else {
@@ -155,7 +175,7 @@ pub(super) fn identity(
     let mut current_len = current.len();
     current_storage[..current_len].copy_from_slice(current.as_bytes());
     let mut valid = true;
-    super::global_closure::scan(state, tree, root, cancel, |seq,line| {
+    super::global_closure::scan(state, tree, root, cancel, |seq, line| {
         if seq <= adrp_seq {
             return Ok(true);
         }
@@ -166,13 +186,24 @@ pub(super) fn identity(
             valid = false;
             return Ok(false);
         };
-        if super::super::saved_events::opaque_boundary(state,tree,seq,line){valid=false;return Ok(false);}
+        if super::super::saved_events::opaque_boundary(state, tree, seq, line) {
+            valid = false;
+            return Ok(false);
+        }
         let mut parts = op.split(',').map(str::trim);
         let (first, second, third, extra) =
             (parts.next(), parts.next(), parts.next(), parts.next());
         let current = std::str::from_utf8(&current_storage[..current_len]).expect("register");
-        if m=="ret" && current=="x0" && trace_parser::strict_memory::observed_register_value(line,"x0",false)!=Some(value) {valid=false;return Ok(false);}
-        if selected_steps[..selected_count].contains(&seq) && matches!(m, "add" | "sub")
+        if m == "ret"
+            && current == "x0"
+            && trace_parser::strict_memory::observed_register_value(line, "x0", false)
+                != Some(value)
+        {
+            valid = false;
+            return Ok(false);
+        }
+        if selected_steps[..selected_count].contains(&seq)
+            && matches!(m, "add" | "sub")
             && extra.is_none()
             && second == Some(current)
             && third.and_then(immediate).is_some()
@@ -191,15 +222,21 @@ pub(super) fn identity(
                 valid = false;
                 return Ok(false);
             };
-            if trace_parser::strict_memory::observed_register_value(line,current,false)!=Some(value)
-                || lines::arrow_register_value(line, dest) != Some(next) {
+            if trace_parser::strict_memory::observed_register_value(line, current, false)
+                != Some(value)
+                || lines::arrow_register_value(line, dest) != Some(next)
+            {
                 valid = false;
                 return Ok(false);
             }
             value = next;
             current_len = dest.len();
             current_storage[..current_len].copy_from_slice(dest.as_bytes());
-        } else if (first == Some(current) && writes_first(m)) || first.and_then(trace_parser::strict_memory::integer_register)==trace_parser::strict_memory::integer_register(current) && writes_first(m) {
+        } else if (first == Some(current) && writes_first(m))
+            || first.and_then(trace_parser::strict_memory::integer_register)
+                == trace_parser::strict_memory::integer_register(current)
+                && writes_first(m)
+        {
             valid = false;
             return Ok(false);
         }
